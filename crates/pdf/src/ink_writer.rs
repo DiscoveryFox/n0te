@@ -748,7 +748,7 @@ mod tests {
     }
 
     fn dot(x: f32, y: f32, color: u32) -> (Vec<InkPoint>, Brush) {
-        (vec![InkPoint { x, y, pressure: 0.5, t_ms: 0 }], Brush { width: 4.0, thinning: 0.0, color })
+        (vec![InkPoint { x, y, pressure: 0.5, t_ms: 0 }], Brush { width: 4.0, thinning: 0.0, color, kind: 0 })
     }
 
     #[test]

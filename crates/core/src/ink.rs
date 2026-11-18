@@ -25,11 +25,17 @@ pub struct Brush {
     pub thinning: f32,
     /// 0xAARRGGBB.
     pub color: u32,
+    /// How it is drawn: [`KIND_PEN`], [`KIND_PENCIL`] (grain texture), [`KIND_MARKER`].
+    pub kind: u8,
 }
+
+pub const KIND_PEN: u8 = 0;
+pub const KIND_PENCIL: u8 = 1;
+pub const KIND_MARKER: u8 = 2;
 
 impl Default for Brush {
     fn default() -> Self {
-        Brush { width: 2.0, thinning: 0.6, color: 0xFF111111 }
+        Brush { width: 2.0, thinning: 0.6, color: 0xFF111111, kind: 0 }
     }
 }
 

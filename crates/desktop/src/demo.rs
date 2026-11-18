@@ -108,7 +108,7 @@ pub struct Stroke {
 }
 
 fn pen(color: u32, width: f32) -> Brush {
-    Brush { width, thinning: 0.55, color }
+    Brush { width, thinning: 0.55, color, kind: 0 }
 }
 
 /// Fake handwriting for one page: a headline, then lines of words, sometimes a diagram.

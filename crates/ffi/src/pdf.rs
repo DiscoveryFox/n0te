@@ -323,7 +323,7 @@ mod tests {
         // Ink on slide 2 that is not saved yet: the export still has it.
         let sheet = nb.clone().open_sheet(sheets[1].sheet_id.clone()).unwrap();
         let samples: Vec<f32> = (0..=40).flat_map(|i| [100.0 + i as f32 * 7.5, 300.0, 0.5, i as f32 * 8.0]).collect();
-        sheet.add_stroke(FfiBrush { width: 6.0, thinning: 0.0, color: 0xFFD7_1921 }, pack(&samples)).unwrap();
+        sheet.add_stroke(FfiBrush { width: 6.0, thinning: 0.0, color: 0xFFD7_1921, kind: 0 }, pack(&samples)).unwrap();
         let out = nb.export_pdf(pdf.clone(), Some(vec![sheets[1].sheet_id.clone()])).unwrap();
         let doc = PdfEngine::load(pdfium()).unwrap().open(out).unwrap();
         assert_eq!(doc.page_count(), 1);

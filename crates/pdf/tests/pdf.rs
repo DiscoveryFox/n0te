@@ -62,7 +62,7 @@ fn line(x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<InkPoint> {
 }
 
 fn brush(color: u32) -> Brush {
-    Brush { width: 6.0, thinning: 0.0, color }
+    Brush { width: 6.0, thinning: 0.0, color, kind: 0 }
 }
 
 /// Number of path objects on each page.
@@ -368,7 +368,7 @@ fn own_writer_renders_like_the_pdfium_objects_path() {
     let lines: Vec<Vec<InkPoint>> = (0..12).map(|i| line(30.0 + i as f32 * 20.0, 40.0, 60.0 + i as f32 * 25.0, 400.0 - i as f32 * 7.0)).collect();
     let colors = [0xFF11_1111, 0xFF1E_5AC8, 0x80FF_EB3B, 0x40D0_2020];
     let strokes: Vec<Stroke> =
-        lines.iter().enumerate().map(|(i, l)| Stroke { points: l, brush: Brush { width: 3.0 + i as f32, thinning: 0.6, color: colors[i % 4] } }).collect();
+        lines.iter().enumerate().map(|(i, l)| Stroke { points: l, brush: Brush { width: 3.0 + i as f32, thinning: 0.6, color: colors[i % 4], kind: 0 } }).collect();
     let mut pages = vec![ExportPage { source: PageSource::Pdf { doc: &text, page: 0 }, strokes: &strokes }];
     pages.extend(docs.iter().map(|d| ExportPage { source: PageSource::Pdf { doc: d, page: 0 }, strokes: &strokes }));
     pages.push(ExportPage { source: PageSource::Blank { width: 400.0, height: 500.0 }, strokes: &strokes });

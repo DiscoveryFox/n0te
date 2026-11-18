@@ -136,7 +136,7 @@ mod tests {
 
     fn stroke(x: f32, y: f32) -> sheet::Stroke {
         let points = vec![InkPoint { x, y, pressure: 0.5, t_ms: 0 }, InkPoint { x: x + 10.0, y, pressure: 0.5, t_ms: 8 }];
-        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
         sheet::Stroke { id: String::new(), bounds: ink::bounds(&points, &brush), brush, points }
     }
 

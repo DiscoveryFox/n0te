@@ -331,7 +331,7 @@ fn handwriting(size: PageSize, seed: u64, count: usize, samples: usize) -> Vec<(
                 .collect();
             let color = colors[i % colors.len()];
             let width = if color >> 24 == 0x80 { 12.0 } else { 1.8 };
-            (pts, Brush { width, thinning: 0.6, color })
+            (pts, Brush { width, thinning: 0.6, color, kind: 0 })
         })
         .collect()
 }

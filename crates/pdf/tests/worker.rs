@@ -171,7 +171,7 @@ fn export_through_the_worker() {
     let e = engine();
     let (w, _rx, _) = worker(e, vec![make_pdf(&e, 3)], 4);
     let line: Vec<InkPoint> = (0..=40).map(|i| InkPoint { x: 100.0 + i as f32 * 7.5, y: 300.0, pressure: 0.5, t_ms: i * 8 }).collect();
-    let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000 };
+    let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000, kind: 0 };
     let sheets = vec![
         ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)], paper: None },
         ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)], paper: None },
@@ -230,7 +230,7 @@ fn notebook_import_and_export_round_trip() {
     // Ink on the second slide (stored), then export everything.
     let sheet = lib.load_sheet(&nb.id(), &imported[1].sheet_id).unwrap();
     let line: Vec<InkPoint> = (0..=40).map(|i| InkPoint { x: 100.0 + i as f32 * 7.5, y: 300.0, pressure: 0.5, t_ms: i * 8 }).collect();
-    sheet.add_stroke(Brush { width: 6.0, thinning: 0.0, color: 0xFFD7_1921 }, &line).unwrap();
+    sheet.add_stroke(Brush { width: 6.0, thinning: 0.0, color: 0xFFD7_1921, kind: 0 }, &line).unwrap();
     lib.save_sheet(&nb.id(), &imported[1].sheet_id, &sheet).unwrap();
     let pages = export_sheets(&nb, None, |id| Ok(lib.load_sheet(&nb.id(), id)?.strokes())).unwrap();
     let out = e.open(w.export(priority::INTERACTIVE, &pages).unwrap()).unwrap();

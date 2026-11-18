@@ -234,19 +234,25 @@ fn point_in_polygon(x: f32, y: f32, poly: &[f32]) -> bool {
     inside
 }
 
-// Stroke record: [STROKE_V1][width f32][thinning f32][color u32][x0 y0 x1 y1 f32][points…]
+// Stroke record v1: [1][width f32][thinning f32][color u32][x0 y0 x1 y1 f32][points…]
+// Stroke record v2: [2][same as v1 up to the bounds][kind u8][points…] (only when kind != pen,
+// so plain strokes stay readable by older apps).
 const HEADER: usize = 1 + 4 + 4 + 4 + 16;
+const STROKE_V2: u8 = 2;
 
 fn encode_stroke(brush: &Brush, points: &[InkPoint]) -> Vec<u8> {
     let bb = ink::bounds(points, brush);
     let pts = ink::encode_points(points);
-    let mut out = Vec::with_capacity(HEADER + pts.len());
-    out.push(STROKE_V1);
+    let mut out = Vec::with_capacity(HEADER + 1 + pts.len());
+    out.push(if brush.kind == ink::KIND_PEN { STROKE_V1 } else { STROKE_V2 });
     out.extend_from_slice(&brush.width.to_le_bytes());
     out.extend_from_slice(&brush.thinning.to_le_bytes());
     out.extend_from_slice(&brush.color.to_le_bytes());
     for v in [bb.x0, bb.y0, bb.x1, bb.y1] {
         out.extend_from_slice(&v.to_le_bytes());
+    }
+    if brush.kind != ink::KIND_PEN {
+        out.push(brush.kind);
     }
     out.extend_from_slice(&pts);
     out
@@ -256,16 +262,21 @@ fn f32_at(b: &[u8], i: usize) -> f32 {
     f32::from_le_bytes(b[i..i + 4].try_into().expect("4 bytes"))
 }
 
+fn known(b: &[u8]) -> bool {
+    (b.len() >= HEADER && b[0] == STROKE_V1) || (b.len() > HEADER && b[0] == STROKE_V2)
+}
+
 fn stroke_bounds(b: &[u8]) -> Option<Rect> {
-    (b.len() >= HEADER && b[0] == STROKE_V1).then(|| Rect { x0: f32_at(b, 13), y0: f32_at(b, 17), x1: f32_at(b, 21), y1: f32_at(b, 25) })
+    known(b).then(|| Rect { x0: f32_at(b, 13), y0: f32_at(b, 17), x1: f32_at(b, 21), y1: f32_at(b, 25) })
 }
 
 fn decode_stroke(id: &str, b: &[u8]) -> Result<Stroke> {
-    if b.len() < HEADER || b[0] != STROKE_V1 {
+    if !known(b) {
         return Err(Error::Format("unknown stroke record".into()));
     }
-    let brush = Brush { width: f32_at(b, 1), thinning: f32_at(b, 5), color: u32::from_le_bytes(b[9..13].try_into().expect("4 bytes")) };
-    Ok(Stroke { id: id.to_string(), brush, bounds: stroke_bounds(b).expect("checked"), points: ink::decode_points(&b[HEADER..])? })
+    let (kind, at) = if b[0] == STROKE_V2 { (b[HEADER], HEADER + 1) } else { (ink::KIND_PEN, HEADER) };
+    let brush = Brush { width: f32_at(b, 1), thinning: f32_at(b, 5), color: u32::from_le_bytes(b[9..13].try_into().expect("4 bytes")), kind };
+    Ok(Stroke { id: id.to_string(), brush, bounds: stroke_bounds(b).expect("checked"), points: ink::decode_points(&b[at..])? })
 }
 
 #[cfg(test)]
@@ -316,6 +327,16 @@ mod tests {
         assert!(s.undo().unwrap()); // undo adding b
         assert!(s.stroke(&b).unwrap().is_none());
         assert!(s.can_redo());
+    }
+
+    #[test]
+    fn pencil_kind_round_trips_and_pen_stays_v1() {
+        let s = Sheet::create(3).unwrap();
+        let pen = s.add_stroke(Brush::default(), &pts(0.0, 5)).unwrap();
+        let pencil = s.add_stroke(Brush { kind: ink::KIND_PENCIL, ..Brush::default() }, &pts(50.0, 5)).unwrap();
+        assert_eq!(s.stroke(&pen).unwrap().unwrap().brush.kind, ink::KIND_PEN);
+        assert_eq!(s.stroke(&pencil).unwrap().unwrap().brush.kind, ink::KIND_PENCIL);
+        assert_eq!(encode_stroke(&Brush::default(), &pts(0.0, 3))[0], STROKE_V1, "plain strokes keep the old format");
     }
 
     #[test]

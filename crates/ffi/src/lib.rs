@@ -43,16 +43,18 @@ pub struct FfiBrush {
     pub thinning: f32,
     /// 0xAARRGGBB
     pub color: u32,
+    /// 0 pen, 1 pencil (grain texture), 2 marker.
+    pub kind: u8,
 }
 
 impl From<FfiBrush> for Brush {
     fn from(b: FfiBrush) -> Self {
-        Brush { width: b.width, thinning: b.thinning, color: b.color }
+        Brush { width: b.width, thinning: b.thinning, color: b.color, kind: b.kind }
     }
 }
 impl From<Brush> for FfiBrush {
     fn from(b: Brush) -> Self {
-        FfiBrush { width: b.width, thinning: b.thinning, color: b.color }
+        FfiBrush { width: b.width, thinning: b.thinning, color: b.color, kind: b.kind }
     }
 }
 
@@ -357,7 +359,7 @@ pub fn run_core_bench(root: String) -> R<BenchResult> {
     lines.push(format!("open notebook + outline ({} rows): {:?}", rows.len(), t.elapsed()));
 
     let sheet = nb2.clone().open_sheet(first_sheet.clone())?;
-    let brush = FfiBrush { width: 2.0, thinning: 0.6, color: 0xFF111111 };
+    let brush = FfiBrush { width: 2.0, thinning: 0.6, color: 0xFF111111, kind: 0 };
     let t = Instant::now();
     let mut seed = 7u64;
     for s in 0..400u32 {

@@ -74,7 +74,7 @@ mod tests {
         let ids = nb.add_sheet(None, 0, spec).unwrap();
         let sheet: Arc<SheetHandle> = nb.clone().open_sheet(ids[1].clone()).unwrap();
         let pack = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
-        let s = sheet.add_stroke(FfiBrush { width: 2.0, thinning: 0.5, color: 0xFF000000 }, pack(&[10.0, 10.0, 0.5, 0.0, 20.0, 10.0, 0.5, 5.0])).unwrap();
+        let s = sheet.add_stroke(FfiBrush { width: 2.0, thinning: 0.5, color: 0xFF000000, kind: 0 }, pack(&[10.0, 10.0, 0.5, 0.0, 20.0, 10.0, 0.5, 5.0])).unwrap();
         assert_eq!(sheet.hit_test(15.0, 10.0, 2.0), vec![s.id.clone()]);
         assert_eq!(sheet.lasso(pack(&[0.0, 0.0, 30.0, 0.0, 30.0, 30.0, 0.0, 30.0])), vec![s.id.clone()]);
         assert!(sheet.undo().unwrap());
@@ -84,6 +84,25 @@ mod tests {
         nb.set_title("Analysis".into()).unwrap();
         assert_eq!(nb.title(), "Analysis");
         assert_eq!(nb.sheet_order(), vec![ids[1].clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod kind_tests {
+    use crate::{FfiBrush, FfiBackground, FfiSheetSpec, NoteLibrary};
+
+    #[test]
+    fn pencil_kind_survives_the_ffi() {
+        let dir = std::env::temp_dir().join(format!("n0te-ffi-kind-{}", n0te_core::ids::new_id(6)));
+        let lib = NoteLibrary::open(dir.to_string_lossy().into_owned()).unwrap();
+        let nb = lib.create_notebook("k".into()).unwrap();
+        let ids = nb.add_sheet(None, 0, FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0 }).unwrap();
+        let sheet = nb.open_sheet(ids[1].clone()).unwrap();
+        let pack = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+        let s = sheet.add_stroke(FfiBrush { width: 2.0, thinning: 0.3, color: 0xC8333333, kind: 1 }, pack(&[1.0, 1.0, 0.5, 0.0, 9.0, 9.0, 0.5, 4.0])).unwrap();
+        assert_eq!(s.brush.kind, 1);
+        assert_eq!(sheet.all_strokes()[0].brush.kind, 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
