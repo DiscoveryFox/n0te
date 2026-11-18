@@ -73,6 +73,14 @@ use crate::{Error, Result};
 
 /// `/Name` of the optional content group that holds all n0te ink.
 pub const INK_LAYER_NAME: &str = "n0te ink";
+
+/// The ruling of a page drawn under the ink (outside the ink layer, so hiding the ink keeps it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Paper {
+    pub background: n0te_core::notebook::Background,
+    /// Line / box / dot distance in points.
+    pub spacing: f32,
+}
 /// Base name of the ink's `/Properties` resource (made unique per page if taken).
 const OC_RESOURCE: &str = "N0teInk";
 /// zlib level for ink streams. Measured on 50 slides x 100 strokes: level 1 is 3.5x faster than
@@ -86,11 +94,18 @@ fn bad(msg: impl Into<String>) -> Error {
 /// Appends the strokes of `pages[i]` to page `i` of `pdf` (see the module docs) and returns the
 /// new file. `pages` must have one entry per page of `pdf`. Without any strokes `pdf` comes back
 /// unchanged.
-pub fn add_ink(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]]) -> Result<Vec<u8>> {
-    if pages.iter().all(|s| s.is_empty()) {
+pub fn add_ink(pdf: Vec<u8>, pages: &[&[Stroke<'_>]]) -> Result<Vec<u8>> {
+    add_ink_and_paper(pdf, pages, &[])
+}
+
+/// [`add_ink`] plus a paper ruling per page (`papers[i]`, missing entries = none) drawn under
+/// the ink. Pages with paper but no strokes get the paper.
+pub fn add_ink_and_paper(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -> Result<Vec<u8>> {
+    let has_paper = papers.iter().any(|p| p.is_some_and(|p| p.background != n0te_core::notebook::Background::Blank));
+    if pages.iter().all(|s| s.is_empty()) && !has_paper {
         return Ok(pdf);
     }
-    let update = build_update(&pdf, pages)?;
+    let update = build_update(&pdf, pages, papers)?;
     pdf.extend_from_slice(&update);
     Ok(pdf)
 }
@@ -109,13 +124,15 @@ struct PageNode<'a> {
 /// What one inked page needs written.
 struct Plan<'s> {
     strokes: &'s [Stroke<'s>],
+    /// Paper ruling and the displayed page size (points) it spans.
+    paper: Option<(Paper, f64, f64)>,
     matrix: [f64; 6],
     oc_name: String,
     /// Resource name per alpha value this page switches to.
     gs_names: Vec<(u8, String)>,
 }
 
-fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]]) -> Result<Vec<u8>> {
+fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -> Result<Vec<u8>> {
     let file = File::parse(pdf)?;
     let (root_num, root_gen) = match file.trailer.get("Root") {
         Some(Obj::Ref(n, g)) => (*n, *g),
@@ -138,9 +155,10 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]]) -> Result<Vec<u8>> {
     // Plan every inked page: new resources, contents and the names its ink stream uses.
     let mut plans = Vec::new();
     let mut page_dicts = Vec::new();
-    for (node, &strokes) in tree.into_iter().zip(pages) {
+    for (i, (node, &strokes)) in tree.into_iter().zip(pages).enumerate() {
+        let paper = papers.get(i).copied().flatten().filter(|p| p.background != n0te_core::notebook::Background::Blank && p.spacing >= 2.0);
         let mut alphas: Vec<u8> = strokes.iter().filter(|s| visible(s)).map(|s| (s.brush.color >> 24) as u8).collect();
-        if alphas.is_empty() {
+        if alphas.is_empty() && paper.is_none() {
             continue;
         }
         alphas.sort_unstable();
@@ -183,12 +201,13 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]]) -> Result<Vec<u8>> {
         let crop = rect(&file, node.crop_box.as_ref());
         let rotate = resolve_opt(&file, node.rotate.as_ref())?.and_then(|o| o.as_f64()).unwrap_or(0.0) as i64;
         let matrix = display_matrix(media, crop, rotate);
+        let (pw, ph) = display_size(media, crop, rotate);
 
         let mut dict = node.dict;
         dict.set("Contents", Obj::Array(new_contents));
         dict.set("Resources", Obj::Dict(res));
         page_dicts.push((node.num, node.generation, dict, ink_obj));
-        plans.push(Plan { strokes, matrix, oc_name, gs_names });
+        plans.push(Plan { strokes, paper: paper.map(|p| (p, pw, ph)), matrix, oc_name, gs_names });
     }
 
     if plans.is_empty() {
@@ -425,6 +444,22 @@ fn rect<'a>(file: &File<'a>, o: Option<&Obj<'a>>) -> Option<[f64; 4]> {
 
 /// The matrix from page coordinates (points, top-left of the displayed page, y down) to user
 /// space, laid out like pdfium does: crop box ∩ media box, turned by `/Rotate`.
+/// Width and height of the page as displayed (crop box within the media box, after /Rotate).
+pub(crate) fn display_size(media: Option<[f64; 4]>, crop: Option<[f64; 4]>, rotate: i64) -> (f64, f64) {
+    let empty = |r: &[f64; 4]| r[0] >= r[2] || r[1] >= r[3];
+    let media = media.filter(|r| !empty(r)).unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    let r = match crop {
+        Some(c) if !empty(&c) => [c[0].max(media[0]), c[1].max(media[1]), c[2].min(media[2]), c[3].min(media[3])],
+        _ => media,
+    };
+    let (w, h) = ((r[2] - r[0]).max(0.0), (r[3] - r[1]).max(0.0));
+    let mut quarter = (rotate / 90) % 4;
+    if quarter < 0 {
+        quarter += 4;
+    }
+    if quarter % 2 == 1 { (h, w) } else { (w, h) }
+}
+
 pub(crate) fn display_matrix(media: Option<[f64; 4]>, crop: Option<[f64; 4]>, rotate: i64) -> [f64; 6] {
     let empty = |r: &[f64; 4]| r[0] >= r[2] || r[1] >= r[3];
     let media = media.filter(|r| !empty(r)).unwrap_or([0.0, 0.0, 612.0, 792.0]);
@@ -513,9 +548,69 @@ fn ink_stream(plan: &Plan) -> Vec<u8> {
     z.finish().expect("writing to a Vec cannot fail")
 }
 
+/// The paper ruling (outside the ink layer), in page coordinates after `cm`. Colours match the
+/// app: light blue-grey lines, grey dots, a light red Cornell frame.
+fn paper_content(out: &mut Vec<u8>, plan: &Plan) {
+    use n0te_core::notebook::Background;
+    let Some((paper, w, h)) = plan.paper else { return };
+    let step = paper.spacing as f64;
+    out.extend_from_slice(b"q\n");
+    for v in plan.matrix {
+        write_num(out, v, 4);
+        out.push(b' ');
+    }
+    out.extend_from_slice(b"cm\n0.839 0.863 0.902 RG 0.5 w\n");
+    let line = |out: &mut Vec<u8>, x0: f64, y0: f64, x1: f64, y1: f64| {
+        write_num(out, x0, 2); out.push(b' '); write_num(out, y0, 2); out.extend_from_slice(b" m ");
+        write_num(out, x1, 2); out.push(b' '); write_num(out, y1, 2); out.extend_from_slice(b" l\n");
+    };
+    match paper.background {
+        Background::Lines => {
+            let mut y = step * 2.0;
+            while y < h { line(out, 0.0, y, w, y); y += step; }
+            out.extend_from_slice(b"S\n");
+        }
+        Background::Grid => {
+            let mut x = step;
+            while x < w { line(out, x, 0.0, x, h); x += step; }
+            let mut y = step;
+            while y < h { line(out, 0.0, y, w, y); y += step; }
+            out.extend_from_slice(b"S\n");
+        }
+        Background::Dots => {
+            out.extend_from_slice(b"0.761 0.788 0.831 rg\n");
+            let mut x = step;
+            while x < w {
+                let mut y = step;
+                while y < h {
+                    write_num(out, x - 0.65, 2); out.push(b' '); write_num(out, y - 0.65, 2); out.extend_from_slice(b" 1.3 1.3 re\n");
+                    y += step;
+                }
+                x += step;
+            }
+            out.extend_from_slice(b"f\n");
+        }
+        Background::Cornell => {
+            let mut y = 90.0;
+            while y < h - 150.0 { line(out, 0.0, y, w, y); y += step; }
+            out.extend_from_slice(b"S\n0.937 0.600 0.612 RG 0.8 w\n");
+            line(out, 150.0, 70.0, 150.0, h - 150.0);
+            line(out, 0.0, h - 150.0, w, h - 150.0);
+            line(out, 0.0, 70.0, w, 70.0);
+            out.extend_from_slice(b"S\n");
+        }
+        Background::Blank => {}
+    }
+    out.extend_from_slice(b"Q\n");
+}
+
 /// The uncompressed content of a page's ink stream (see the module docs).
 fn ink_content(plan: &Plan) -> Vec<u8> {
     let mut out = Vec::with_capacity(plan.strokes.iter().map(|s| s.points.len() * 30 + 64).sum::<usize>() + 128);
+    paper_content(&mut out, plan);
+    if !plan.strokes.iter().any(visible) {
+        return out;
+    }
     out.extend_from_slice(b"/OC /");
     out.extend_from_slice(plan.oc_name.as_bytes());
     out.extend_from_slice(b" BDC\nq\n");
@@ -728,7 +823,7 @@ mod tests {
         let (p1, b1) = dot(5.0, 5.0, 0x80FF0000);
         let (p2, b2) = dot(7.0, 7.0, 0xFF000000);
         let strokes = [Stroke { points: &p2, brush: b2 }, Stroke { points: &p1, brush: b1 }, Stroke { points: &p2, brush: b2 }];
-        let plan = Plan { strokes: &strokes, matrix: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0], oc_name: "N0teInk".into(), gs_names: vec![(128, "A".into()), (255, "B".into())] };
+        let plan = Plan { strokes: &strokes, paper: None, matrix: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0], oc_name: "N0teInk".into(), gs_names: vec![(128, "A".into()), (255, "B".into())] };
         let s = String::from_utf8(ink_content(&plan)).unwrap();
         assert!(s.starts_with("/OC /N0teInk BDC\nq\n1 0 0 -1 0 842 cm\n0 0 0 rg\n"), "{s}");
         assert!(s.ends_with("f\nQ\nEMC\n"));

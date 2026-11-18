@@ -104,7 +104,8 @@ pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: im
                 None => continue,
             },
         };
-        out.push(ExportSheet { source, strokes: ink });
+        let paper = (spec.pdf.is_none() && !spec.is_board()).then_some(crate::ink_writer::Paper { background: spec.background, spacing: spec.spacing });
+        out.push(ExportSheet { source, strokes: ink, paper });
     }
     Ok(out)
 }

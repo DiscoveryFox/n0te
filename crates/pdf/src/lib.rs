@@ -49,7 +49,7 @@ pub use pdfium_render;
 use pdfium_render::prelude::{PdfDocument, PdfPage, PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryConfig};
 
 pub use export::{ExportPage, PageSource, Stroke};
-pub use ink_writer::{INK_LAYER_NAME, add_ink, hide_ink};
+pub use ink_writer::{INK_LAYER_NAME, Paper, add_ink, add_ink_and_paper, hide_ink};
 pub use render::{Rgba, Tile, page_pixels, tiles};
 pub use text::{PageText, TextChar};
 pub use worker::{Docs, ExportSheet, PdfWorker, SheetSource, TileRequest, TileResult, WorkerOptions};

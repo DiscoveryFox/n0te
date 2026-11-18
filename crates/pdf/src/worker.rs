@@ -39,7 +39,7 @@ use std::thread::{JoinHandle, ThreadId};
 
 use n0te_core::ink::{Brush, InkPoint};
 
-use crate::{Error, PageSource, PdfDoc, PdfEngine, Result, Rgba, Stroke, Tile, add_ink};
+use crate::{Error, PageSource, PdfDoc, PdfEngine, Result, Rgba, Stroke, Tile};
 
 /// Priorities used by n0te (lower runs first). Any `u32` works.
 pub mod priority {
@@ -320,7 +320,8 @@ impl PdfWorker {
         })??;
         let strokes: Vec<Vec<Stroke>> = sheets.iter().map(|s| s.strokes.iter().map(|(p, b)| Stroke { points: p, brush: *b }).collect()).collect();
         let refs: Vec<&[Stroke]> = strokes.iter().map(Vec::as_slice).collect();
-        add_ink(bytes, &refs)
+        let papers: Vec<Option<crate::ink_writer::Paper>> = sheets.iter().map(|s| s.paper).collect();
+        crate::ink_writer::add_ink_and_paper(bytes, &refs, &papers)
     }
 }
 
@@ -348,6 +349,8 @@ pub enum SheetSource {
 pub struct ExportSheet {
     pub source: SheetSource,
     pub strokes: Vec<(Vec<InkPoint>, Brush)>,
+    /// Ruling drawn under the ink (fixed-size n0te sheets; None for PDF pages and boards).
+    pub paper: Option<crate::ink_writer::Paper>,
 }
 
 fn run(shared: &Shared, mut docs: Docs, sink: Box<Sink>) {

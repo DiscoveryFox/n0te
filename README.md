@@ -22,7 +22,7 @@ make n0te-test     # cargo test --workspace (needs ~/.cargo/bin/cargo, rustup)
 make n0te-apk      # Android APK (needs the aarch64-linux-android rustup target + NDK 27)
 cargo run --release -p n0te-core --example bench   # speed check on the laptop
 scripts/fetch-pdfium.sh                             # pdfium for the PDF tests and the APK
-cargo run --release -p n0te-pdf --example bench -- third_party/pdfium/linux-x64/lib/libpdfium.so slides.pdf [more.pdf]
+cargo run --release -p n0te-pdf --example pdf_bench -- third_party/pdfium/linux-x64/lib/libpdfium.so slides.pdf [more.pdf]
 ```
 
 JVM binding tests (`:n0te:testReleaseUnitTest`) load a laptop build of the core: run

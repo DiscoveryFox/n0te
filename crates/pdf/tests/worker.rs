@@ -173,9 +173,9 @@ fn export_through_the_worker() {
     let line: Vec<InkPoint> = (0..=40).map(|i| InkPoint { x: 100.0 + i as f32 * 7.5, y: 300.0, pressure: 0.5, t_ms: i * 8 }).collect();
     let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000 };
     let sheets = vec![
-        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)] },
-        ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)] },
-        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 0 }, strokes: vec![] },
+        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)], paper: None },
+        ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)], paper: None },
+        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 0 }, strokes: vec![], paper: None },
     ];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     assert_eq!(out.page_count(), 3);
@@ -185,8 +185,25 @@ fn export_through_the_worker() {
         let img = out.render_page(p, out.page_size(p).unwrap().width as u32).unwrap();
         assert_eq!(pixel(&img, 250, 300), [0, 0, 0, 255], "ink on page {p}");
     }
-    let missing = [ExportSheet { source: SheetSource::Pdf { doc: "7".into(), page: 0 }, strokes: vec![] }];
+    let missing = [ExportSheet { source: SheetSource::Pdf { doc: "7".into(), page: 0 }, strokes: vec![], paper: None }];
     assert!(w.export(0, &missing).is_err());
+}
+
+#[test]
+fn export_draws_paper_ruling_under_no_ink() {
+    let e = engine();
+    let (w, _rx, _) = worker(e, vec![make_pdf(&e, 1)], 4);
+    let sheets = vec![ExportSheet {
+        source: SheetSource::Blank { width: 200.0, height: 200.0 },
+        strokes: vec![],
+        paper: Some(n0te_pdf::Paper { background: Background::Grid, spacing: 20.0 }),
+    }];
+    let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
+    let img = out.render_page(0, 400).unwrap(); // 2 px per point
+    let on_line = pixel(&img, 40, 10); // x = 20 pt: a grid line
+    let between = pixel(&img, 50, 50); // x = 25 pt, y = 25 pt: between lines
+    assert!(on_line[0] < 250, "grid line drawn: {on_line:?}");
+    assert_eq!(between, [255, 255, 255, 255], "paper between the lines stays white");
 }
 
 #[test]

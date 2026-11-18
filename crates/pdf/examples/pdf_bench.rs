@@ -1,6 +1,6 @@
 //! Timing of the operations n0te needs, on real PDFs.
 //!
-//!   cargo run --release -p n0te-pdf --example bench -- <libpdfium.so> <export-source.pdf> [more.pdf ...]
+//!   cargo run --release -p n0te-pdf --example pdf_bench -- <libpdfium.so> <export-source.pdf> [more.pdf ...]
 //!
 //! Set N0TE_BENCH_OUT=<dir> to keep the inked export for inspection.
 //!
