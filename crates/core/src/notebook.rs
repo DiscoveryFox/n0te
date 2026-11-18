@@ -264,6 +264,19 @@ impl Notebook {
         Ok(())
     }
 
+    /// Changes a sheet's paper (also side sheets). Size and PDF background stay.
+    pub fn set_paper(&self, node: &str, background: Background, spacing: f32) -> Result<()> {
+        let id = self.node(node)?;
+        if self.kind(id) != "sheet" {
+            return Err(Error::Invalid("only sheets have paper".into()));
+        }
+        let m = self.tree.get_meta(id)?;
+        m.insert(K_BG, background.as_str())?;
+        m.insert(K_SPACING, spacing as f64)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Deletes a node with everything under it (a sheet takes its side sheets along).
     pub fn delete(&self, node: &str) -> Result<()> {
         let id = self.node(node)?;
@@ -467,6 +480,20 @@ mod tests {
                 OutlineRow::Sheet { depth, left, right, .. } => format!("{}S[{}|{}]", "  ".repeat(depth as usize), left.len(), right.len()),
             })
             .collect()
+    }
+
+    #[test]
+    fn paper_changes_after_creation_also_on_side_sheets() {
+        let nb = Notebook::create(1, "p").unwrap();
+        let g = nb.add_group(None, 0, "G").unwrap();
+        let (s1, _) = nb.add_sheet(None, 1, &SheetSpec::a4(Background::Grid)).unwrap();
+        let (side, _) = nb.add_side_sheet(&s1, Side::Left, 0, &SheetSpec::a4(Background::Blank)).unwrap();
+        nb.set_paper(&s1, Background::Lines, 24.0).unwrap();
+        nb.set_paper(&side, Background::Dots, 18.0).unwrap();
+        assert!(nb.set_paper(&g, Background::Lines, 20.0).is_err(), "groups have no paper");
+        let row = nb.outline(true).into_iter().find_map(|r| match r { OutlineRow::Sheet { spec, left, .. } => Some((spec, left)), _ => None }).unwrap();
+        assert_eq!((row.0.background, row.0.spacing, row.0.width), (Background::Lines, 24.0, 595.0));
+        assert_eq!((row.1[0].spec.background, row.1[0].spec.spacing), (Background::Dots, 18.0));
     }
 
     #[test]

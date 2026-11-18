@@ -44,6 +44,10 @@ impl NotebookHandle {
     pub fn set_node_title(&self, node: String, title: String) -> R<()> {
         Ok(lock(&self.nb).set_title_of(&node, &title)?)
     }
+    /// Changes the paper of a sheet (main or side sheet).
+    pub fn set_paper(&self, node: String, background: crate::FfiBackground, spacing: f32) -> R<()> {
+        Ok(lock(&self.nb).set_paper(&node, background.into(), spacing)?)
+    }
     pub fn folder(&self) -> String {
         lock(&self.nb).folder()
     }
