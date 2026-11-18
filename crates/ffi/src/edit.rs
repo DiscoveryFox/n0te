@@ -27,6 +27,54 @@ impl SheetHandle {
     pub fn hit_test(&self, x: f32, y: f32, radius: f32) -> Vec<String> {
         lock(&self.sheet).hit_test(x, y, radius)
     }
+    /// Strokes the path (packed LE f32 x,y pairs) passes within `radius` of.
+    pub fn hit_path(&self, path: Vec<u8>, radius: f32) -> Vec<String> {
+        lock(&self.sheet).hit_path(&pairs(&path), radius)
+    }
+    /// Area eraser along the path (packed LE f32 x, y, radius triples): one undo step.
+    /// Returns how many strokes changed.
+    pub fn erase_area(&self, path: Vec<u8>) -> R<u32> {
+        let t: Vec<(f32, f32, f32)> = floats(&path).chunks_exact(3).map(|c| (c[0], c[1], c[2])).collect();
+        Ok(lock(&self.sheet).erase_area(&t)? as u32)
+    }
+    /// The strokes' brush and samples (copy, cut, moving to another sheet).
+    pub fn stroke_data(&self, ids: Vec<String>) -> R<Vec<crate::FfiStrokeData>> {
+        let s = lock(&self.sheet);
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(st) = s.stroke(&id)? {
+                out.push(crate::FfiStrokeData { brush: st.brush.into(), samples: crate::pack_points(&st.points) });
+            }
+        }
+        Ok(out)
+    }
+    /// Adds strokes, scaled by `scale` about (ox, oy) and moved by (dx, dy), as one undo step;
+    /// returns them as stored.
+    pub fn add_strokes(&self, items: Vec<crate::FfiStrokeData>, dx: f32, dy: f32, scale: f32, ox: f32, oy: f32) -> R<Vec<crate::FfiStroke>> {
+        let k = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+        let s = lock(&self.sheet);
+        let data: Vec<(n0te_core::ink::Brush, Vec<n0te_core::ink::InkPoint>)> = items
+            .into_iter()
+            .map(|it| {
+                let mut pts = crate::points_of(&it.samples);
+                for p in &mut pts {
+                    p.x = ox + (p.x - ox) * k + dx;
+                    p.y = oy + (p.y - oy) * k + dy;
+                }
+                let mut b: n0te_core::ink::Brush = it.brush.into();
+                b.width *= k;
+                (b, pts)
+            })
+            .collect();
+        let ids = s.add_strokes(&data)?;
+        let mut out = Vec::new();
+        for id in ids {
+            if let Some(st) = s.stroke(&id)? {
+                out.push(crate::to_ffi_stroke(st));
+            }
+        }
+        Ok(out)
+    }
     /// Stroke ids inside the lasso polygon (packed LE f32 x,y pairs).
     pub fn lasso(&self, polygon: Vec<u8>) -> Vec<String> {
         lock(&self.sheet).lasso(&floats(&polygon))
@@ -61,6 +109,10 @@ impl NotebookHandle {
     pub fn sheet_order(&self) -> Vec<String> {
         lock(&self.nb).sheet_order()
     }
+}
+
+fn pairs(b: &[u8]) -> Vec<(f32, f32)> {
+    floats(b).chunks_exact(2).map(|c| (c[0], c[1])).collect()
 }
 
 #[cfg(test)]

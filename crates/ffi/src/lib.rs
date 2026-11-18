@@ -70,6 +70,31 @@ pub struct FfiStroke {
     pub layers: Vec<Vec<u8>>,
 }
 
+/// A stroke's brush and samples (packed LE f32 x, y, pressure, t_ms), for copy/paste.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiStrokeData {
+    pub brush: FfiBrush,
+    pub samples: Vec<u8>,
+}
+
+pub(crate) fn pack_points(pts: &[InkPoint]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pts.len() * 16);
+    for p in pts {
+        for v in [p.x, p.y, p.pressure, p.t_ms as f32] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+    }
+    out
+}
+
+pub(crate) fn points_of(samples: &[u8]) -> Vec<InkPoint> {
+    points(samples)
+}
+
+pub(crate) fn to_ffi_stroke(s: n0te_core::sheet::Stroke) -> FfiStroke {
+    to_ffi(s)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiBackground {
     Blank,

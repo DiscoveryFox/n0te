@@ -115,6 +115,74 @@ impl Sheet {
         Ok(id)
     }
 
+    /// Adds several strokes as one edit (one undo step): paste, moving strokes between sheets.
+    pub fn add_strokes(&self, items: &[(Brush, Vec<InkPoint>)]) -> Result<Vec<String>> {
+        let mut out = Vec::with_capacity(items.len());
+        for (brush, points) in items {
+            if points.is_empty() {
+                continue;
+            }
+            let id = ids::new_id(self.doc.peer_id());
+            self.objects.insert(&id, LoroValue::Binary(encode_stroke(brush, points).into()))?;
+            out.push(id);
+        }
+        self.doc.commit();
+        Ok(out)
+    }
+
+    /// Ids of strokes the path (x, y pairs) passes within `radius` of (scribble-to-delete).
+    pub fn hit_path(&self, path: &[(f32, f32)], radius: f32) -> Vec<String> {
+        let Some(area) = path_bounds(path, radius) else { return Vec::new() };
+        self.strokes_in(Some(area))
+            .into_iter()
+            .filter(|s| {
+                let r = radius + s.brush.width * 0.5;
+                s.points.iter().any(|p| dist_to_path(p.x, p.y, path) <= r)
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Area eraser: removes only the parts of strokes under the eraser path (x, y, radius per
+    /// point: the tip may grow with speed); a stroke cut in the middle becomes two. One edit
+    /// (one undo step). Returns how many strokes changed.
+    pub fn erase_area(&self, path: &[(f32, f32, f32)]) -> Result<usize> {
+        let rmax = path.iter().map(|p| p.2).fold(0.0f32, f32::max);
+        let xy: Vec<(f32, f32)> = path.iter().map(|p| (p.0, p.1)).collect();
+        let Some(area) = path_bounds(&xy, rmax) else { return Ok(0) };
+        let mut changed = 0;
+        for s in self.strokes_in(Some(area)) {
+            let extra = s.brush.width * 0.35;
+            let pts = resample(&s.points, 0.75);
+            let keep: Vec<bool> = pts.iter().map(|p| !under_tip(p.x, p.y, path, extra)).collect();
+            if keep.iter().all(|&k| k) {
+                continue;
+            }
+            changed += 1;
+            self.objects.delete(&s.id)?;
+            let mut run: Vec<InkPoint> = Vec::new();
+            let flush = |run: &mut Vec<InkPoint>| -> Result<()> {
+                // Keep pieces that are more than a speck.
+                if run.len() >= 2 || (run.len() == 1 && s.points.len() == 1) {
+                    let id = ids::new_id(self.doc.peer_id());
+                    self.objects.insert(&id, LoroValue::Binary(encode_stroke(&s.brush, run).into()))?;
+                }
+                run.clear();
+                Ok(())
+            };
+            for (p, k) in pts.iter().zip(&keep) {
+                if *k {
+                    run.push(*p);
+                } else {
+                    flush(&mut run)?;
+                }
+            }
+            flush(&mut run)?;
+        }
+        self.doc.commit();
+        Ok(changed)
+    }
+
     /// Removes objects (erase, delete selection). Unknown ids are ignored.
     pub fn remove(&self, ids: &[String]) -> Result<()> {
         for id in ids {
@@ -210,6 +278,58 @@ impl Sheet {
         self.doc.import(bytes)?;
         Ok(())
     }
+}
+
+fn path_bounds(path: &[(f32, f32)], radius: f32) -> Option<Rect> {
+    if path.is_empty() {
+        return None;
+    }
+    let mut bb = Rect::EMPTY;
+    for &(x, y) in path {
+        bb = bb.include(x, y);
+    }
+    Some(bb.inflate(radius + 20.0))
+}
+
+/// Whether (x, y) lies under an eraser path whose tip radius varies along it (+ `extra`).
+fn under_tip(x: f32, y: f32, path: &[(f32, f32, f32)], extra: f32) -> bool {
+    match path.len() {
+        0 => false,
+        1 => (x - path[0].0).hypot(y - path[0].1) <= path[0].2 + extra,
+        _ => path.windows(2).any(|w| seg_dist(x, y, w[0].0, w[0].1, w[1].0, w[1].1) <= w[0].2.max(w[1].2) + extra),
+    }
+}
+
+fn dist_to_path(x: f32, y: f32, path: &[(f32, f32)]) -> f32 {
+    match path.len() {
+        0 => f32::INFINITY,
+        1 => (x - path[0].0).hypot(y - path[0].1),
+        _ => path.windows(2).map(|w| seg_dist(x, y, w[0].0, w[0].1, w[1].0, w[1].1)).fold(f32::INFINITY, f32::min),
+    }
+}
+
+/// Samples at most `step` apart (pressure and time interpolated), so a cut lands where the
+/// eraser is and not at the next input sample.
+fn resample(points: &[InkPoint], step: f32) -> Vec<InkPoint> {
+    let mut out = Vec::with_capacity(points.len() * 2);
+    for (i, p) in points.iter().enumerate() {
+        if i > 0 {
+            let a = points[i - 1];
+            let d = (p.x - a.x).hypot(p.y - a.y);
+            let n = (d / step).floor() as usize;
+            for k in 1..n.min(400) {
+                let t = k as f32 / n as f32;
+                out.push(InkPoint {
+                    x: a.x + (p.x - a.x) * t,
+                    y: a.y + (p.y - a.y) * t,
+                    pressure: a.pressure + (p.pressure - a.pressure) * t,
+                    t_ms: a.t_ms + ((p.t_ms as f32 - a.t_ms as f32) * t) as u32,
+                });
+            }
+        }
+        out.push(*p);
+    }
+    out
 }
 
 fn seg_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
@@ -327,6 +447,38 @@ mod tests {
         assert!(s.undo().unwrap()); // undo adding b
         assert!(s.stroke(&b).unwrap().is_none());
         assert!(s.can_redo());
+    }
+
+    fn line(x0: f32, x1: f32, y: f32) -> Vec<InkPoint> {
+        (0..=10).map(|i| InkPoint { x: x0 + (x1 - x0) * i as f32 / 10.0, y, pressure: 0.5, t_ms: i * 8 }).collect()
+    }
+
+    #[test]
+    fn area_eraser_cuts_a_line_in_two_and_undoes_in_one_step() {
+        let s = Sheet::create(4).unwrap();
+        s.add_stroke(Brush { width: 2.0, ..Brush::default() }, &line(0.0, 100.0, 50.0)).unwrap();
+        s.add_stroke(Brush::default(), &line(0.0, 100.0, 200.0)).unwrap(); // far away: untouched
+        // A vertical swipe through x = 50.
+        let changed = s.erase_area(&[(50.0, 0.0, 5.0), (50.0, 100.0, 5.0)]).unwrap();
+        assert_eq!(changed, 1);
+        let mut pieces: Vec<Stroke> = s.strokes().into_iter().filter(|st| st.bounds.y0 < 100.0).collect();
+        pieces.sort_by(|a, b| a.bounds.x0.total_cmp(&b.bounds.x0));
+        assert_eq!(pieces.len(), 2, "cut in the middle: two pieces");
+        assert!(pieces[0].points.last().unwrap().x < 46.0 && pieces[1].points[0].x > 54.0, "gap where the eraser went");
+        assert_eq!(s.len(), 3);
+        assert!(s.undo().unwrap());
+        assert_eq!(s.len(), 2, "one undo restores the whole line");
+    }
+
+    #[test]
+    fn add_strokes_is_one_step_and_hit_path_finds_crossed_strokes() {
+        let s = Sheet::create(5).unwrap();
+        let ids = s.add_strokes(&[(Brush::default(), line(0.0, 50.0, 10.0)), (Brush::default(), line(0.0, 50.0, 80.0))]).unwrap();
+        assert_eq!(ids.len(), 2);
+        let crossed = s.hit_path(&[(25.0, 0.0), (25.0, 20.0)], 2.0);
+        assert_eq!(crossed, vec![ids[0].clone()]);
+        assert!(s.undo().unwrap());
+        assert!(s.is_empty(), "both strokes were one edit");
     }
 
     #[test]
