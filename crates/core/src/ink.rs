@@ -128,9 +128,90 @@ impl Rect {
 /// ends get round caps. A single sample becomes a dot. The polygon is meant to be filled with
 /// the non-zero rule, which also handles self-overlapping strokes.
 pub fn outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
+    match shape(points, brush) {
+        Shape::Empty => Vec::new(),
+        Shape::Dot(x, y, r) => circle(x, y, r, 16),
+        Shape::Body { pts, left, right, r_start, r_end } => {
+            let n = pts.len();
+            let mut out = Vec::with_capacity((2 * n + 24) * 2);
+            for &(x, y) in &left {
+                out.extend_from_slice(&[x, y]);
+            }
+            // End cap: half circle from the left side around to the right side.
+            cap(&mut out, pts[n - 1].0, pts[n - 1].1, r_end, direction(&pts, n - 1), 10);
+            for &(x, y) in right.iter().rev() {
+                out.extend_from_slice(&[x, y]);
+            }
+            let (dx, dy) = direction(&pts, 0);
+            cap(&mut out, pts[0].0, pts[0].1, r_start, (-dx, -dy), 10);
+            out
+        }
+    }
+}
+
+/// The same shape as [`outline`], as triangles ready for a GPU: a strip between the left and
+/// right edge plus fans for the round caps. Appends vertices (x, y pairs) to `xy` and triangle
+/// indices (into all of `xy`) to `indices`, so many strokes batch into one mesh.
+///
+/// Unlike the polygon this needs no tessellation; where a stroke overlaps itself triangles
+/// overlap too, which is invisible for opaque ink (draw translucent ink, e.g. highlighters,
+/// into a separate layer).
+pub fn outline_mesh(points: &[InkPoint], brush: &Brush, xy: &mut Vec<f32>, indices: &mut Vec<u32>) {
+    let base = (xy.len() / 2) as u32;
+    match shape(points, brush) {
+        Shape::Empty => {}
+        Shape::Dot(x, y, r) => {
+            xy.extend_from_slice(&[x, y]);
+            xy.extend(circle(x, y, r, 16));
+            for k in 0..16u32 {
+                indices.extend_from_slice(&[base, base + 1 + k, base + 1 + (k + 1) % 16]);
+            }
+        }
+        Shape::Body { pts, left, right, r_start, r_end } => {
+            let n = pts.len() as u32;
+            xy.reserve((2 * n as usize + 24) * 2);
+            indices.reserve((2 * n as usize + 20) * 3);
+            // Vertex 2i = left[i], 2i + 1 = right[i].
+            for (l, r) in left.iter().zip(&right) {
+                xy.extend_from_slice(&[l.0, l.1, r.0, r.1]);
+            }
+            for i in 0..n - 1 {
+                let (l0, r0, l1, r1) = (base + 2 * i, base + 2 * i + 1, base + 2 * i + 2, base + 2 * i + 3);
+                indices.extend_from_slice(&[l0, r0, l1, l1, r0, r1]);
+            }
+            // Caps as fans around the end points, from one edge to the other.
+            let mut fan = |cx: f32, cy: f32, r: f32, d: (f32, f32), from: u32, to: u32| {
+                let center = (xy.len() / 2) as u32;
+                xy.extend_from_slice(&[cx, cy]);
+                let first_arc = center + 1;
+                cap(xy, cx, cy, r, d, 10);
+                let arc = (xy.len() / 2) as u32 - first_arc;
+                let mut prev = from;
+                for k in 0..arc {
+                    indices.extend_from_slice(&[center, prev, first_arc + k]);
+                    prev = first_arc + k;
+                }
+                indices.extend_from_slice(&[center, prev, to]);
+            };
+            let last = n - 1;
+            fan(pts[last as usize].0, pts[last as usize].1, r_end, direction(&pts, last as usize), base + 2 * last, base + 2 * last + 1);
+            let (dx, dy) = direction(&pts, 0);
+            fan(pts[0].0, pts[0].1, r_start, (-dx, -dy), base + 1, base);
+        }
+    }
+}
+
+enum Shape {
+    Empty,
+    Dot(f32, f32, f32),
+    Body { pts: Vec<(f32, f32, f32)>, left: Vec<(f32, f32)>, right: Vec<(f32, f32)>, r_start: f32, r_end: f32 },
+}
+
+/// Smoothed samples and the left/right edges of a stroke (shared by outline and mesh).
+fn shape(points: &[InkPoint], brush: &Brush) -> Shape {
     let pts = smooth(points);
     if pts.is_empty() {
-        return Vec::new();
+        return Shape::Empty;
     }
     let radius = |p: f32| -> f32 {
         let k = 1.0 - brush.thinning.clamp(0.0, 1.0) + brush.thinning.clamp(0.0, 1.0) * (p * 2.0).clamp(0.15, 2.0);
@@ -138,7 +219,7 @@ pub fn outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
     };
     if pts.len() == 1 || path_length(&pts) < 0.5 {
         let p = pts[0];
-        return circle(p.0, p.1, radius(p.2), 16);
+        return Shape::Dot(p.0, p.1, radius(p.2));
     }
     let n = pts.len();
     let mut left = Vec::with_capacity(n);
@@ -157,20 +238,8 @@ pub fn outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
         left.push((pts[i].0 - dy * r, pts[i].1 + dx * r));
         right.push((pts[i].0 + dy * r, pts[i].1 - dx * r));
     }
-    let mut out = Vec::with_capacity((2 * n + 24) * 2);
-    for &(x, y) in &left {
-        out.extend_from_slice(&[x, y]);
-    }
-    // End cap: half circle from the left side around to the right side.
-    let (ex, ey, er) = (pts[n - 1].0, pts[n - 1].1, radius(pts[n - 1].2));
-    cap(&mut out, ex, ey, er, direction(&pts, n - 1), 10);
-    for &(x, y) in right.iter().rev() {
-        out.extend_from_slice(&[x, y]);
-    }
-    let (sx, sy, sr) = (pts[0].0, pts[0].1, radius(pts[0].2));
-    let (dx, dy) = direction(&pts, 0);
-    cap(&mut out, sx, sy, sr, (-dx, -dy), 10);
-    out
+    let (r_start, r_end) = (radius(pts[0].2), radius(pts[n - 1].2));
+    Shape::Body { pts, left, right, r_start, r_end }
 }
 
 fn smooth(points: &[InkPoint]) -> Vec<(f32, f32, f32)> {
@@ -307,6 +376,25 @@ mod tests {
         for xy in poly.chunks(2) {
             assert!(xy[0] >= bb.x0 && xy[0] <= bb.x1 && xy[1] >= bb.y0 && xy[1] <= bb.y1, "vertex {xy:?} outside {bb:?}");
         }
+    }
+
+    #[test]
+    fn mesh_covers_the_outline_and_batches() {
+        let pts = line(50);
+        let b = Brush::default();
+        let (mut xy, mut idx) = (Vec::new(), Vec::new());
+        outline_mesh(&pts, &b, &mut xy, &mut idx);
+        let first_vertices = xy.len() / 2;
+        assert_eq!(idx.len() % 3, 0);
+        assert!(idx.iter().all(|&i| (i as usize) < first_vertices));
+        // Same edge and cap vertices as the polygon (plus the two cap centres).
+        assert_eq!(first_vertices, outline(&pts, &b).len() / 2 + 2);
+        let bb = bounds(&pts, &b);
+        assert!(xy.chunks(2).all(|v| v[0] >= bb.x0 && v[0] <= bb.x1 && v[1] >= bb.y0 && v[1] <= bb.y1));
+        // A second stroke appends with offset indices; a dot is a 16-triangle fan.
+        outline_mesh(&[InkPoint { x: 5.0, y: 5.0, pressure: 0.5, t_ms: 0 }], &b, &mut xy, &mut idx);
+        assert_eq!(xy.len() / 2, first_vertices + 17);
+        assert!(idx[idx.len() - 48..].iter().all(|&i| i as usize >= first_vertices && (i as usize) < xy.len() / 2));
     }
 
     #[test]
