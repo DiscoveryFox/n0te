@@ -1,0 +1,15 @@
+[package]
+name = "n0te-ffi"
+description = "UniFFI bindings of n0te-core for the Android app"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "n0te_ffi"
+
+[dependencies]
+n0te-core.workspace = true
+uniffi.workspace = true
+thiserror.workspace = true

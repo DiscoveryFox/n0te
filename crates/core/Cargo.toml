@@ -1,0 +1,13 @@
+[package]
+name = "n0te-core"
+description = "n0te notebook model, merging, ink geometry and storage (shared by tablet, laptop and phone)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+loro.workspace = true
+thiserror.workspace = true
+blake3.workspace = true
+
+[dev-dependencies]
