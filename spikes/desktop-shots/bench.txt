@@ -1,0 +1,72 @@
+adapter: Intel(R) UHD Graphics 620 (WHL GT2) (Vulkan, IntegratedGpu)
+
+== backend wgpu · viewport 1600x900 @ 1.2 (1920.0001x1080 px)
+  notebook: 36 pages (30 main), 7158 strokes, 857760 samples · demo build (Loro sheets) 168 ms, decode into pages 32 ms, App::new 226 ms
+  RSS: process start 10 MiB, after App::new 36 MiB, after renderer init 49 MiB
+  dense page (lines): 400 strokes, 47760 samples
+    canvas path: ink::outline 1.90 ms (103510 vertices) + Path 1.39 ms; whole page via canvas::Frame (lyon fill tessellation) p50 76.93 p95 90.96 max 92.32 ms
+    mesh path:   background-only canvas 0.01 ms + ink::outline_mesh → one mesh 4.12 ms (p95 5.20) = 104310 vertices, 103510 triangles
+  baseline render of a near-empty frame (clear + offscreen + GPU read-back): p50 22.93 ms
+  -- ink path Mesh
+  pan at zoom 100 %: 160 frames down by 36 px (to page 7), then back up
+  pan down (pages enter: cold) n=160  cpu p50   0.43 p95   0.76 max    9.26 | update+view p50  0.38 p95  0.55 | draw p50  0.03 p95   0.07 max    8.91 | render p50  21.08 p95  25.22 max   30.63 | total p50  21.58 p95  25.95 max   39.89 ms
+  pan back up (cached: warm)   n=160  cpu p50   0.54 p95   1.43 max    2.22 | update+view p50  0.50 p95  1.33 | draw p50  0.05 p95   0.11 max    0.16 | render p50  22.64 p95  41.54 max   61.64 | total p50  23.17 p95  43.15 max   63.23 ms
+    page builds during pan: down 10, up 0; max single build 8.87 ms
+  RSS after pan: 92 MiB (cached pages: 11)
+  fast pan through all pages: 400 frames in 14708 ms, now page 30, cached 24, evictions 11, RSS 140 MiB (peak 140)
+  fast pan (120 px/frame)      n=400  cpu p50   1.05 p95   2.58 max   27.01 | update+view p50  0.93 p95  1.59 | draw p50  0.08 p95   2.04 max   25.83 | render p50  34.20 p95  43.60 max   68.49 | total p50  35.24 p95  46.45 max   79.82 ms
+  zoom (ctrl+scroll ~10 %/step): 100 % -> 400 % (15 steps, 3 page rebuilds), 400 % -> 30 % (28 steps, 24 rebuilds)
+  zoom in                      n=15   cpu p50   1.33 p95   2.15 max    2.18 | update+view p50  1.25 p95  2.03 | draw p50  0.08 p95   0.12 max    0.16 | render p50  40.22 p95  43.44 max   43.54 | total p50  41.78 p95  45.34 max   45.63 ms
+  zoom out                     n=28   cpu p50   1.32 p95  27.80 max   32.85 | update+view p50  1.22 p95  1.71 | draw p50  0.09 p95  26.57 max   31.44 | render p50  40.78 p95  48.57 max   48.63 | total p50  42.08 p95  75.04 max   76.37 ms
+  pan at 30 % (many pages)     n=60   cpu p50   0.62 p95   1.83 max    9.13 | update+view p50  0.54 p95  1.32 | draw p50  0.05 p95   0.90 max    8.76 | render p50  23.67 p95  45.51 max   48.85 | total p50  24.41 p95  47.34 max   50.10 ms
+    visible pages at 30 %: 4, strokes 678
+  -- ink path Canvas
+  pan at zoom 100 %: 160 frames down by 36 px (to page 7), then back up
+  pan down (pages enter: cold) n=160  cpu p50   0.64 p95   2.63 max  124.24 | update+view p50  0.59 p95  1.45 | draw p50  0.05 p95   0.14 max  122.53 | render p50  29.57 p95  42.38 max   47.79 | total p50  31.37 p95  47.24 max  158.76 ms
+  pan back up (cached: warm)   n=160  cpu p50   0.94 p95   1.77 max    2.08 | update+view p50  0.85 p95  1.66 | draw p50  0.08 p95   0.13 max    0.20 | render p50  42.19 p95  48.15 max   59.05 | total p50  43.30 p95  49.46 max   61.10 ms
+    page builds during pan: down 10, up 0; max single build 107.34 ms
+  RSS after pan: 112 MiB (cached pages: 11)
+  fast pan through all pages: 400 frames in 13543 ms, now page 30, cached 24, evictions 36, RSS 162 MiB (peak 162)
+  fast pan (120 px/frame)      n=400  cpu p50   0.68 p95  42.71 max  150.75 | update+view p50  0.60 p95  1.23 | draw p50  0.05 p95  42.03 max  149.51 | render p50  25.63 p95  43.57 max   54.66 | total p50  27.57 p95  72.80 max  179.84 ms
+  zoom (ctrl+scroll ~10 %/step): 100 % -> 400 % (15 steps, 3 page rebuilds), 400 % -> 30 % (28 steps, 14 rebuilds)
+  zoom in                      n=15   cpu p50   0.62 p95 113.17 max  136.44 | update+view p50  0.54 p95  1.47 | draw p50  0.04 p95 112.64 max  135.24 | render p50  23.79 p95  45.67 max   45.97 | total p50  27.13 p95 136.09 max  160.24 ms
+  zoom out                     n=28   cpu p50   0.61 p95 161.55 max  226.10 | update+view p50  0.54 p95  0.81 | draw p50  0.05 p95 161.08 max  225.51 | render p50  24.53 p95  29.81 max   35.99 | total p50  26.55 p95 197.54 max  247.29 ms
+  pan at 30 % (many pages)     n=60   cpu p50   0.66 p95  58.00 max   94.58 | update+view p50  0.59 p95  1.16 | draw p50  0.05 p95  57.13 max   93.36 | render p50  28.87 p95  48.17 max   56.57 | total p50  30.89 p95  93.79 max  123.70 ms
+    visible pages at 30 %: 4, strokes 678
+  -- text page
+  typing, 16 blocks            n=150  cpu p50   1.66 p95   2.15 max    2.67 | update+view p50  1.55 p95  1.97 | draw p50  0.10 p95   0.14 max    0.30 | render p50  34.67 p95  38.56 max   45.95 | total p50  36.36 p95  40.18 max   47.48 ms
+  typing, 320 blocks           n=150  cpu p50   6.36 p95   7.65 max   10.52 | update+view p50  6.26 p95  7.49 | draw p50  0.10 p95   0.14 max    0.32 | render p50  29.62 p95  32.85 max   41.73 | total p50  36.14 p95  39.87 max   48.08 ms
+  RSS end: 179 MiB (peak 179)
+
+== backend tiny-skia · viewport 1600x900 @ 1.2 (1920.0001x1080 px)
+  notebook: 36 pages (30 main), 7158 strokes, 857760 samples · demo build (Loro sheets) 125 ms, decode into pages 25 ms, App::new 153 ms
+  RSS: process start 144 MiB, after App::new 145 MiB, after renderer init 145 MiB
+  dense page (lines): 400 strokes, 47760 samples
+    canvas path: ink::outline 1.86 ms (103510 vertices) + Path 1.24 ms; whole page via canvas::Frame (tiny-skia paths, rasterised per frame) p50 5.27 p95 5.35 max 5.36 ms
+    mesh path:   background-only canvas 0.02 ms + ink::outline_mesh → one mesh 2.51 ms (p95 2.56) = 104310 vertices, 103510 triangles
+  baseline render of a near-empty frame (clear + offscreen): p50 16.29 ms
+  -- ink path Canvas
+  pan at zoom 100 %: 160 frames down by 36 px (to page 7), then back up
+  pan down (pages enter: cold) n=160  cpu p50   0.34 p95   0.59 max    5.02 | update+view p50  0.31 p95  0.45 | draw p50  0.02 p95   0.04 max    4.73 | render p50  46.41 p95  55.54 max   57.33 | total p50  47.01 p95  56.42 max   58.85 ms
+  pan back up (cached: warm)   n=160  cpu p50   0.33 p95   0.45 max    0.57 | update+view p50  0.31 p95  0.43 | draw p50  0.02 p95   0.03 max    0.04 | render p50  46.33 p95  56.43 max   65.33 | total p50  46.75 p95  56.75 max   65.66 ms
+    page builds during pan: down 10, up 0; max single build 4.13 ms
+  RSS after pan: 145 MiB (cached pages: 11)
+  fast pan through all pages: 400 frames in 15845 ms, now page 30, cached 24, evictions 11, RSS 145 MiB (peak 179)
+  fast pan (120 px/frame)      n=400  cpu p50   0.35 p95   2.03 max    6.27 | update+view p50  0.32 p95  0.45 | draw p50  0.02 p95   1.63 max    5.84 | render p50  35.21 p95  56.88 max   68.15 | total p50  35.59 p95  57.89 max   68.76 ms
+  zoom (ctrl+scroll ~10 %/step): 100 % -> 400 % (15 steps, 3 page rebuilds), 400 % -> 30 % (28 steps, 14 rebuilds)
+  zoom in                      n=15   cpu p50   0.46 p95   6.11 max    6.17 | update+view p50  0.36 p95  0.45 | draw p50  0.02 p95   5.84 max    5.89 | render p50  66.24 p95  78.32 max  102.27 | total p50  66.82 p95  78.80 max  102.74 ms
+  zoom out                     n=28   cpu p50   0.45 p95   9.70 max   18.06 | update+view p50  0.43 p95  0.46 | draw p50  0.03 p95   9.37 max   17.73 | render p50  65.95 p95  82.67 max   83.73 | total p50  66.39 p95  84.10 max   94.07 ms
+  pan at 30 % (many pages)     n=60   cpu p50   0.37 p95   2.75 max    3.66 | update+view p50  0.32 p95  0.46 | draw p50  0.02 p95   2.41 max    3.37 | render p50  46.37 p95  77.86 max   83.34 | total p50  46.85 p95  78.12 max   83.78 ms
+    visible pages at 30 %: 4, strokes 678
+  -- text page
+  typing, 16 blocks            n=150  cpu p50   0.59 p95   0.73 max    1.59 | update+view p50  0.56 p95  0.69 | draw p50  0.03 p95   0.04 max    0.04 | render p50  33.56 p95  37.53 max   40.93 | total p50  34.20 p95  38.21 max   41.48 ms
+  typing, 320 blocks           n=150  cpu p50   2.38 p95   2.94 max    4.06 | update+view p50  2.35 p95  2.91 | draw p50  0.03 p95   0.04 max    0.05 | render p50  33.56 p95  36.65 max   45.07 | total p50  35.97 p95  39.68 max   48.14 ms
+  RSS end: 145 MiB (peak 179)
+adapter: Intel(R) UHD Graphics 620 (WHL GT2) (Vulkan, IntegratedGpu)
+
+== gpu cost via wgpu (render time minus an empty frame)
+  empty frame render p50 34.97 ms
+  zoom 100 % Canvas: 1 pages / 400 strokes visible · still +-2.15 ms · panning +2.97 ms
+  zoom 100 % Mesh: 1 pages / 400 strokes visible · still +-1.83 ms · panning +3.14 ms
+  zoom  30 % Canvas: 6 pages / 1509 strokes visible · still +1.19 ms · panning +17.14 ms
+  zoom  30 % Mesh: 6 pages / 1509 strokes visible · still +-0.86 ms · panning +9.22 ms

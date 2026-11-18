@@ -428,7 +428,7 @@ impl Doc {
         };
         // Every block has the same shape (gutter + body) so the widget tree stays stable.
         let gutter: Element<'a, Msg> = match &b.kind {
-            Kind::Bullet => container(Space::new().width(6).height(6).into_element_square())
+            Kind::Bullet => container(bullet())
                 .padding(Padding { top: 11.0, left: 8.0, ..Padding::ZERO })
                 .into(),
             Kind::Heading(n) => text(format!("H{n}")).font(theme::MONO).size(10).color(theme::PAPER_RULE).into(),
@@ -529,17 +529,11 @@ fn clamp_cursor(content: &Content, c: Cursor) -> Cursor {
     Cursor { position: fix(c.position), selection: c.selection.map(fix) }
 }
 
-trait SquareExt<'a> {
-    fn into_element_square(self) -> Element<'a, Msg>;
-}
-
-impl<'a> SquareExt<'a> for Space {
-    /// A small red square: the bullet glyph (no font dependency).
-    fn into_element_square(self) -> Element<'a, Msg> {
-        container(self)
-            .style(|_| container::Style { background: Some(theme::ACCENT.into()), ..Default::default() })
-            .into()
-    }
+/// A small red square: the bullet glyph (no font dependency).
+fn bullet<'a>() -> Element<'a, Msg> {
+    container(Space::new().width(6).height(6))
+        .style(|_| container::Style { background: Some(theme::ACCENT.into()), ..Default::default() })
+        .into()
 }
 
 #[cfg(test)]
