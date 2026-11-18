@@ -4,6 +4,9 @@
 //! - [`PdfEngine`] / [`PdfDoc`]: pdfium, loaded from an explicit path.
 //! - [`add_ink`] ([`ink_writer`]): n0te's own writer that appends ink to a PDF as an incremental
 //!   update (no pdfium involved); [`PdfEngine::export`] = pdfium assembles the pages, then this.
+//! - [`PdfWorker`] ([`worker`]): the one thread an app does its pdfium work on — tiles in
+//!   priority order with per-view generations, an LRU of open documents, other jobs.
+//! - [`notebook`]: import a PDF into a notebook, turn a notebook's sheets into export pages.
 //!
 //! Built on pdfium through `pdfium-render` (dynamic binding). The apps ship `libpdfium.so`
 //! themselves (`scripts/fetch-pdfium.sh`) and pass its path to [`PdfEngine::load`].
@@ -23,14 +26,17 @@
 //!    error) never interleave between threads.
 //!
 //! All types are `Send + Sync`, so an `Arc<PdfDoc>` can be used from any thread, but there is no
-//! parallel speed-up: all PDF work in one process is serialized. Apps should do PDF work on a
-//! background worker and never on the UI thread (an export holds the lock for its whole run).
+//! parallel speed-up: all PDF work in one process is serialized. Apps do their PDF work on one
+//! [`PdfWorker`] so it runs in priority order, never on the UI thread. [`add_ink`] does not use
+//! pdfium and runs on any thread without the lock.
 
 mod export;
 pub mod ink_writer;
+pub mod notebook;
 mod render;
 mod syntax;
 mod text;
+pub mod worker;
 
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -46,6 +52,7 @@ pub use export::{ExportPage, PageSource, Stroke};
 pub use ink_writer::{INK_LAYER_NAME, add_ink, hide_ink};
 pub use render::{Rgba, Tile, page_pixels, tiles};
 pub use text::{PageText, TextChar};
+pub use worker::{Docs, ExportSheet, PdfWorker, SheetSource, TileRequest, TileResult, WorkerOptions};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -57,6 +64,10 @@ pub enum Error {
     PageOutOfRange { page: u32, count: u32 },
     #[error("{0}")]
     Invalid(String),
+    #[error("PDF worker: {0}")]
+    Worker(String),
+    #[error(transparent)]
+    Core(#[from] n0te_core::Error),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

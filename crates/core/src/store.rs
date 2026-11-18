@@ -95,9 +95,9 @@ impl Library {
         write_atomic(&path, &sheet.snapshot()?)
     }
 
-    /// Stores a blob (if new) and returns its BLAKE3 hex id.
+    /// Stores a blob (if new) and returns its BLAKE3 hex id ([`blob_id`]).
     pub fn put_blob(&self, data: &[u8]) -> Result<String> {
-        let id = blake3::hash(data).to_hex().to_string();
+        let id = blob_id(data);
         let path = self.root.join("blobs").join(&id);
         if !path.exists() {
             write_atomic(&path, data)?;
@@ -129,6 +129,11 @@ impl Library {
         check_name(sheet)?;
         Ok(self.nb_dir(notebook)?.join("sheets").join(format!("{sheet}.loro")))
     }
+}
+
+/// The id a blob is stored under: the BLAKE3 hash of its bytes, as hex.
+pub fn blob_id(data: &[u8]) -> String {
+    blake3::hash(data).to_hex().to_string()
 }
 
 /// Ids become file names: only [0-9a-zA-Z_-], 1..=128 chars (no traversal).
