@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/ffi", "crates/pdf", "crates/uniffi-bindgen"]
+members = ["crates/core", "crates/desktop", "crates/ffi", "crates/pdf", "crates/uniffi-bindgen"]
 
 [workspace.package]
 edition = "2024"
@@ -22,3 +22,12 @@ strip = "debuginfo"  # keep symbols: uniffi-bindgen reads its metadata from them
 
 [profile.bench]
 debug = false
+
+# Optimized but quick to rebuild (no fat LTO): for iterating on the desktop app and its
+# headless measurements. `cargo build --profile fast -p n0te-desktop`.
+[profile.fast]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true
+strip = false
