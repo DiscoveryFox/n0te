@@ -8,6 +8,8 @@ publish.workspace = true
 [dependencies]
 n0te-core.workspace = true
 thiserror.workspace = true
+# zlib for ink content streams (pure Rust backend).
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
 # Dynamic binding only: we ship libpdfium.so ourselves (scripts/fetch-pdfium.sh) and load it by path.
 # `thread_safe` puts every single pdfium call behind one process-wide mutex; see the crate docs.
 pdfium-render = { version = "0.9.5", default-features = false, features = ["pdfium_latest", "thread_safe"] }

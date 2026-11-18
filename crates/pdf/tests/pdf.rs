@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use n0te_core::ink::{Brush, InkPoint};
 use n0te_pdf::pdfium_render::prelude::*;
-use n0te_pdf::{Error, ExportPage, PageSource, PdfDoc, PdfEngine, Rect, Rgba, Stroke, Tile, page_pixels, tiles};
+use n0te_pdf::{Error, ExportPage, PageSource, PdfDoc, PdfEngine, Rect, Rgba, Stroke, Tile, hide_ink, page_pixels, tiles};
 
 fn library() -> PathBuf {
     if let Some(p) = std::env::var_os("N0TE_PDFIUM_LIB") {
@@ -297,4 +297,146 @@ fn renders_from_many_threads() {
     for w in workers {
         assert_eq!(w.join().unwrap(), reference);
     }
+}
+
+/// One page of `media` points with a crop box (left, bottom, right, top) and a rotation, and a
+/// blue square near the middle of the crop box (so the page has content to wrap).
+fn make_cropped(e: &PdfEngine, media: (f32, f32), crop: (f32, f32, f32, f32), rot: PdfPageRenderRotation) -> Vec<u8> {
+    e.with_raw(|pdfium| {
+        let mut doc = pdfium.create_new_pdf().unwrap();
+        let mut page = doc.pages_mut().create_page_at_end(PdfPagePaperSize::from_points(PdfPoints::new(media.0), PdfPoints::new(media.1))).unwrap();
+        page.objects_mut()
+            .create_path_object_rect(PdfRect::new_from_values(350.0, 250.0, 400.0, 300.0), None, None, Some(PdfColor::new(30, 90, 200, 255)))
+            .unwrap();
+        page.boundaries_mut().set_crop(PdfRect::new_from_values(crop.1, crop.0, crop.3, crop.2)).unwrap();
+        page.set_rotation(rot);
+        doc.save_to_bytes().unwrap()
+    })
+}
+
+const ROTATIONS: [PdfPageRenderRotation; 4] =
+    [PdfPageRenderRotation::None, PdfPageRenderRotation::Degrees90, PdfPageRenderRotation::Degrees180, PdfPageRenderRotation::Degrees270];
+
+#[test]
+fn ink_lands_where_drawn_for_every_rotation_and_crop_box() {
+    let e = engine();
+    for rot in ROTATIONS {
+        // Crop box 450 x 600 pt, offset into a 600 x 800 media box.
+        let src = e.open(make_cropped(&e, (600.0, 800.0), (50.0, 100.0, 500.0, 700.0), rot)).unwrap();
+        let size = src.page_size(0).unwrap();
+        let turned = matches!(rot, PdfPageRenderRotation::Degrees90 | PdfPageRenderRotation::Degrees270);
+        assert_eq!((size.width, size.height), if turned { (600.0, 450.0) } else { (450.0, 600.0) }, "{rot:?}");
+        let (w, h) = (size.width, size.height);
+        let top = line(40.0, 30.0, 200.0, 30.0); // horizontal, near the top-left corner
+        let corner = line(w - 30.0, h - 90.0, w - 30.0, h - 30.0); // vertical, near the bottom-right
+        let strokes = [Stroke { points: &top, brush: brush(0xFF00_0000) }, Stroke { points: &corner, brush: brush(0xFFD7_1921) }];
+        let bytes = e.export(&[ExportPage { source: PageSource::Pdf { doc: &src, page: 0 }, strokes: &strokes }]).unwrap();
+        let out = e.open(bytes).unwrap();
+        let img = out.render_page(0, w as u32).unwrap();
+        for x in [60, 120, 180] {
+            assert_eq!(pixel(&img, x, 30), [0, 0, 0, 255], "{rot:?}: stroke at ({x}, 30)");
+            assert_eq!(pixel(&img, x, 45), [255, 255, 255, 255], "{rot:?}: paper at ({x}, 45)");
+        }
+        let (cx, cy) = (w as u32 - 30, h as u32 - 60);
+        assert_eq!(pixel(&img, cx, cy), [0xD7, 0x19, 0x21, 255], "{rot:?}: corner stroke");
+        assert_eq!(pixel(&img, cx - 15, cy), [255, 255, 255, 255], "{rot:?}: paper beside the corner stroke");
+        // The original content is still there (the square sits near the middle of the page).
+        let blue = (0..img.height).flat_map(|y| (0..img.width).map(move |x| (x, y))).filter(|&(x, y)| pixel(&img, x, y) == [30, 90, 200, 255]).count();
+        assert!((2000..=2600).contains(&blue), "{rot:?}: {blue} px of the 50x50 pt square");
+    }
+}
+
+/// Mean and worst per-channel difference of two renders, and the share of pixels off by > 32.
+fn diff(a: &Rgba, b: &Rgba) -> (f64, u8, f64) {
+    assert_eq!((a.width, a.height), (b.width, b.height));
+    let (mut sum, mut max, mut off) = (0u64, 0u8, 0usize);
+    for (pa, pb) in a.data.chunks_exact(4).zip(b.data.chunks_exact(4)) {
+        let d = pa.iter().zip(pb).map(|(x, y)| x.abs_diff(*y)).max().unwrap();
+        sum += d as u64;
+        max = max.max(d);
+        off += (d > 32) as usize;
+    }
+    let n = (a.data.len() / 4) as f64;
+    (sum as f64 / n, max, off as f64 / n)
+}
+
+#[test]
+fn own_writer_renders_like_the_pdfium_objects_path() {
+    let e = engine();
+    let text = e.open(make_pdf(&e, &[(A4.0, A4.1, NONE, &["Compare", "the two writers"])])).unwrap();
+    let docs: Vec<PdfDoc> = ROTATIONS.iter().map(|&r| e.open(make_cropped(&e, (600.0, 800.0), (50.0, 100.0, 500.0, 700.0), r)).unwrap()).collect();
+    let lines: Vec<Vec<InkPoint>> = (0..12).map(|i| line(30.0 + i as f32 * 20.0, 40.0, 60.0 + i as f32 * 25.0, 400.0 - i as f32 * 7.0)).collect();
+    let colors = [0xFF11_1111, 0xFF1E_5AC8, 0x80FF_EB3B, 0x40D0_2020];
+    let strokes: Vec<Stroke> =
+        lines.iter().enumerate().map(|(i, l)| Stroke { points: l, brush: Brush { width: 3.0 + i as f32, thinning: 0.6, color: colors[i % 4] } }).collect();
+    let mut pages = vec![ExportPage { source: PageSource::Pdf { doc: &text, page: 0 }, strokes: &strokes }];
+    pages.extend(docs.iter().map(|d| ExportPage { source: PageSource::Pdf { doc: d, page: 0 }, strokes: &strokes }));
+    pages.push(ExportPage { source: PageSource::Blank { width: 400.0, height: 500.0 }, strokes: &strokes });
+
+    let ours = e.open(e.export(&pages).unwrap()).unwrap();
+    let old = e.open(e.export_via_page_objects(&pages).unwrap()).unwrap();
+    for i in 0..pages.len() as u32 {
+        let width = (ours.page_size(i).unwrap().width * 2.0) as u32;
+        let (mean, max, off) = diff(&ours.render_page(i, width).unwrap(), &old.render_page(i, width).unwrap());
+        // Same outlines, same 1/100 pt rounding: only edge anti-aliasing differs (max ~35/255).
+        assert!(mean < 0.1 && max <= 64 && off < 1e-3, "page {i}: mean diff {mean:.4}, max {max}, {:.4} % of pixels off by > 32", off * 100.0);
+    }
+}
+
+#[test]
+fn exported_file_passes_qpdf_check() {
+    let e = engine();
+    let a = e.open(make_pdf(&e, &[(A4.0, A4.1, NONE, &["qpdf"]), (A4.0, A4.1, PdfPageRenderRotation::Degrees90, &["two"])])).unwrap();
+    let c = e.open(make_cropped(&e, (600.0, 800.0), (50.0, 100.0, 500.0, 700.0), PdfPageRenderRotation::Degrees270)).unwrap();
+    let l = line(50.0, 50.0, 300.0, 200.0);
+    let s = [Stroke { points: &l, brush: brush(0xFFE0_2020) }, Stroke { points: &l, brush: brush(0x8000_00FF) }];
+    let pages = [
+        ExportPage { source: PageSource::Pdf { doc: &a, page: 1 }, strokes: &s },
+        ExportPage { source: PageSource::Blank { width: 300.0, height: 300.0 }, strokes: &s },
+        ExportPage { source: PageSource::Pdf { doc: &c, page: 0 }, strokes: &s },
+        ExportPage { source: PageSource::Pdf { doc: &a, page: 0 }, strokes: &[] },
+    ];
+    let bytes = e.export(&pages).unwrap();
+    let hidden = hide_ink(bytes.clone()).unwrap();
+    let dir = std::env::temp_dir().join(format!("n0te-qpdf-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (name, data) in [("export.pdf", &bytes), ("hidden.pdf", &hidden)] {
+        let path = dir.join(name);
+        std::fs::write(&path, data).unwrap();
+        match std::process::Command::new("qpdf").arg("--check").arg(&path).output() {
+            Ok(o) => assert!(o.status.success(), "qpdf --check {name}:\n{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+            Err(_) => eprintln!("qpdf not installed, skipping the qpdf check"),
+        }
+    }
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn ink_layer_can_be_hidden_even_after_a_second_export() {
+    let e = engine();
+    let src = e.open(make_pdf(&e, &[(A4.0, A4.1, NONE, &["Layer"])])).unwrap();
+    let first = line(100.0, 300.0, 400.0, 300.0);
+    let s1 = [Stroke { points: &first, brush: brush(0xFF00_0000) }];
+    let once = e.export(&[ExportPage { source: PageSource::Pdf { doc: &src, page: 0 }, strokes: &s1 }]).unwrap();
+
+    // Export the exported page again with more ink: its old ink layer is now only referenced
+    // from the page, the new one is listed in the catalog.
+    let again_src = e.open(once).unwrap();
+    let second = line(100.0, 500.0, 400.0, 500.0);
+    let s2 = [Stroke { points: &second, brush: brush(0xFFD7_1921) }];
+    let twice = e.export(&[ExportPage { source: PageSource::Pdf { doc: &again_src, page: 0 }, strokes: &s2 }]).unwrap();
+
+    let render = |b: &[u8]| e.open(b.to_vec()).unwrap().render_page(0, 595).unwrap();
+    let shown = render(&twice);
+    assert_eq!(pixel(&shown, 250, 300), [0, 0, 0, 255]);
+    assert_eq!(pixel(&shown, 250, 500), [0xD7, 0x19, 0x21, 255]);
+    let hidden_bytes = hide_ink(twice).unwrap();
+    let hidden = render(&hidden_bytes);
+    assert_eq!(pixel(&hidden, 250, 300), [255, 255, 255, 255], "first ink hidden");
+    assert_eq!(pixel(&hidden, 250, 500), [255, 255, 255, 255], "second ink hidden");
+    assert_eq!(pixel(&hidden, 120, 842 - 80), [30, 90, 200, 255], "the page's own rectangle stays");
+    assert_eq!(e.open(hidden_bytes).unwrap().page_text(0).unwrap().text(), "Layer");
+    // A PDF without n0te ink comes back unchanged.
+    let plain = make_pdf(&e, &[(A4.0, A4.1, NONE, &[])]);
+    assert_eq!(hide_ink(plain.clone()).unwrap(), plain);
 }

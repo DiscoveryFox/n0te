@@ -4,14 +4,20 @@
 //!
 //! Set N0TE_BENCH_OUT=<dir> to keep the inked export for inspection.
 //!
+//! Export rows show n0te's own ink writer and, as "pdfium objects", the M0 path that added ink as
+//! pdfium page objects. The worker section measures tiles through [`PdfWorker`].
+//!
 //! "cold" = fresh document, the page is loaded and parsed as part of the call; "warm" = the page
 //! is already in the document's page cache. Tablet numbers: a page 1600 px wide, tiles of
 //! 512 × 512 px at 4× that zoom.
 
+use std::sync::Mutex;
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use n0te_core::ink::{Brush, InkPoint};
-use n0te_pdf::{ExportPage, PageSize, PageSource, PdfEngine, Stroke, Tile, page_pixels};
+use n0te_pdf::worker::priority;
+use n0te_pdf::{ExportPage, PageSize, PageSource, PdfEngine, PdfWorker, Stroke, Tile, TileRequest, WorkerOptions, page_pixels, tiles};
 
 const PAGE_WIDTH_PX: u32 = 1600;
 const TILE: u32 = 512;
@@ -32,6 +38,7 @@ fn main() {
         bench_file(&e, f);
     }
     bench_export(&e, &files[0]);
+    bench_worker(&e, &files[0]);
     // The longest document: export all of it, with ink on every 10th page.
     let longest = files.iter().max_by_key(|f| e.open(std::fs::read(f).unwrap()).unwrap().page_count()).unwrap();
     bench_export_long(&e, longest);
@@ -137,12 +144,28 @@ fn bench_export(e: &PdfEngine, path: &str) {
     for (label, list) in [("pages only", &plain), ("pages + 20 strokes each", &lightly), ("pages + ink", &inked), ("reversed + blank pages, all inked", &mixed)] {
         let mut times = Vec::new();
         let mut out = Vec::new();
-        for _ in 0..3 {
+        for _ in 0..5 {
             let t = Instant::now();
             out = e.export(list).unwrap();
             times.push(t.elapsed());
         }
         println!("  {label:<36} {}   -> {:.2} MB ({} pages)", stats(&times), out.len() as f64 / 1e6, list.len());
+        if label != "pages only" {
+            let t = Instant::now();
+            let old = e.export_via_page_objects(list).unwrap();
+            println!("    {:<34} {:7.2} ms           -> {:.2} MB", "(pdfium objects, M0)", ms(t.elapsed()), old.len() as f64 / 1e6);
+        }
+        if label == "pages + ink" {
+            // Where the time goes: pdfium assembly vs. the ink writer.
+            let sources: Vec<PageSource> = list.iter().map(|p| p.source).collect();
+            let t = Instant::now();
+            let base = e.assemble(&sources).unwrap();
+            let t_asm = t.elapsed();
+            let strokes: Vec<&[Stroke]> = list.iter().map(|p| p.strokes).collect();
+            let t = Instant::now();
+            std::hint::black_box(n0te_pdf::add_ink(base, &strokes).unwrap());
+            println!("    = assemble (pdfium) {:.2} ms + add_ink {:.2} ms", ms(t_asm), ms(t.elapsed()));
+        }
         if let (Some(dir), "pages + ink") = (std::env::var_os("N0TE_BENCH_OUT"), label) {
             let file = std::path::Path::new(&dir).join("n0te-bench-export.pdf");
             std::fs::write(&file, &out).unwrap();
@@ -179,6 +202,111 @@ fn bench_export_long(e: &PdfEngine, path: &str) {
     let t = Instant::now();
     let out = e.export(&list).unwrap();
     println!("   20 strokes on every 10th page ({} inked): {:.0} ms -> {:.2} MB", n.div_ceil(10), ms(t.elapsed()), out.len() as f64 / 1e6);
+    let t = Instant::now();
+    let old = e.export_via_page_objects(&list).unwrap();
+    println!("   same through pdfium objects (M0): {:.0} ms -> {:.2} MB", ms(t.elapsed()), old.len() as f64 / 1e6);
+}
+
+/// Tiles through the PDF worker: throughput, latency of a visible tile behind a full prefetch
+/// queue, and a fling that bumps the generation while tiles are queued.
+fn bench_worker(e: &PdfEngine, path: &str) {
+    let bytes = std::fs::read(path).unwrap();
+    let sizes = e.open(bytes.clone()).unwrap().page_sizes().unwrap();
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let (tx, rx) = channel();
+    let tx = Mutex::new(tx);
+    let w = PdfWorker::start(
+        *e,
+        move |_| Ok(bytes.clone()),
+        move |r| {
+            let _ = tx.lock().unwrap().send((Instant::now(), r));
+        },
+        WorkerOptions::default(),
+    );
+    w.call(0, |d| d.get("doc").map(|_| ())).unwrap().unwrap(); // open once, outside the timings
+    let pages = SAMPLE_PAGES.min(sizes.len() as u32);
+    let req = |page: u32, scale: f32, tile: Tile, prio: u32, generation: u64| TileRequest { doc: "doc".into(), page, scale, tile, priority: prio, view: 0, generation };
+    println!("== worker tiles from {name} ({TILE}² px, results through the sink)");
+
+    for (label, zoom) in [("1600 px wide pages", 1.0f32), ("4x zoom", ZOOM)] {
+        let mut list = Vec::new();
+        for p in 0..pages {
+            let scale = zoom * PAGE_WIDTH_PX as f32 / sizes[p as usize].width;
+            let grid = tiles(page_pixels(sizes[p as usize], scale), TILE);
+            // At 4x zoom: the 3x3 tiles around the middle of each page (what is on screen).
+            let keep = if zoom > 1.0 { grid.len().min(9) } else { grid.len() };
+            let start = (grid.len() - keep) / 2;
+            list.extend(grid[start..start + keep].iter().map(|t| req(p, scale, *t, priority::VISIBLE, 0)));
+        }
+        let n = list.len();
+        let t = Instant::now();
+        w.request(list);
+        let mut px = 0u64;
+        for _ in 0..n {
+            let (_, r) = rx.recv().unwrap();
+            px += (r.request.tile.width * r.request.tile.height) as u64;
+        }
+        let el = t.elapsed();
+        println!(
+            "  {label:<22} {n:4} tiles in {:7.1} ms = {:6.2} ms/tile, {:5.0} tiles/s, {:.0} Mpx/s",
+            ms(el),
+            ms(el) / n as f64,
+            n as f64 / el.as_secs_f64(),
+            px as f64 / el.as_secs_f64() / 1e6
+        );
+    }
+
+    // A visible tile requested behind 200 queued prefetch tiles.
+    let scale = ZOOM * PAGE_WIDTH_PX as f32 / sizes[0].width;
+    let grid = tiles(page_pixels(sizes[0], scale), TILE);
+    let prefetch: Vec<TileRequest> = (0..200).map(|i| req(1 + (i / grid.len() as u32) % (pages - 1).max(1), scale, grid[i as usize % grid.len()], priority::PREFETCH, 0)).collect();
+    let visible = req(0, scale, grid[grid.len() / 2], priority::VISIBLE, 0);
+    w.request(prefetch);
+    let t = Instant::now();
+    w.request([visible.clone()]);
+    let mut latency = None;
+    let mut rendered_before = 0;
+    while latency.is_none() {
+        let (at, r) = rx.recv().unwrap();
+        if r.request == visible {
+            latency = Some(at - t);
+        } else {
+            rendered_before += 1;
+        }
+    }
+    w.cancel(0, 1);
+    while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+    println!("  visible tile behind 200 queued prefetch tiles: {:.2} ms ({rendered_before} prefetch tile(s) finished first)", ms(latency.unwrap()));
+
+    // Fling: 30 viewport changes 4 ms apart, each asking for 12 visible + 12 prefetch tiles of
+    // the next page area with a new generation.
+    let gen0 = 10u64;
+    let mut last_request = Instant::now();
+    let mut requested = 0;
+    for g in 0..30u64 {
+        let p = (g as u32) % pages;
+        let scale = ZOOM * PAGE_WIDTH_PX as f32 / sizes[p as usize].width;
+        let grid = tiles(page_pixels(sizes[p as usize], scale), TILE);
+        let list: Vec<TileRequest> = (0..24).map(|i| req(p, scale, grid[(i + g as usize * 5) % grid.len()], if i < 12 { priority::VISIBLE } else { priority::PREFETCH }, gen0 + g)).collect();
+        requested += list.len();
+        last_request = Instant::now();
+        w.request(list);
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let mut rendered = 0;
+    let mut last_gen_done = 0;
+    while let Ok((at, r)) = rx.recv_timeout(Duration::from_millis(500)) {
+        rendered += 1;
+        if r.request.generation == gen0 + 29 {
+            last_gen_done += 1;
+            if last_gen_done == 24 {
+                println!(
+                    "  fling, 30 viewport changes 4 ms apart: {requested} tiles requested, {rendered} rendered, last viewport's 24 tiles done {:.1} ms after its request",
+                    ms(at - last_request)
+                );
+            }
+        }
+    }
 }
 
 /// Deterministic handwriting-like strokes: wandering curves of `samples` points, ~0.8 pt apart.
