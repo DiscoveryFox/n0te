@@ -1,4 +1,8 @@
 //! Export: a new PDF made of pages from source PDFs and blank pages, with vector ink on top.
+//!
+//! Two steps: pdfium assembles the pages ([`PdfEngine::assemble`]: imports pages with their
+//! content, resources and annotations, adds blank pages), then n0te's own writer appends the ink
+//! ([`crate::add_ink`]). Only the first step holds the pdfium lock.
 
 use std::fmt::Write as _;
 
@@ -32,21 +36,34 @@ pub struct ExportPage<'a> {
     pub strokes: &'a [Stroke<'a>],
 }
 
+/// Largest blank page accepted, in points (PDF's own limit is 14 400).
+const MAX_PAGE: f32 = 14_400.0;
+
 impl PdfEngine {
-    /// Builds a new PDF from `pages` and returns its bytes.
+    /// Builds a new PDF from `pages` and returns its bytes: [`PdfEngine::assemble`] followed by
+    /// [`crate::add_ink`].
     ///
     /// Each stroke becomes one filled path (the [`ink::outline`] polygon, non-zero winding) in the
-    /// brush colour; alpha below 255 becomes a transparency graphics state.
+    /// brush colour; alpha below 255 becomes a transparency graphics state. The ink of all pages
+    /// is in the optional content group "n0te ink" (see [`crate::ink_writer`]).
+    pub fn export(&self, pages: &[ExportPage]) -> Result<Vec<u8>> {
+        let sources: Vec<PageSource> = pages.iter().map(|p| p.source).collect();
+        let bytes = self.assemble(&sources)?;
+        let strokes: Vec<&[Stroke]> = pages.iter().map(|p| p.strokes).collect();
+        crate::add_ink(bytes, &strokes)
+    }
+
+    /// The pdfium half of an export: a new PDF with `pages` in order and no ink.
     ///
     /// Pages from the same source document are imported in one pdfium call, so resources they
-    /// share (fonts, images) are copied once and not once per page.
-    ///
-    /// Cost: pdfium's `FPDFPage_GenerateContent` walks the whole document's object graph when a
-    /// page has an indirect `/Resources` dictionary (pdfTeX output does), so inking N pages of
-    /// a big document costs O(N × document size): ~10 ms per page in a 1-page document, ~75 ms
-    /// in a 477-page one (laptop). Pages without strokes are not regenerated.
-    pub fn export(&self, pages: &[ExportPage]) -> Result<Vec<u8>> {
+    /// share (fonts, images) are copied once and not once per page. Cost is roughly linear in the
+    /// size of what is copied (a few ms for 50 slides).
+    pub fn assemble(&self, pages: &[PageSource]) -> Result<Vec<u8>> {
         let _g = lock();
+        Ok(self.assemble_locked(pages)?.save_to_bytes()?)
+    }
+
+    fn assemble_locked(&self, pages: &[PageSource]) -> Result<PdfDocument<'static>> {
         let pdfium = &self.e.pdfium;
 
         // 1. Staging document: one import per source document, then the blank pages.
@@ -54,7 +71,7 @@ impl PdfEngine {
         let mut staged_at = vec![0u32; pages.len()];
         let mut sources: Vec<&PdfDoc> = Vec::new();
         for p in pages {
-            if let PageSource::Pdf { doc, page } = p.source {
+            if let PageSource::Pdf { doc, page } = *p {
                 doc.check_page(page)?;
                 if !sources.iter().any(|d| std::ptr::eq(*d, doc)) {
                     sources.push(doc);
@@ -65,7 +82,7 @@ impl PdfEngine {
         for src in &sources {
             let mut range = String::new();
             for (i, p) in pages.iter().enumerate() {
-                if let PageSource::Pdf { doc, page } = p.source
+                if let PageSource::Pdf { doc, page } = *p
                     && std::ptr::eq(doc, *src)
                 {
                     let _ = write!(range, "{}{}", if range.is_empty() { "" } else { "," }, page + 1);
@@ -77,8 +94,8 @@ impl PdfEngine {
             staging.pages_mut().copy_pages_from_document(&src.doc, &range, at)?;
         }
         for (i, p) in pages.iter().enumerate() {
-            if let PageSource::Blank { width, height } = p.source {
-                if !(width > 0.0 && height > 0.0 && width <= 14_400.0 && height <= 14_400.0) {
+            if let PageSource::Blank { width, height } = *p {
+                if !(width > 0.0 && height > 0.0 && width <= MAX_PAGE && height <= MAX_PAGE) {
                     return Err(Error::Invalid(format!("blank page of {width}x{height} pt")));
                 }
                 staging.pages_mut().create_page_at_end(PdfPagePaperSize::Custom(PdfPoints::new(width), PdfPoints::new(height)))?;
@@ -89,16 +106,24 @@ impl PdfEngine {
 
         // 2. Put the pages in export order (one more import, again sharing resources), unless
         //    staging already has that order.
-        let out = if staged_at.iter().enumerate().all(|(i, &s)| s == i as u32) {
-            staging
-        } else {
-            let mut out = pdfium.create_new_pdf()?;
-            let order = staged_at.iter().map(|s| (s + 1).to_string()).collect::<Vec<_>>().join(",");
-            out.pages_mut().copy_pages_from_document(&staging, &order, 0)?;
-            out
-        };
+        if staged_at.iter().enumerate().all(|(i, &s)| s == i as u32) {
+            return Ok(staging);
+        }
+        let mut out = pdfium.create_new_pdf()?;
+        let order = staged_at.iter().map(|s| (s + 1).to_string()).collect::<Vec<_>>().join(",");
+        out.pages_mut().copy_pages_from_document(&staging, &order, 0)?;
+        Ok(out)
+    }
 
-        // 3. Ink on top.
+    /// The M0 export: ink added as pdfium path objects. Kept only to compare speed and output
+    /// with [`PdfEngine::export`] (bench and tests). pdfium's `FPDFPage_GenerateContent` walks
+    /// the whole document for pages with an indirect `/Resources`, so this is
+    /// O(inked pages × document size).
+    #[doc(hidden)]
+    pub fn export_via_page_objects(&self, pages: &[ExportPage]) -> Result<Vec<u8>> {
+        let _g = lock();
+        let sources: Vec<PageSource> = pages.iter().map(|p| p.source).collect();
+        let out = self.assemble_locked(&sources)?;
         for (i, p) in pages.iter().enumerate() {
             if !p.strokes.is_empty() {
                 draw_strokes(&out, i as u32, p.strokes)?;
@@ -126,8 +151,6 @@ fn draw_strokes(doc: &PdfDocument<'static>, index: u32, strokes: &[Stroke]) -> R
 }
 
 fn polygon_path(doc: &PdfDocument<'static>, m: &Affine, poly: &[f32], fill: PdfColor) -> Result<PdfPagePathObject<'static>> {
-    // 1/100 pt is far below what anyone can see; pdfium writes the shortest decimal form, so
-    // rounding makes the content streams ~35 % smaller.
     let round = |v: f64| ((v * 100.0).round() / 100.0) as f32;
     let pt = |i: usize| {
         let (x, y) = m.apply(poly[i] as f64, poly[i + 1] as f64);

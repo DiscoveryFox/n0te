@@ -1,6 +1,10 @@
 //! n0te-pdf: PDF pages for n0te — open, render (whole pages and tiles), extract text with
 //! positions, and export selected pages plus blank pages with vector ink on top.
 //!
+//! - [`PdfEngine`] / [`PdfDoc`]: pdfium, loaded from an explicit path.
+//! - [`add_ink`] ([`ink_writer`]): n0te's own writer that appends ink to a PDF as an incremental
+//!   update (no pdfium involved); [`PdfEngine::export`] = pdfium assembles the pages, then this.
+//!
 //! Built on pdfium through `pdfium-render` (dynamic binding). The apps ship `libpdfium.so`
 //! themselves (`scripts/fetch-pdfium.sh`) and pass its path to [`PdfEngine::load`].
 //!
@@ -23,7 +27,9 @@
 //! background worker and never on the UI thread (an export holds the lock for its whole run).
 
 mod export;
+pub mod ink_writer;
 mod render;
+mod syntax;
 mod text;
 
 use std::mem::ManuallyDrop;
@@ -37,6 +43,7 @@ pub use pdfium_render;
 use pdfium_render::prelude::{PdfDocument, PdfPage, PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryConfig};
 
 pub use export::{ExportPage, PageSource, Stroke};
+pub use ink_writer::{INK_LAYER_NAME, add_ink, hide_ink};
 pub use render::{Rgba, Tile, page_pixels, tiles};
 pub use text::{PageText, TextChar};
 
