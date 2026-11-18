@@ -18,7 +18,7 @@ n0te-core = { path = "crates/core" }
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-strip = true
+strip = "debuginfo"  # keep symbols: uniffi-bindgen reads its metadata from them (APK copy is stripped)
 
 [profile.bench]
 debug = false
