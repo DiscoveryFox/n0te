@@ -12,6 +12,8 @@ use n0te_core::notebook::{self as nbm, Background, OutlineRow, SheetSpec, Side};
 
 uniffi::setup_scaffolding!();
 
+mod edit;
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum N0teError {
     #[error("{msg}")]
@@ -26,7 +28,7 @@ impl From<n0te_core::Error> for N0teError {
 
 type R<T> = Result<T, N0teError>;
 
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // A panic while holding the lock leaves the data usable (every write is a whole op).
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
@@ -215,7 +217,7 @@ impl NoteLibrary {
 #[derive(uniffi::Object)]
 pub struct NotebookHandle {
     lib: Arc<NoteLibrary>,
-    nb: Mutex<n0te_core::notebook::Notebook>,
+    pub(crate) nb: Mutex<n0te_core::notebook::Notebook>,
 }
 
 #[uniffi::export]
@@ -266,7 +268,7 @@ impl NotebookHandle {
 pub struct SheetHandle {
     notebook: Arc<NotebookHandle>,
     sheet_id: String,
-    sheet: Mutex<n0te_core::sheet::Sheet>,
+    pub(crate) sheet: Mutex<n0te_core::sheet::Sheet>,
 }
 
 #[uniffi::export]

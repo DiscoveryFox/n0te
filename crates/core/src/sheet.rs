@@ -3,7 +3,9 @@
 //! pass with no nested containers. Erasing deletes the key; recolouring or moving writes a new
 //! value under the same key.
 
-use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, ValueOrContainer, VersionVector};
+use std::sync::Mutex;
+
+use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UndoManager, ValueOrContainer, VersionVector};
 
 use crate::error::{Error, Result};
 use crate::ids;
@@ -20,6 +22,8 @@ pub struct Stroke {
 pub struct Sheet {
     doc: LoroDoc,
     objects: LoroMap,
+    /// Undo/redo of this device's own edits only (a peer's edits are never undone here).
+    undo: Mutex<UndoManager>,
 }
 
 const STROKE_V1: u8 = 1;
@@ -38,7 +42,66 @@ impl Sheet {
     fn from_doc(doc: LoroDoc, peer: u64) -> Result<Self> {
         doc.set_peer_id(peer)?;
         let objects = doc.get_map("objects");
-        Ok(Sheet { doc, objects })
+        let mut undo = UndoManager::new(&doc);
+        undo.set_merge_interval(0); // every committed edit (stroke, erase gesture, lasso move) is one step
+        undo.set_max_undo_steps(500);
+        Ok(Sheet { doc, objects, undo: Mutex::new(undo) })
+    }
+
+    fn um(&self) -> std::sync::MutexGuard<'_, UndoManager> {
+        self.undo.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Undoes this device's last edit on the sheet. Returns whether anything changed.
+    pub fn undo(&self) -> Result<bool> {
+        Ok(self.um().undo()?)
+    }
+    pub fn redo(&self) -> Result<bool> {
+        Ok(self.um().redo()?)
+    }
+    pub fn can_undo(&self) -> bool {
+        self.um().can_undo()
+    }
+    pub fn can_redo(&self) -> bool {
+        self.um().can_redo()
+    }
+
+    /// Ids of strokes within `radius` of (x, y) (eraser), measured to the stroke's centre line
+    /// plus half its width.
+    pub fn hit_test(&self, x: f32, y: f32, radius: f32) -> Vec<String> {
+        let area = Rect::new(x - radius, y - radius, x + radius, y + radius);
+        self.strokes_in(Some(area))
+            .into_iter()
+            .filter(|s| {
+                let r = radius + s.brush.width * 0.5;
+                match s.points.len() {
+                    0 => false,
+                    1 => (s.points[0].x - x).hypot(s.points[0].y - y) <= r,
+                    _ => s.points.windows(2).any(|w| seg_dist(x, y, w[0].x, w[0].y, w[1].x, w[1].y) <= r),
+                }
+            })
+            .map(|s| s.id)
+            .collect()
+    }
+
+    /// Ids of strokes the lasso (closed polygon, x,y pairs) encloses: at least 60 % of their
+    /// samples inside.
+    pub fn lasso(&self, polygon: &[f32]) -> Vec<String> {
+        if polygon.len() < 6 {
+            return Vec::new();
+        }
+        let mut bb = Rect::EMPTY;
+        for xy in polygon.chunks_exact(2) {
+            bb = bb.include(xy[0], xy[1]);
+        }
+        self.strokes_in(Some(bb))
+            .into_iter()
+            .filter(|s| {
+                let inside = s.points.iter().filter(|p| point_in_polygon(p.x, p.y, polygon)).count();
+                inside * 10 >= s.points.len() * 6
+            })
+            .map(|s| s.id)
+            .collect()
     }
 
     /// Adds a finished stroke; returns its id.
@@ -149,6 +212,28 @@ impl Sheet {
     }
 }
 
+fn seg_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 < 1e-9 { 0.0 } else { (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0) };
+    (px - (ax + t * dx)).hypot(py - (ay + t * dy))
+}
+
+/// Even-odd point-in-polygon test (x,y pairs).
+fn point_in_polygon(x: f32, y: f32, poly: &[f32]) -> bool {
+    let n = poly.len() / 2;
+    let mut inside = false;
+    let mut j = n - 1;
+    for i in 0..n {
+        let (xi, yi, xj, yj) = (poly[2 * i], poly[2 * i + 1], poly[2 * j], poly[2 * j + 1]);
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
 // Stroke record: [STROKE_V1][width f32][thinning f32][color u32][x0 y0 x1 y1 f32][points…]
 const HEADER: usize = 1 + 4 + 4 + 4 + 16;
 
@@ -209,6 +294,39 @@ mod tests {
         s.remove(&[b.clone(), "nope".into()]).unwrap();
         assert_eq!(s.len(), 1);
         assert!(s.stroke(&b).unwrap().is_none());
+    }
+
+    #[test]
+    fn undo_redo_hit_test_and_lasso() {
+        let s = Sheet::create(9).unwrap();
+        let a = s.add_stroke(Brush::default(), &pts(0.0, 20)).unwrap();
+        let b = s.add_stroke(Brush::default(), &pts(200.0, 20)).unwrap();
+        assert_eq!(s.hit_test(10.0, 15.0, 3.0), vec![a.clone()]);
+        assert!(s.hit_test(100.0, 100.0, 3.0).is_empty());
+        let poly = [-10.0, -10.0, 60.0, -10.0, 60.0, 60.0, -10.0, 60.0];
+        assert_eq!(s.lasso(&poly), vec![a.clone()]);
+
+        s.remove(std::slice::from_ref(&a)).unwrap();
+        assert_eq!(s.len(), 1);
+        assert!(s.undo().unwrap());
+        assert_eq!(s.len(), 2, "undo brings the erased stroke back");
+        assert!(s.redo().unwrap());
+        assert_eq!(s.len(), 1);
+        assert!(s.undo().unwrap());
+        assert!(s.undo().unwrap()); // undo adding b
+        assert!(s.stroke(&b).unwrap().is_none());
+        assert!(s.can_redo());
+    }
+
+    #[test]
+    fn undo_never_reverts_a_peer() {
+        let a = Sheet::create(1).unwrap();
+        let b = Sheet::load(2, &a.snapshot().unwrap()).unwrap();
+        b.add_stroke(Brush::default(), &pts(0.0, 5)).unwrap();
+        a.import(&b.updates_since(&a.version()).unwrap()).unwrap();
+        assert_eq!(a.len(), 1);
+        assert!(!a.undo().unwrap(), "nothing of A's own to undo");
+        assert_eq!(a.len(), 1);
     }
 
     #[test]
