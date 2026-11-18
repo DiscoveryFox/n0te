@@ -123,8 +123,8 @@ pub fn page_strokes(rng: &mut Rng, spec: &SheetSpec, target: usize, with_diagram
     };
     // Dense pages use a smaller hand so 400 words fit.
     let dense = target > 300;
-    let xh = if dense { 4.6 } else { 6.4 };
-    let line_h = if dense { line_h * 0.8 } else { line_h };
+    let xh = if dense { 4.2 } else { 6.4 };
+    let line_h = if dense { line_h * 0.7 } else { line_h };
     let mut y = 64.0 + line_h * 2.0;
 
     // Headline + red underline.
@@ -163,7 +163,7 @@ pub fn page_strokes(rng: &mut Rng, spec: &SheetSpec, target: usize, with_diagram
         }
         let mut x = margin_l + if rng.chance(0.15) { 18.0 } else { 0.0 };
         while x < margin_r - 30.0 && out.len() < target {
-            let w = rng.range(18.0, 64.0).min(margin_r - x);
+            let w = if dense { rng.range(16.0, 44.0) } else { rng.range(18.0, 64.0) }.min(margin_r - x);
             let color = if rng.chance(0.06) { INK_BLUE } else { INK_BLACK };
             out.push(Stroke { brush: pen(color, if dense { 1.4 } else { 1.8 }), points: word(rng, x, y, w, xh, 120) });
             x += w + rng.range(6.0, 13.0);

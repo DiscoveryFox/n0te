@@ -2,15 +2,26 @@
 //! space, drawn by a custom widget with pan (scroll / trackpad / middle-drag) and zoom
 //! (ctrl+scroll around the cursor).
 //!
-//! Each page's background and strokes are tessellated once into a `canvas::Cache` at a
-//! power-of-two level of detail (LOD) and then drawn with a GPU transformation, so panning and
-//! zooming within one LOD never rebuild paths. Caches of pages that have not been drawn for a
-//! while are dropped.
+//! Two ways to draw ink, switchable at runtime ([`InkPath`]):
+//!
+//! - **Canvas**: each page's background and stroke outlines (`ink::outline`, filled non-zero)
+//!   go through iced's `canvas::Frame` into one `canvas::Cache` per page at a power-of-two
+//!   level of detail (LOD). iced tessellates the polygons with lyon on the UI thread.
+//! - **Mesh** (wgpu only, default): the background still goes through a canvas cache, but the
+//!   strokes become one triangle mesh per page straight from `ink::outline_mesh` (no
+//!   tessellation), drawn with `mesh::Renderer::draw_mesh_cache` under a GPU transformation.
+//!   The mesh is in page units, so zooming never rebuilds it.
+//!
+//! In both cases panning never rebuilds anything; caches of pages not drawn for a while are
+//! dropped (LRU).
 
 use std::cell::{Cell, RefCell};
+use std::sync::Arc;
 use std::time::Instant;
 
+use iced::advanced::graphics::color;
 use iced::advanced::graphics::geometry::Renderer as _;
+use iced::advanced::graphics::mesh::{self, Indexed, Mesh, Renderer as _, SolidVertex2D};
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::{self, Renderer as _};
@@ -34,6 +45,15 @@ pub const MAX_ZOOM: f32 = 8.0;
 /// Keep at most this many page caches alive (LRU by last frame drawn).
 pub const MAX_CACHED: usize = 24;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InkPath {
+    /// canvas::Frame fills (lyon tessellation), works on every renderer.
+    Canvas,
+    /// One triangle mesh per page from `ink::outline_mesh`; wgpu only (tiny-skia falls back
+    /// to Canvas because it cannot draw meshes).
+    Mesh,
+}
+
 pub struct Page {
     pub sheet_id: String,
     pub spec: SheetSpec,
@@ -45,7 +65,11 @@ pub struct Page {
     pub strokes: Vec<Stroke>,
     pub samples: usize,
     cache: RefCell<canvas::Cache>,
+    /// Whether `cache` contains the strokes too (Canvas path) or only the background.
+    cache_has_ink: Cell<bool>,
     lod: Cell<f32>,
+    /// (sample step, mesh): zoomed-out views use a decimated mesh.
+    ink: RefCell<Option<(usize, mesh::Cache)>>,
     last_frame: Cell<u64>,
 }
 
@@ -55,28 +79,88 @@ impl Page {
     }
 
     pub fn is_cached(&self) -> bool {
-        self.lod.get() > 0.0
+        self.lod.get() > 0.0 || self.ink.borrow().is_some()
     }
 
     /// Drops the tessellated geometry (frees its memory; `Cache::clear` would keep it).
     pub fn evict(&self) {
         *self.cache.borrow_mut() = canvas::Cache::new();
+        *self.ink.borrow_mut() = None;
         self.lod.set(0.0);
     }
 
-    /// The page's geometry at `lod` (page units scaled by `lod`), built on first use.
-    /// Returns the geometry and, if it had to be built, how long that took.
-    pub fn geometry(&self, renderer: &iced::Renderer, lod: f32) -> (canvas::Geometry, Option<f32>) {
+    /// The page's canvas geometry at `lod` (page units scaled by `lod`), built on first use:
+    /// background, plus the strokes if `with_ink`. Returns the geometry and, if it had to be
+    /// built, how long that took.
+    pub fn geometry(&self, renderer: &iced::Renderer, lod: f32, with_ink: bool) -> (canvas::Geometry, Option<f32>) {
+        if self.cache_has_ink.get() != with_ink {
+            *self.cache.borrow_mut() = canvas::Cache::new();
+            self.cache_has_ink.set(with_ink);
+        }
         let size = Size::new(self.spec.width * lod, self.spec.height * lod);
         let started = Instant::now();
         let built = Cell::new(false);
         let geometry = self.cache.borrow().draw(renderer, size, |frame| {
             built.set(true);
             frame.scale(lod);
-            draw_page(frame, &self.spec, &self.strokes);
+            draw_page(frame, &self.spec, if with_ink { &self.strokes } else { &[] });
         });
         self.lod.set(lod);
         (geometry, built.get().then(|| started.elapsed().as_secs_f32() * 1000.0))
+    }
+
+    /// The strokes as one triangle mesh in page units, built on first use (and again when the
+    /// zoom crosses a decimation level).
+    pub fn ink_mesh(&self, zoom: f32) -> (mesh::Cache, Option<f32>) {
+        let step = mesh_step(zoom);
+        if let Some((s, cache)) = self.ink.borrow().as_ref()
+            && *s == step
+        {
+            return (cache.clone(), None);
+        }
+        let started = Instant::now();
+        let cache = mesh::Cache::new(Arc::from(vec![ink_mesh(&self.spec, &self.strokes, step)]));
+        *self.ink.borrow_mut() = Some((step, cache.clone()));
+        (cache, Some(started.elapsed().as_secs_f32() * 1000.0))
+    }
+}
+
+/// Every how many samples the mesh keeps at a zoom: below ~60 % thin strokes are only a few
+/// pixels long per sample, and full-resolution slivers cost the GPU more than they show.
+pub fn mesh_step(zoom: f32) -> usize {
+    match zoom {
+        z if z >= 0.6 => 1,
+        z if z >= 0.3 => 2,
+        _ => 4,
+    }
+}
+
+/// All strokes of a page as one solid mesh (page units; colours per vertex), keeping every
+/// `step`-th sample (and always the last).
+pub fn ink_mesh(spec: &SheetSpec, strokes: &[Stroke], step: usize) -> Mesh {
+    let (mut xy, mut indices) = (Vec::new(), Vec::new());
+    let mut vertices: Vec<SolidVertex2D> = Vec::new();
+    let mut thinned = Vec::new();
+    for s in strokes {
+        let start = xy.len();
+        let points = if step > 1 && s.points.len() > 2 * step {
+            thinned.clear();
+            thinned.extend(s.points.iter().step_by(step).copied());
+            if (s.points.len() - 1) % step != 0 {
+                thinned.push(*s.points.last().expect("non-empty"));
+            }
+            &thinned[..]
+        } else {
+            &s.points[..]
+        };
+        ink::outline_mesh(points, &s.brush, &mut xy, &mut indices);
+        let color = color::pack(argb(s.brush.color));
+        vertices.extend(xy[start..].chunks_exact(2).map(|v| SolidVertex2D { position: [v[0], v[1]], color }));
+    }
+    Mesh::Solid {
+        buffers: Indexed { vertices, indices },
+        transformation: Transformation::IDENTITY,
+        clip_bounds: Rectangle::new(Point::ORIGIN, Size::new(spec.width, spec.height)),
     }
 }
 
@@ -168,6 +252,7 @@ pub struct Pages {
     pub bounds: Rect,
     frame: Cell<u64>,
     pub stats: Stats,
+    pub ink_path: Cell<InkPath>,
 }
 
 #[derive(Default)]
@@ -203,7 +288,9 @@ impl Pages {
                 strokes,
                 samples,
                 cache: RefCell::new(canvas::Cache::new()),
+                cache_has_ink: Cell::new(true),
                 lod: Cell::new(0.0),
+                ink: RefCell::new(None),
                 last_frame: Cell::new(0),
             }
         };
@@ -232,7 +319,11 @@ impl Pages {
             }
             y += spec.height + GAP_Y;
         }
-        Pages { pages, mains, bounds, frame: Cell::new(0), stats: Stats::default() }
+        let ink_path = match std::env::var("N0TE_INK").as_deref() {
+            Ok("canvas") => InkPath::Canvas,
+            _ => InkPath::Mesh,
+        };
+        Pages { pages, mains, bounds, frame: Cell::new(0), stats: Stats::default(), ink_path: Cell::new(ink_path) }
     }
 
     pub fn stroke_count(&self) -> usize {
@@ -370,6 +461,10 @@ pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl 
 struct State {
     drag: Option<Point>,
     modifiers: keyboard::Modifiers,
+    /// (camera the app gave us, camera we published from it). iced delivers a whole batch of
+    /// events (a touchpad sends several per frame) before the app updates the camera, so each
+    /// event must build on what we already published or deltas get lost.
+    pending: Option<(Camera, Camera)>,
 }
 
 /// Pixels per wheel "line".
@@ -402,7 +497,10 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
     ) {
         let state = tree.state.downcast_mut::<State>();
         let bounds = layout.bounds();
-        let cam = self.camera;
+        let cam = match state.pending {
+            Some((seen, published)) if seen == self.camera => published,
+            _ => self.camera,
+        };
         // Tell the app our size (first frame, resizes); it owns the camera.
         if cam.viewport != bounds.size() {
             let next = if cam.viewport.width <= 0.0 {
@@ -410,20 +508,18 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             } else {
                 self.pages.clamp(Camera { viewport: bounds.size(), ..cam })
             };
+            state.pending = Some((self.camera, next));
             shell.publish((self.on_camera)(next));
             return;
         }
-        let publish = |shell: &mut Shell<'_, Message>, c: Camera| {
-            let c = self.pages.clamp(c);
-            if c != cam {
-                shell.publish((self.on_camera)(c));
+        let mut handle = || -> Option<Camera> {
+            match event {
+            Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => {
+                state.modifiers = *m;
+                None
             }
-            shell.capture_event();
-        };
-        match event {
-            Event::Keyboard(keyboard::Event::ModifiersChanged(m)) => state.modifiers = *m,
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-                let Some(pos) = cursor.position_in(bounds) else { return };
+                let pos = cursor.position_in(bounds)?;
                 let (dx, dy) = match *delta {
                     mouse::ScrollDelta::Lines { x, y } => (x * LINE_PX, y * LINE_PX),
                     mouse::ScrollDelta::Pixels { x, y } => (x, y),
@@ -436,27 +532,37 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     };
                     let zoom = (cam.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
                     let anchor = Point::new(cam.x + pos.x / cam.zoom, cam.y + pos.y / cam.zoom);
-                    publish(shell, Camera { x: anchor.x - pos.x / zoom, y: anchor.y - pos.y / zoom, zoom, ..cam });
+                    Some(Camera { x: anchor.x - pos.x / zoom, y: anchor.y - pos.y / zoom, zoom, ..cam })
                 } else {
                     let (dx, dy) = if state.modifiers.shift() && dx == 0.0 { (dy, 0.0) } else { (dx, dy) };
-                    publish(shell, Camera { x: cam.x - dx / cam.zoom, y: cam.y - dy / cam.zoom, ..cam });
+                    Some(Camera { x: cam.x - dx / cam.zoom, y: cam.y - dy / cam.zoom, ..cam })
                 }
             }
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Middle)) => {
-                if let Some(p) = cursor.position_over(bounds) {
-                    state.drag = Some(p);
-                    shell.capture_event();
-                }
+                state.drag = Some(cursor.position_over(bounds)?);
+                shell.capture_event();
+                None
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                if let Some(last) = state.drag {
-                    state.drag = Some(*position);
-                    let d = *position - last;
-                    publish(shell, Camera { x: cam.x - d.x / cam.zoom, y: cam.y - d.y / cam.zoom, ..cam });
-                }
+                let last = state.drag?;
+                state.drag = Some(*position);
+                let d = *position - last;
+                Some(Camera { x: cam.x - d.x / cam.zoom, y: cam.y - d.y / cam.zoom, ..cam })
             }
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => state.drag = None,
-            _ => {}
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Middle)) => {
+                state.drag = None;
+                None
+            }
+            _ => None,
+            }
+        };
+        if let Some(c) = handle() {
+            let c = self.pages.clamp(c);
+            if c != cam {
+                state.pending = Some((self.camera, c));
+                shell.publish((self.on_camera)(c));
+            }
+            shell.capture_event();
         }
     }
 
@@ -493,13 +599,22 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         }
         let lod = lod_for(cam.zoom);
         let current = pages.current_number(&cam);
+        // tiny-skia cannot draw meshes.
+        let use_mesh = pages.ink_path.get() == InkPath::Mesh && matches!(renderer, iced::Renderer::Primary(_));
         let (mut n_pages, mut n_strokes) = (0, 0);
         renderer.with_layer(bounds, |r| {
             for page in pages.visible(cam.view_rect()) {
                 n_pages += 1;
                 n_strokes += page.strokes.len() as u32;
                 page.last_frame.set(frame_no);
-                let (geometry, built) = page.geometry(r, lod);
+                let (geometry, mut built) = page.geometry(r, lod, !use_mesh);
+                let ink = use_mesh.then(|| {
+                    let (mesh, ms) = page.ink_mesh(cam.zoom);
+                    if let Some(ms) = ms {
+                        built = Some(built.unwrap_or(0.0) + ms);
+                    }
+                    mesh
+                });
                 if let Some(ms) = built {
                     let s = &pages.stats;
                     s.builds.set(s.builds.get() + 1);
@@ -509,6 +624,9 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let at = cam.to_screen(bounds, page.origin);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
+                    if let Some(ink) = ink {
+                        r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(ink));
+                    }
                 });
                 // Page number under main pages; a small side marker under side pages.
                 let label = match page.side {

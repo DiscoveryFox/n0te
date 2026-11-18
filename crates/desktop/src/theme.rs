@@ -3,7 +3,7 @@
 //! can later replace these tokens without touching the widgets.
 
 use iced::widget::{button, container, scrollable, text_editor};
-use iced::{Background, Border, Color, Font, Shadow, Theme, Vector, color, font};
+use iced::{Background, Border, Color, Font, Shadow, Theme, color, font};
 
 // --- colour tokens --------------------------------------------------------------------------
 
@@ -89,7 +89,8 @@ pub fn paper(_: &Theme) -> container::Style {
         background: Some(PAPER.into()),
         text_color: Some(INK),
         border: border(BORDER, 1.0, 2.0),
-        shadow: Shadow { color: alpha(Color::BLACK, 0.6), offset: Vector::new(0.0, 8.0), blur_radius: 32.0 },
+        // No blur shadow: invisible on black anyway, and tiny-skia rasterises the blur for the
+        // whole (very tall) page on every frame.
         ..Default::default()
     }
 }
