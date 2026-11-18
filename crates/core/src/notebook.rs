@@ -173,6 +173,20 @@ impl Notebook {
         Ok(())
     }
 
+    /// The PDF blobs the notebook's sheets use as backgrounds.
+    pub fn pdf_blobs(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for row in self.outline(true) {
+            if let OutlineRow::Sheet { spec, left, right, .. } = row {
+                out.extend(spec.pdf.map(|p| p.0));
+                for s in left.into_iter().chain(right) {
+                    out.extend(s.spec.pdf.map(|p| p.0));
+                }
+            }
+        }
+        out
+    }
+
     /// Number of sheets (main and side) in the notebook.
     pub fn sheet_count(&self) -> usize {
         self.sheet_order().len()

@@ -126,6 +126,25 @@ impl Rect {
     pub fn intersects(&self, o: &Rect) -> bool {
         !(self.is_empty() || o.is_empty()) && self.x0 <= o.x1 && o.x0 <= self.x1 && self.y0 <= o.y1 && o.y0 <= self.y1
     }
+    pub fn union(self, o: &Rect) -> Rect {
+        if o.is_empty() { return self; }
+        Rect { x0: self.x0.min(o.x0), y0: self.y0.min(o.y0), x1: self.x1.max(o.x1), y1: self.y1.max(o.y1) }
+    }
+    pub fn width(&self) -> f32 {
+        self.x1 - self.x0
+    }
+    pub fn height(&self) -> f32 {
+        self.y1 - self.y0
+    }
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x0 && x <= self.x1 && y >= self.y0 && y <= self.y1
+    }
+}
+
+impl Default for Rect {
+    fn default() -> Self {
+        Rect::EMPTY
+    }
 }
 
 /// The filled outline of a stroke as one closed polygon (x, y pairs, page units).

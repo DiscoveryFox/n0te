@@ -7,6 +7,7 @@
 pub mod error;
 pub mod ids;
 pub mod ink;
+pub mod layout;
 pub mod notebook;
 pub mod sheet;
 pub mod store;

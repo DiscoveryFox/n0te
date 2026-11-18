@@ -95,7 +95,83 @@ impl Library {
         write_atomic(&path, &sheet.snapshot()?)
     }
 
-    /// Stores a blob (if new) and returns its BLAKE3 hex id ([`blob_id`]).
+    /// A notebook as one file (`.n0te`): its index, every sheet and the PDFs it uses. Meant
+    /// for carrying a notebook to another device by hand; [`Library::import_bundle`] merges.
+    pub fn export_bundle(&self, id: &str) -> Result<Vec<u8>> {
+        let dir = self.nb_dir(id)?;
+        let mut out = BUNDLE_MAGIC.to_vec();
+        let mut put = |name: &str, data: &[u8]| {
+            out.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            out.extend_from_slice(name.as_bytes());
+            out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+            out.extend_from_slice(data);
+        };
+        let index = fs::read(dir.join("index.loro")).map_err(|e| not_found(e, &format!("notebook {id}")))?;
+        put("index.loro", &index);
+        if let Ok(rd) = fs::read_dir(dir.join("sheets")) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".loro") && !name.starts_with('.') {
+                    put(&format!("sheets/{name}"), &fs::read(e.path())?);
+                }
+            }
+        }
+        let nb = Notebook::load(self.peer, &index)?;
+        let mut blobs: Vec<String> = nb.pdf_blobs();
+        blobs.sort();
+        blobs.dedup();
+        for b in blobs {
+            if let Ok(data) = self.blob(&b) {
+                put(&format!("blobs/{b}"), &data);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Adds a bundle's notebook to the library, or merges it into the copy already here (the
+    /// documents are CRDTs: both sides' edits are kept). Returns the notebook id.
+    pub fn import_bundle(&self, bytes: &[u8]) -> Result<String> {
+        let entries = read_bundle(bytes)?;
+        let index = entries.iter().find(|(n, _)| n == "index.loro").map(|(_, d)| *d).ok_or_else(|| Error::Format("bundle without index".into()))?;
+        let incoming = Notebook::load(self.peer, index)?;
+        let id = incoming.id();
+        let dir = self.nb_dir(&id)?;
+        let nb = match fs::read(dir.join("index.loro")) {
+            Ok(mine) => {
+                let nb = Notebook::load(self.peer, &mine)?;
+                nb.import(index)?;
+                nb
+            }
+            Err(_) => incoming,
+        };
+        self.save_notebook(&nb)?;
+        for (name, data) in &entries {
+            if let Some(file) = name.strip_prefix("sheets/") {
+                let Some(sheet_id) = file.strip_suffix(".loro") else { continue };
+                check_name(sheet_id)?;
+                let sheet = match fs::read(self.sheet_path(&id, sheet_id)?) {
+                    Ok(mine) => {
+                        let s = Sheet::load(self.peer, &mine)?;
+                        s.import(data)?;
+                        s
+                    }
+                    Err(_) => Sheet::load(self.peer, data)?,
+                };
+                self.save_sheet(&id, sheet_id, &sheet)?;
+            } else if let Some(blob) = name.strip_prefix("blobs/") {
+                check_name(blob)?;
+                if blob_id(data) != blob {
+                    return Err(Error::Format(format!("blob {blob} does not match its content")));
+                }
+                let path = self.root.join("blobs").join(blob);
+                if !path.exists() {
+                    write_atomic(&path, data)?;
+                }
+            }
+        }
+        Ok(id)
+    }
+
     /// Moves a notebook (with its sheets) to `trash/`, out of the library but recoverable.
     pub fn trash_notebook(&self, id: &str) -> Result<()> {
         let dir = self.nb_dir(id)?;
@@ -106,6 +182,7 @@ impl Library {
         Ok(())
     }
 
+    /// Stores a blob (if new) and returns its BLAKE3 hex id ([`blob_id`]).
     pub fn put_blob(&self, data: &[u8]) -> Result<String> {
         let id = blob_id(data);
         let path = self.root.join("blobs").join(&id);
@@ -147,6 +224,28 @@ pub fn blob_id(data: &[u8]) -> String {
 }
 
 /// Ids become file names: only [0-9a-zA-Z_-], 1..=128 chars (no traversal).
+const BUNDLE_MAGIC: &[u8] = b"N0TEBNDL\x01";
+
+/// (name, data) entries of a bundle.
+fn read_bundle(b: &[u8]) -> Result<Vec<(String, &[u8])>> {
+    let bad = || Error::Format("not a n0te bundle".into());
+    let mut rest = b.strip_prefix(BUNDLE_MAGIC).ok_or_else(bad)?;
+    let mut out = Vec::new();
+    while !rest.is_empty() {
+        if rest.len() < 2 { return Err(bad()); }
+        let n = u16::from_le_bytes([rest[0], rest[1]]) as usize;
+        rest = &rest[2..];
+        if rest.len() < n + 8 { return Err(bad()); }
+        let name = std::str::from_utf8(&rest[..n]).map_err(|_| bad())?.to_string();
+        let len = u64::from_le_bytes(rest[n..n + 8].try_into().expect("8 bytes")) as usize;
+        rest = &rest[n + 8..];
+        if rest.len() < len { return Err(bad()); }
+        out.push((name, &rest[..len]));
+        rest = &rest[len..];
+    }
+    Ok(out)
+}
+
 fn check_name(s: &str) -> Result<()> {
     if s.is_empty() || s.len() > 128 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
         return Err(Error::Invalid(format!("bad id {s:?}")));
@@ -229,5 +328,40 @@ mod tests {
         assert!(!lib.notebook_ids().unwrap().contains(&id));
         assert_eq!(std::fs::read_dir(root.join("trash")).unwrap().count(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn bundles_carry_a_notebook_and_merge_into_an_existing_copy() {
+        use crate::ink::{Brush, InkPoint};
+        use crate::notebook::{Background, SheetSpec};
+        let tag = ids::new_id(3);
+        let tablet = Library::open(std::env::temp_dir().join(format!("n0te-bt-{tag}"))).unwrap();
+        let laptop = Library::open(std::env::temp_dir().join(format!("n0te-bl-{tag}"))).unwrap();
+        let nb = tablet.create_notebook("Analysis").unwrap();
+        let pdf = tablet.put_blob(b"%PDF-fake").unwrap();
+        let (_, s1) = nb.add_sheet(None, 0, &SheetSpec { pdf: Some((pdf.clone(), 0)), ..SheetSpec::a4(Background::Blank) }).unwrap();
+        tablet.save_notebook(&nb).unwrap();
+        let sheet = tablet.load_sheet(&nb.id(), &s1).unwrap();
+        let line: Vec<InkPoint> = (0..5).map(|i| InkPoint { x: i as f32, y: 1.0, pressure: 0.5, t_ms: i }).collect();
+        sheet.add_stroke(Brush::default(), &line).unwrap();
+        tablet.save_sheet(&nb.id(), &s1, &sheet).unwrap();
+
+        // To the laptop: everything arrives.
+        let id = laptop.import_bundle(&tablet.export_bundle(&nb.id()).unwrap()).unwrap();
+        assert_eq!(id, nb.id());
+        assert_eq!(laptop.load_notebook(&id).unwrap().title(), "Analysis");
+        assert_eq!(laptop.load_sheet(&id, &s1).unwrap().len(), 1);
+        assert_eq!(laptop.blob(&pdf).unwrap(), b"%PDF-fake");
+
+        // Both draw; the laptop's copy goes back: the tablet keeps both strokes.
+        let ls = laptop.load_sheet(&id, &s1).unwrap();
+        ls.add_stroke(Brush::default(), &line).unwrap();
+        laptop.save_sheet(&id, &s1, &ls).unwrap();
+        let ts = tablet.load_sheet(&id, &s1).unwrap();
+        ts.add_stroke(Brush::default(), &line).unwrap();
+        tablet.save_sheet(&id, &s1, &ts).unwrap();
+        tablet.import_bundle(&laptop.export_bundle(&id).unwrap()).unwrap();
+        assert_eq!(tablet.load_sheet(&id, &s1).unwrap().len(), 3, "original + both new strokes");
+        assert!(tablet.import_bundle(b"nope").is_err());
     }
 }

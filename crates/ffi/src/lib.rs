@@ -253,6 +253,19 @@ impl NoteLibrary {
         Ok(self.inner.put_blob(&data)?)
     }
 
+    /// Writes the notebook as a `.n0te` bundle to `path` (to carry it to another device).
+    pub fn export_bundle(&self, id: String, path: String) -> R<()> {
+        let bytes = self.inner.export_bundle(&id)?;
+        std::fs::write(&path, bytes).map_err(|e| N0teError::Failed { msg: e.to_string() })?;
+        Ok(())
+    }
+
+    /// Imports a `.n0te` bundle (merging into the copy here, if any); returns the notebook id.
+    pub fn import_bundle(&self, path: String) -> R<String> {
+        let bytes = std::fs::read(&path).map_err(|e| N0teError::Failed { msg: e.to_string() })?;
+        Ok(self.inner.import_bundle(&bytes)?)
+    }
+
     /// Moves a notebook to the trash folder (out of the library, still on disk).
     pub fn trash_notebook(&self, id: String) -> R<()> {
         Ok(self.inner.trash_notebook(&id)?)
