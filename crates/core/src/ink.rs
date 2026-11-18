@@ -155,6 +155,19 @@ pub fn outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
     }
 }
 
+/// Extra fills that make a pencil look like graphite: a middle band and a pressure-hungry
+/// core, drawn translucent over the stroke's own [`outline`] (light pressure leaves only the
+/// faint outer band, hard pressure a dark core). Empty for every other kind.
+pub fn pencil_layers(points: &[InkPoint], brush: &Brush) -> Vec<Vec<f32>> {
+    if brush.kind != KIND_PENCIL {
+        return Vec::new();
+    }
+    // Sized so the bands stay inside the outline up to full pressure (the ragged rim survives).
+    let mid = Brush { width: brush.width * 0.7, thinning: 0.5, ..*brush };
+    let core = Brush { width: brush.width * 0.5, thinning: 0.95, ..*brush };
+    vec![outline(points, &mid), outline(points, &core)]
+}
+
 /// The same shape as [`outline`], as triangles ready for a GPU: a strip between the left and
 /// right edge plus fans for the round caps. Appends vertices (x, y pairs) to `xy` and triangle
 /// indices (into all of `xy`) to `indices`, so many strokes batch into one mesh.
@@ -416,5 +429,23 @@ mod tests {
         assert!(a.intersects(&Rect::new(5.0, 5.0, 20.0, 20.0)));
         assert!(!a.intersects(&Rect::new(11.0, 0.0, 20.0, 10.0)));
         assert!(!a.intersects(&Rect::EMPTY));
+    }
+
+    #[test]
+    fn pencil_layers_only_for_pencils_and_narrower() {
+        let pts: Vec<InkPoint> = (0..20).map(|i| InkPoint { x: i as f32 * 3.0, y: 10.0, pressure: 0.2, t_ms: i * 8 }).collect();
+        assert!(pencil_layers(&pts, &Brush::default()).is_empty());
+        let pencil = Brush { width: 4.0, thinning: 0.2, kind: KIND_PENCIL, ..Brush::default() };
+        let layers = pencil_layers(&pts, &pencil);
+        assert_eq!(layers.len(), 2);
+        let height = |o: &[f32]| {
+            let ys = o.chunks(2).map(|c| c[1]);
+            ys.clone().fold(f32::MIN, f32::max) - ys.fold(f32::MAX, f32::min)
+        };
+        let full = height(&outline(&pts, &pencil));
+        assert!(height(&layers[0]) < full && height(&layers[1]) < height(&layers[0]), "light pressure: core thinnest");
+        let hard: Vec<InkPoint> = pts.iter().map(|p| InkPoint { pressure: 1.0, ..*p }).collect();
+        let full = height(&outline(&hard, &pencil));
+        assert!(pencil_layers(&hard, &pencil).iter().all(|l| height(l) < full), "full pressure: bands still inside");
     }
 }

@@ -66,6 +66,8 @@ pub struct FfiStroke {
     pub bounds: Vec<f32>,
     /// Closed outline polygon as packed LE f32 x,y pairs; fill with the nonzero rule.
     pub outline: Vec<u8>,
+    /// Pencil only: the middle band and the core (same packing), drawn translucent on top.
+    pub layers: Vec<Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
@@ -176,6 +178,7 @@ fn pack(v: &[f32]) -> Vec<u8> {
 fn to_ffi(s: n0te_core::sheet::Stroke) -> FfiStroke {
     FfiStroke {
         outline: pack(&ink::outline(&s.points, &s.brush)),
+        layers: ink::pencil_layers(&s.points, &s.brush).iter().map(|l| pack(l)).collect(),
         bounds: vec![s.bounds.x0, s.bounds.y0, s.bounds.x1, s.bounds.y1],
         brush: s.brush.into(),
         id: s.id,
@@ -186,6 +189,12 @@ fn to_ffi(s: n0te_core::sheet::Stroke) -> FfiStroke {
 #[uniffi::export]
 pub fn stroke_outline(brush: FfiBrush, samples: Vec<u8>) -> Vec<u8> {
     pack(&ink::outline(&points(&samples), &brush.into()))
+}
+
+/// The pencil layers of a stroke being drawn (empty unless the brush is a pencil).
+#[uniffi::export]
+pub fn stroke_layers(brush: FfiBrush, samples: Vec<u8>) -> Vec<Vec<u8>> {
+    ink::pencil_layers(&points(&samples), &brush.into()).iter().map(|l| pack(l)).collect()
 }
 
 /// Named so it doesn't clash with JNA's `com.sun.jna.Library` in the generated Kotlin.
