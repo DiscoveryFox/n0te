@@ -2411,6 +2411,7 @@ name = "n0te-ffi"
 version = "0.1.0"
 dependencies = [
  "n0te-core",
+ "n0te-pdf",
  "thiserror 2.0.21",
  "uniffi",
 ]

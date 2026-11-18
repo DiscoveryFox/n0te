@@ -26,21 +26,38 @@ pub struct ImportedSheet {
     pub size: PageSize,
 }
 
-/// Imports a PDF: checks that pdfium can open it, stores the bytes as a blob and adds one sheet
-/// per page, `SheetSpec { width, height: page size, pdf: Some((blob, page)) }`, starting at
-/// `index` under `parent` (`None` = main column, else a group node). The document stays open on
-/// the worker under its blob id, so the first tiles need no reload. The notebook is not saved.
+/// A PDF stored in the library by [`store_pdf`], ready to become sheets.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredPdf {
+    pub blob: String,
+    pub pages: Vec<PageSize>,
+}
+
+/// Imports a PDF: [`store_pdf`] then [`add_pdf_sheets`]. The notebook is not saved.
 pub fn import_pdf(lib: &Library, nb: &Notebook, worker: &PdfWorker, bytes: Vec<u8>, parent: Option<&str>, index: usize) -> Result<Vec<ImportedSheet>> {
+    add_pdf_sheets(nb, &store_pdf(lib, worker, bytes)?, parent, index)
+}
+
+/// Checks that pdfium can open the PDF, stores the bytes as a blob and returns its id and page
+/// sizes. The document stays open on the worker under its blob id, so the first tiles need no
+/// reload. Needs no notebook (apps call it without holding their notebook lock).
+pub fn store_pdf(lib: &Library, worker: &PdfWorker, bytes: Vec<u8>) -> Result<StoredPdf> {
     let blob = blob_id(&bytes);
     let (key, copy) = (blob.clone(), bytes.clone());
-    let sizes = worker.call(priority::INTERACTIVE, move |docs| docs.insert(&key, copy)?.page_sizes())??;
-    if sizes.is_empty() {
+    let pages = worker.call(priority::INTERACTIVE, move |docs| docs.insert(&key, copy)?.page_sizes())??;
+    if pages.is_empty() {
         return Err(Error::Invalid("the PDF has no pages".into()));
     }
     lib.put_blob(&bytes)?;
-    let mut out = Vec::with_capacity(sizes.len());
-    for (i, size) in sizes.into_iter().enumerate() {
-        let spec = SheetSpec { width: size.width, height: size.height, background: Background::Blank, spacing: 20.0, pdf: Some((blob.clone(), i as u32)) };
+    Ok(StoredPdf { blob, pages })
+}
+
+/// Adds one sheet per page of `pdf`, `SheetSpec { width, height: page size, pdf: Some((blob,
+/// page)) }`, starting at `index` under `parent` (`None` = main column, else a group node).
+pub fn add_pdf_sheets(nb: &Notebook, pdf: &StoredPdf, parent: Option<&str>, index: usize) -> Result<Vec<ImportedSheet>> {
+    let mut out = Vec::with_capacity(pdf.pages.len());
+    for (i, &size) in pdf.pages.iter().enumerate() {
+        let spec = SheetSpec { width: size.width, height: size.height, background: Background::Blank, spacing: 20.0, pdf: Some((pdf.blob.clone(), i as u32)) };
         let (node, sheet_id) = nb.add_sheet(parent, index.saturating_add(i), &spec)?;
         out.push(ImportedSheet { node, sheet_id, page: i as u32, size });
     }

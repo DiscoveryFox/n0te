@@ -3,8 +3,12 @@
 //! Hot paths pass packed little-endian f32 bytes (samples as x,y,pressure,t quads; outlines as
 //! x,y pairs): UniFFI turns `Vec<f32>` into a boxed `List<Float>` in Kotlin, while `Vec<u8>`
 //! arrives as one `ByteArray` (read it with `ByteBuffer.order(LITTLE_ENDIAN).asFloatBuffer()`).
+//!
+//! PDF (import, tiles, search, export): see [`pdf`].
 
-use std::sync::{Arc, Mutex, MutexGuard};
+pub mod pdf;
+
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::time::Instant;
 
 use n0te_core::ink::{self, Brush, InkPoint, Rect};
@@ -199,12 +203,12 @@ impl NoteLibrary {
 
     pub fn create_notebook(self: Arc<Self>, title: String) -> R<Arc<NotebookHandle>> {
         let nb = self.inner.create_notebook(&title)?;
-        Ok(Arc::new(NotebookHandle { lib: self, nb: Mutex::new(nb) }))
+        Ok(NotebookHandle::new(self, nb))
     }
 
     pub fn load_notebook(self: Arc<Self>, id: String) -> R<Arc<NotebookHandle>> {
         let nb = self.inner.load_notebook(&id)?;
-        Ok(Arc::new(NotebookHandle { lib: self, nb: Mutex::new(nb) }))
+        Ok(NotebookHandle::new(self, nb))
     }
 
     pub fn put_blob(&self, data: Vec<u8>) -> R<String> {
@@ -216,6 +220,19 @@ impl NoteLibrary {
 pub struct NotebookHandle {
     lib: Arc<NoteLibrary>,
     nb: Mutex<n0te_core::notebook::Notebook>,
+    /// Sheets opened through this handle, so an export sees their unsaved strokes.
+    open_sheets: Mutex<Vec<(String, Weak<SheetHandle>)>>,
+}
+
+impl NotebookHandle {
+    fn new(lib: Arc<NoteLibrary>, nb: n0te_core::notebook::Notebook) -> Arc<Self> {
+        Arc::new(NotebookHandle { lib, nb: Mutex::new(nb), open_sheets: Mutex::new(Vec::new()) })
+    }
+
+    /// The most recently opened live handle of `sheet_id`.
+    fn open_sheet_handle(&self, sheet_id: &str) -> Option<Arc<SheetHandle>> {
+        lock(&self.open_sheets).iter().rev().filter(|(id, _)| id == sheet_id).find_map(|(_, w)| w.upgrade())
+    }
 }
 
 #[uniffi::export]
@@ -258,7 +275,11 @@ impl NotebookHandle {
     pub fn open_sheet(self: Arc<Self>, sheet_id: String) -> R<Arc<SheetHandle>> {
         let id = self.id();
         let sheet = self.lib.inner.load_sheet(&id, &sheet_id)?;
-        Ok(Arc::new(SheetHandle { notebook: self, sheet_id, sheet: Mutex::new(sheet) }))
+        let handle = Arc::new(SheetHandle { notebook: self.clone(), sheet_id: sheet_id.clone(), sheet: Mutex::new(sheet) });
+        let mut open = lock(&self.open_sheets);
+        open.retain(|(_, w)| w.strong_count() > 0);
+        open.push((sheet_id, Arc::downgrade(&handle)));
+        Ok(handle)
     }
 }
 

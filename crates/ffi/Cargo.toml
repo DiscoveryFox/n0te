@@ -11,5 +11,6 @@ name = "n0te_ffi"
 
 [dependencies]
 n0te-core.workspace = true
+n0te-pdf.workspace = true
 uniffi.workspace = true
 thiserror.workspace = true

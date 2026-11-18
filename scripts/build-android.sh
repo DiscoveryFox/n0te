@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Builds libn0te_ffi.so for the tablet/phone (arm64) and generates the Kotlin bindings.
-# Output: app-android/n0te/build/rust/{jniLibs/arm64-v8a/libn0te_ffi.so,kotlin/...}
+# Output: app-android/n0te/build/rust/{jniLibs/arm64-v8a/{libn0te_ffi.so,libpdfium.so},kotlin/...}
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 repo="$(cd "$here/.." && pwd)"
@@ -23,8 +23,13 @@ out="$repo/app-android/n0te/build/rust"
 rm -rf "$out/kotlin"
 mkdir -p "$out/jniLibs/arm64-v8a" "$out/kotlin"
 "$tc/llvm-strip" --strip-all -o "$out/jniLibs/arm64-v8a/libn0te_ffi.so" "target/aarch64-linux-android/$dir/libn0te_ffi.so"
+# pdfium (pinned, hash-checked, already stripped): shipped next to libn0te_ffi.so and loaded by
+# path, PdfService.start(lib, "$nativeLibraryDir/libpdfium.so", ...). The fetch is a no-op when
+# the pinned version is present.
+"$here/scripts/fetch-pdfium.sh" android-arm64
+install -m 0644 "$here/third_party/pdfium/android-arm64/lib/libpdfium.so" "$out/jniLibs/arm64-v8a/libpdfium.so"
 "$cargo" run -q -p uniffi-bindgen -- generate \
   --library "target/aarch64-linux-android/$dir/libn0te_ffi.so" \
   --language kotlin --no-format --out-dir "$out/kotlin"
-ls -la "$out/jniLibs/arm64-v8a/libn0te_ffi.so"
+ls -la "$out/jniLibs/arm64-v8a/"
 find "$out/kotlin" -name '*.kt' | head
