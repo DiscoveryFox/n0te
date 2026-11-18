@@ -1,0 +1,18 @@
+[package]
+name = "n0te-desktop"
+description = "n0te laptop app (iced spike)"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "n0te"
+path = "src/main.rs"
+
+[dependencies]
+n0te-core.workspace = true
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "wayland", "x11", "crisp", "thread-pool", "canvas", "advanced", "highlighter"] }
+
+[dev-dependencies]
+iced_test = "0.14"
+png = "0.18"
