@@ -153,6 +153,21 @@ impl Notebook {
         Ok(())
     }
 
+    /// The library folder this notebook is filed under ("" = top level), e.g. "WS26".
+    pub fn folder(&self) -> String {
+        self.meta_str("folder")
+    }
+    pub fn set_folder(&self, folder: &str) -> Result<()> {
+        self.meta.insert("folder", folder.trim())?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Number of sheets (main and side) in the notebook.
+    pub fn sheet_count(&self) -> usize {
+        self.sheet_order().len()
+    }
+
     fn meta_str(&self, key: &str) -> String {
         value_str(self.meta.get(key))
     }

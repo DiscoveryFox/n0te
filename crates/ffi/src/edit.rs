@@ -44,6 +44,15 @@ impl NotebookHandle {
     pub fn set_node_title(&self, node: String, title: String) -> R<()> {
         Ok(lock(&self.nb).set_title_of(&node, &title)?)
     }
+    pub fn folder(&self) -> String {
+        lock(&self.nb).folder()
+    }
+    pub fn set_folder(&self, folder: String) -> R<()> {
+        Ok(lock(&self.nb).set_folder(&folder)?)
+    }
+    pub fn sheet_count(&self) -> u32 {
+        lock(&self.nb).sheet_count() as u32
+    }
     /// All sheet ids in reading order (side sheets next to their main sheet): the export order.
     pub fn sheet_order(&self) -> Vec<String> {
         lock(&self.nb).sheet_order()
