@@ -117,7 +117,8 @@ impl PdfEngine {
         Ok(PdfDoc { cache: Mutex::new(Vec::new()), doc: ManuallyDrop::new(doc), engine: *self })
     }
 
-    /// Runs `f` with the raw `pdfium-render` handle while holding the crate lock.
+    /// Runs `f` with the raw `pdfium-render` handle while holding the crate lock. `f` must not
+    /// call into this crate (or drop a [`PdfDoc`]): the lock is not re-entrant.
     pub fn with_raw<R>(&self, f: impl FnOnce(&'static Pdfium) -> R) -> R {
         let _g = lock();
         f(&self.e.pdfium)

@@ -40,6 +40,11 @@ impl PdfEngine {
     ///
     /// Pages from the same source document are imported in one pdfium call, so resources they
     /// share (fonts, images) are copied once and not once per page.
+    ///
+    /// Cost: pdfium's `FPDFPage_GenerateContent` walks the whole document's object graph when a
+    /// page has an indirect `/Resources` dictionary (pdfTeX output does), so inking N pages of
+    /// a big document costs O(N × document size): ~10 ms per page in a 1-page document, ~75 ms
+    /// in a 477-page one (laptop). Pages without strokes are not regenerated.
     pub fn export(&self, pages: &[ExportPage]) -> Result<Vec<u8>> {
         let _g = lock();
         let pdfium = &self.e.pdfium;
@@ -121,9 +126,12 @@ fn draw_strokes(doc: &PdfDocument<'static>, index: u32, strokes: &[Stroke]) -> R
 }
 
 fn polygon_path(doc: &PdfDocument<'static>, m: &Affine, poly: &[f32], fill: PdfColor) -> Result<PdfPagePathObject<'static>> {
+    // 1/100 pt is far below what anyone can see; pdfium writes the shortest decimal form, so
+    // rounding makes the content streams ~35 % smaller.
+    let round = |v: f64| ((v * 100.0).round() / 100.0) as f32;
     let pt = |i: usize| {
         let (x, y) = m.apply(poly[i] as f64, poly[i + 1] as f64);
-        (PdfPoints::new(x as f32), PdfPoints::new(y as f32))
+        (PdfPoints::new(round(x)), PdfPoints::new(round(y)))
     };
     let (x0, y0) = pt(0);
     // Fill only, non-zero winding (pdfium-render's default fill mode).
