@@ -163,6 +163,16 @@ impl Notebook {
         Ok(())
     }
 
+    /// How the library shows the notebook: "" / "page" (first page), or a preset name.
+    pub fn cover(&self) -> String {
+        self.meta_str("cover")
+    }
+    pub fn set_cover(&self, cover: &str) -> Result<()> {
+        self.meta.insert("cover", cover)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Number of sheets (main and side) in the notebook.
     pub fn sheet_count(&self) -> usize {
         self.sheet_order().len()

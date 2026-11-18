@@ -96,6 +96,16 @@ impl Library {
     }
 
     /// Stores a blob (if new) and returns its BLAKE3 hex id ([`blob_id`]).
+    /// Moves a notebook (with its sheets) to `trash/`, out of the library but recoverable.
+    pub fn trash_notebook(&self, id: &str) -> Result<()> {
+        let dir = self.nb_dir(id)?;
+        let trash = self.root.join("trash");
+        fs::create_dir_all(&trash)?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        fs::rename(&dir, trash.join(format!("{id}-{stamp}")))?;
+        Ok(())
+    }
+
     pub fn put_blob(&self, data: &[u8]) -> Result<String> {
         let id = blob_id(data);
         let path = self.root.join("blobs").join(&id);
@@ -204,5 +214,20 @@ mod tests {
         assert!(lib2.blob("../../etc/passwd").is_err());
         assert!(lib2.load_notebook("..").is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn trashed_notebooks_leave_the_library_but_stay_on_disk() {
+        let root = std::env::temp_dir().join(format!("n0te-trash-{}", ids::new_id(2)));
+        let lib = Library::open(&root).unwrap();
+        let nb = lib.create_notebook("weg").unwrap();
+        nb.set_cover("dots-red").unwrap();
+        lib.save_notebook(&nb).unwrap();
+        let id = nb.id();
+        assert_eq!(lib.load_notebook(&id).unwrap().cover(), "dots-red");
+        lib.trash_notebook(&id).unwrap();
+        assert!(!lib.notebook_ids().unwrap().contains(&id));
+        assert_eq!(std::fs::read_dir(root.join("trash")).unwrap().count(), 1);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -99,6 +99,13 @@ impl NotebookHandle {
     pub fn folder(&self) -> String {
         lock(&self.nb).folder()
     }
+    /// Library cover: "" / "page" (first page) or a preset name.
+    pub fn cover(&self) -> String {
+        lock(&self.nb).cover()
+    }
+    pub fn set_cover(&self, cover: String) -> R<()> {
+        Ok(lock(&self.nb).set_cover(&cover)?)
+    }
     pub fn set_folder(&self, folder: String) -> R<()> {
         Ok(lock(&self.nb).set_folder(&folder)?)
     }

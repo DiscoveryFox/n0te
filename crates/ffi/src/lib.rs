@@ -252,6 +252,11 @@ impl NoteLibrary {
     pub fn put_blob(&self, data: Vec<u8>) -> R<String> {
         Ok(self.inner.put_blob(&data)?)
     }
+
+    /// Moves a notebook to the trash folder (out of the library, still on disk).
+    pub fn trash_notebook(&self, id: String) -> R<()> {
+        Ok(self.inner.trash_notebook(&id)?)
+    }
 }
 
 #[derive(uniffi::Object)]
