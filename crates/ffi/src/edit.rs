@@ -27,10 +27,25 @@ impl SheetHandle {
     pub fn hit_test(&self, x: f32, y: f32, radius: f32) -> Vec<String> {
         lock(&self.sheet).hit_test(x, y, radius)
     }
+    /// A text page's Markdown body.
+    pub fn page_text(&self) -> String {
+        lock(&self.sheet).page_text()
+    }
+    pub fn set_page_text(&self, markdown: String) -> R<()> {
+        Ok(lock(&self.sheet).set_page_text(&markdown)?)
+    }
     /// The sheet's text boxes (typed on the laptop), top to bottom.
     pub fn text_boxes(&self) -> Vec<crate::FfiTextBox> {
         lock(&self.sheet)
             .text_boxes()
+            .into_iter()
+            .map(|t| crate::FfiTextBox { id: t.id, x: t.x, y: t.y, w: t.w, size: t.size, text: t.text })
+            .collect()
+    }
+    /// Text boxes plus a text page's body as a box in the margins of a `page_width` page.
+    pub fn text_boxes_with_body(&self, page_width: f32) -> Vec<crate::FfiTextBox> {
+        lock(&self.sheet)
+            .text_boxes_with_body(page_width)
             .into_iter()
             .map(|t| crate::FfiTextBox { id: t.id, x: t.x, y: t.y, w: t.w, size: t.size, text: t.text })
             .collect()

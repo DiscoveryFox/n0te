@@ -71,6 +71,13 @@ pub enum Message {
     NewText(String, f32, f32),
     EditText(String, String),
     EditAction(text_editor::Action),
+    /// Text pages: open (sheet, docked as the notes column), close, block editor messages,
+    /// a new text page after the current one, the notes column on/off.
+    OpenTextPage(String, bool),
+    CloseTextPage,
+    Blocks(crate::blocks::Msg),
+    NewTextPage,
+    ToggleNotes,
     MoveText(iced::Vector),
     ResizeText(iced::Vector),
     PlaceText,
@@ -90,6 +97,19 @@ pub struct Editing {
     pub y: f32,
     pub w: f32,
     pub size: f32,
+    pub dirty: bool,
+    pub last_change: Instant,
+}
+
+/// A text page being edited (full page, or docked next to the slide as notes).
+pub struct TextPage {
+    pub sheet_id: String,
+    /// The main page the notes belong to (docked only).
+    pub main_node: Option<String>,
+    pub sheet: Sheet,
+    pub doc: crate::blocks::Doc,
+    pub docked: bool,
+    pub saved: String,
     pub dirty: bool,
     pub last_change: Instant,
 }
@@ -132,6 +152,7 @@ pub struct App {
     /// Where exported PDFs go (~/Downloads).
     pub export_dir: PathBuf,
     pub editing: Option<Editing>,
+    pub text_page: Option<TextPage>,
     pub entries: Vec<Entry>,
     pub bundles: Vec<Bundle>,
     pub screen: Screen,
@@ -191,6 +212,7 @@ impl App {
             last_export: None,
             export_dir: downloads(),
             editing: None,
+            text_page: None,
             entries: Vec::new(),
             bundles: Vec::new(),
             screen: Screen::Library,
@@ -257,10 +279,11 @@ impl App {
         let nid = id.to_string();
         let pages = Pages::new(
             layout,
-            Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| SheetContent { strokes: s.strokes(), texts: s.text_boxes() }).unwrap_or_default()),
+            Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| SheetContent { strokes: s.strokes(), texts: s.text_boxes(), body: s.page_text() }).unwrap_or_default()),
             self.pdf.clone(),
         );
         self.finish_text();
+        self.close_text_page();
         self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, pages, camera: Camera::default() }));
         Ok(())
     }
@@ -278,6 +301,7 @@ impl App {
             }
             Message::Back => {
                 self.finish_text();
+                self.close_text_page();
                 self.screen = Screen::Library;
                 self.refresh();
             }
@@ -286,6 +310,7 @@ impl App {
                 if let Screen::Notebook(o) = &mut self.screen {
                     o.camera = c;
                 }
+                self.follow_notes();
             }
             Message::Fold(node) => {
                 let lib = self.lib.clone();
@@ -457,9 +482,205 @@ impl App {
                 if self.editing.as_ref().is_some_and(|e| e.dirty && e.last_change.elapsed().as_millis() > 800) {
                     self.save_text(false);
                 }
+                if self.text_page.as_ref().is_some_and(|t| t.dirty && t.last_change.elapsed().as_millis() > 800) {
+                    self.save_text_page();
+                }
+            }
+            Message::OpenTextPage(sheet, docked) => return self.open_text_page(&sheet, docked),
+            Message::CloseTextPage => self.close_text_page(),
+            Message::Blocks(m) => {
+                if let Some(t) = &mut self.text_page {
+                    let task = t.doc.update(m).map(Message::Blocks);
+                    if t.doc.to_markdown() != t.saved {
+                        t.dirty = true;
+                        t.last_change = Instant::now();
+                    }
+                    return task;
+                }
+            }
+            Message::NewTextPage => {
+                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let current = o.pages.current_number(&o.camera);
+                let node = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone());
+                let (parent, index) = pdf::position_after(&o.nb, node.as_deref());
+                let spec = SheetSpec::a4(Background::Text);
+                match o.nb.add_sheet(parent.as_deref(), index, &spec) {
+                    Ok((_, sheet)) => {
+                        let _ = self.lib.save_notebook(&o.nb);
+                        self.relayout();
+                        if let Screen::Notebook(o) = &mut self.screen
+                            && let Some(i) = o.pages.page_of_sheet(&sheet)
+                        {
+                            o.camera = o.pages.camera_for(i, &o.camera);
+                        }
+                        return self.open_text_page(&sheet, false);
+                    }
+                    Err(e) => self.say(format!("Textseite: {e}")),
+                }
+            }
+            Message::ToggleNotes => {
+                if self.text_page.as_ref().is_some_and(|t| t.docked) {
+                    self.close_text_page();
+                } else {
+                    return self.open_notes(true);
+                }
             }
         }
         Task::none()
+    }
+
+    /// The current main page's notes sheet (a text side sheet on the right), if any.
+    fn notes_sheet(&self) -> Option<(String, String)> {
+        let Screen::Notebook(o) = &self.screen else { return None };
+        let current = o.pages.current_number(&o.camera);
+        let main = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone())?;
+        let notes = o.pages.pages.iter().map(|p| &p.placed).filter(|p| p.main_node == main && p.side > 0 && p.spec.background == Background::Text).min_by_key(|p| p.side);
+        Some((main, notes.map(|p| p.sheet_id.clone()).unwrap_or_default()))
+    }
+
+    /// Opens the notes column for the current page; with `create`, makes the notes sheet.
+    fn open_notes(&mut self, create: bool) -> Task<Message> {
+        let Some((main, mut sheet)) = self.notes_sheet() else { return Task::none() };
+        if sheet.is_empty() {
+            if !create {
+                self.close_text_page();
+                return Task::none();
+            }
+            let Screen::Notebook(o) = &self.screen else { return Task::none() };
+            match o.nb.add_side_sheet(&main, n0te_core::notebook::Side::Right, 0, &SheetSpec::a4(Background::Text)) {
+                Ok((_, s)) => {
+                    let _ = self.lib.save_notebook(&o.nb);
+                    sheet = s;
+                    self.relayout();
+                }
+                Err(e) => {
+                    self.say(format!("Notizen: {e}"));
+                    return Task::none();
+                }
+            }
+        }
+        let task = self.open_text_page(&sheet, true);
+        if let Some(t) = &mut self.text_page {
+            t.main_node = Some(main);
+        }
+        task
+    }
+
+    /// The docked notes follow the page in view.
+    fn follow_notes(&mut self) {
+        let Some(t) = &self.text_page else { return };
+        if !t.docked {
+            return;
+        }
+        let Some((main, sheet)) = self.notes_sheet() else { return };
+        if t.main_node.as_deref() == Some(main.as_str()) {
+            return;
+        }
+        if sheet.is_empty() {
+            // This page has no notes yet: keep the column, empty, until the user writes.
+            self.save_text_page();
+            if let Some(t) = &mut self.text_page {
+                t.main_node = Some(main);
+                t.sheet_id.clear();
+                t.doc = crate::blocks::Doc::from_markdown("");
+                t.saved.clear();
+            }
+        } else {
+            let _ = self.open_text_page(&sheet, true);
+            if let Some(t) = &mut self.text_page {
+                t.main_node = Some(main);
+            }
+        }
+    }
+
+    fn open_text_page(&mut self, sheet_id: &str, docked: bool) -> Task<Message> {
+        self.finish_text();
+        self.close_text_page();
+        let Some(nb) = self.notebook_id() else { return Task::none() };
+        let Ok(sheet) = self.lib.load_sheet(&nb, sheet_id) else { return Task::none() };
+        let md = sheet.page_text();
+        let doc = crate::blocks::Doc::from_markdown(&md);
+        // The cursor goes to the end of the last block.
+        let end = doc.blocks.last().map(|b| {
+            let t = b.text();
+            let line = t.split('\n').count().saturating_sub(1);
+            let column = t.split('\n').last().map(|l| l.chars().count()).unwrap_or(0);
+            (b.id, text_editor::Position { line, column })
+        });
+        let mut tp = TextPage { sheet_id: sheet_id.to_string(), main_node: None, sheet, doc, docked, saved: md, dirty: false, last_change: Instant::now() };
+        let task = match end {
+            Some((id, position)) => tp.doc.focus_block(id, text_editor::Cursor { position, selection: None }).map(Message::Blocks),
+            None => Task::none(),
+        };
+        self.text_page = Some(tp);
+        task
+    }
+
+    fn save_text_page(&mut self) {
+        let Some(t) = self.text_page.as_mut() else { return };
+        let md = t.doc.to_markdown();
+        if t.sheet_id.is_empty() {
+            // Notes for a page that had none: the first words create the notes sheet.
+            if md.trim().is_empty() {
+                t.dirty = false;
+                return;
+            }
+            let Some(main) = t.main_node.clone() else { return };
+            let Screen::Notebook(o) = &self.screen else { return };
+            let Ok((_, s)) = o.nb.add_side_sheet(&main, n0te_core::notebook::Side::Right, 0, &SheetSpec::a4(Background::Text)) else { return };
+            let _ = self.lib.save_notebook(&o.nb);
+            let Some(nb) = self.notebook_id() else { return };
+            let Ok(sheet) = self.lib.load_sheet(&nb, &s) else { return };
+            if let Some(t) = self.text_page.as_mut() {
+                t.sheet_id = s;
+                t.sheet = sheet;
+            }
+            self.relayout();
+        }
+        let Some(t) = self.text_page.as_mut() else { return };
+        let _ = t.sheet.set_page_text(&md);
+        t.saved = md;
+        t.dirty = false;
+        let (id, snap) = (t.sheet_id.clone(), t.sheet.snapshot().unwrap_or_default());
+        if let Ok(sheet) = Sheet::load(0, &snap) {
+            self.store_sheet(&id, &sheet);
+        }
+    }
+
+    fn close_text_page(&mut self) {
+        if self.text_page.as_ref().is_some_and(|t| t.dirty) {
+            self.save_text_page();
+        }
+        self.text_page = None;
+    }
+
+    /// The text page editor: a paper column with the block editor (full width, or the docked
+    /// notes column).
+    fn text_page_view<'a>(&'a self, t: &'a TextPage, o: &'a Open) -> Element<'a, Message> {
+        let label = o
+            .pages
+            .pages
+            .iter()
+            .find(|p| p.placed.sheet_id == t.sheet_id)
+            .map(|p| p.placed.label())
+            .or_else(|| t.main_node.as_ref().and_then(|m| o.pages.pages.iter().find(|p| &p.placed.node == m)).map(|p| p.placed.label()))
+            .unwrap_or_default();
+        let title = if t.docked { format!("NOTIZEN · SEITE {label}") } else { format!("TEXTSEITE · {label}") };
+        let header = row![
+            text(title).font(theme::MONO).size(10.5).color(theme::PAPER_MUTED),
+            Space::new().width(Length::Fill),
+            text(if t.dirty { "…" } else { "GESPEICHERT" }).font(theme::MONO).size(10.5).color(theme::PAPER_MUTED),
+            Space::new().width(10),
+            button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(10)).padding([2, 8]).on_press(Message::CloseTextPage).style(theme::text_tool),
+        ]
+        .align_y(Alignment::Center);
+        let paper = container(column![header, Space::new().height(14), t.doc.view().map(Message::Blocks)])
+            .padding(Padding { top: 28.0, right: if t.docked { 28.0 } else { 64.0 }, bottom: 64.0, left: 28.0 })
+            .max_width(if t.docked { 520.0 } else { 820.0 })
+            .width(Length::Fill)
+            .style(theme::paper);
+        let page = container(paper).padding(Padding { top: 20.0, right: 20.0, bottom: 40.0, left: 20.0 }).center_x(Length::Fill);
+        container(scrollable(page).style(theme::scroll_dark).height(Length::Fill).width(Length::Fill)).style(theme::surface).width(Length::Fill).height(Length::Fill).into()
     }
 
     fn notebook_id(&self) -> Option<String> {
@@ -553,7 +774,13 @@ impl App {
             let x = (page.x0 + tb.x - cam.x) * cam.zoom;
             let y = (page.y0 + tb.y - cam.y) * cam.zoom;
             let body = crate::markdown::view(&tb.text, tb.size * cam.zoom, tb.w * cam.zoom);
-            let area = mouse_area(body).on_press(Message::EditText(sheet.clone(), tb.id.clone())).interaction(iced::mouse::Interaction::Text);
+            let on_press = if tb.id == n0te_core::sheet::BODY_ID {
+                let docked = o.pages.pages.iter().any(|p| p.placed.sheet_id == sheet && p.placed.side != 0);
+                Message::OpenTextPage(sheet.clone(), docked)
+            } else {
+                Message::EditText(sheet.clone(), tb.id.clone())
+            };
+            let area = mouse_area(body).on_press(on_press).interaction(iced::mouse::Interaction::Text);
             out.push(pin(area).x(x).y(y).into());
         }
         if let Some(e) = &self.editing
@@ -679,6 +906,10 @@ impl App {
                 self.finish_text();
                 return Task::none();
             }
+            if self.text_page.is_some() {
+                self.close_text_page();
+                return Task::none();
+            }
             if self.creating.is_some() || self.show_imports {
                 self.creating = None;
                 self.show_imports = false;
@@ -754,7 +985,15 @@ impl App {
             Some(p) => stack![canvas, container(p).padding(16).width(Length::Fill)].into(),
             None => canvas,
         };
-        body = body.push(canvas);
+        match &self.text_page {
+            Some(t) if !t.docked => body = body.push(self.text_page_view(t, o)),
+            Some(t) => {
+                body = body.push(canvas);
+                body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
+                body = body.push(container(self.text_page_view(t, o)).width(Length::Fixed(460.0)));
+            }
+            None => body = body.push(canvas),
+        }
         column![
             self.top_bar(o, current),
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
@@ -777,6 +1016,10 @@ impl App {
                 Space::new().width(8),
                 chip(format!("{current:02} / {:02}", o.pages.total_pages)),
                 Space::new().width(14),
+                button(text("+ TEXTSEITE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::NewTextPage).style(theme::tab(false)),
+                Space::new().width(6),
+                button(text("NOTIZEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ToggleNotes).style(theme::tab(self.text_page.as_ref().is_some_and(|t| t.docked))),
+                Space::new().width(6),
                 button(text("PDF EINFÜGEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
                 Space::new().width(6),
                 button(text("EXPORT").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),

@@ -113,6 +113,8 @@ pub enum FfiBackground {
     Grid,
     Dots,
     Cornell,
+    /// Flowing text page (Markdown body).
+    Text,
 }
 
 impl From<FfiBackground> for Background {
@@ -123,6 +125,7 @@ impl From<FfiBackground> for Background {
             FfiBackground::Grid => Background::Grid,
             FfiBackground::Dots => Background::Dots,
             FfiBackground::Cornell => Background::Cornell,
+            FfiBackground::Text => Background::Text,
         }
     }
 }
@@ -134,6 +137,7 @@ impl From<Background> for FfiBackground {
             Background::Grid => FfiBackground::Grid,
             Background::Dots => FfiBackground::Dots,
             Background::Cornell => FfiBackground::Cornell,
+            Background::Text => FfiBackground::Text,
         }
     }
 }

@@ -93,6 +93,27 @@ fn main() {
         }
         h.events(&[]);
         h.screenshot(out.join("m2-07-text.png"));
+        // Notes docked next to the slide.
+        h.message(Message::DoneText);
+        h.message(Message::ToggleNotes);
+        for (i, line) in ["## Notizen zu Kapitel 1", "Grenzwert eindeutig, falls er existiert.", "- Beweis über Dreiecksungleichung", "- Übung 3 dazu ansehen"].iter().enumerate() {
+            if i > 0 {
+                h.press(iced::keyboard::key::Named::Enter);
+            }
+            h.type_text(line);
+        }
+        h.events(&[]);
+        h.screenshot(out.join("m2-08-notes.png"));
+        // A full text page.
+        h.message(Message::NewTextPage);
+        for (i, line) in ["# Mitschrift Vorlesung 8", "Heute: **Mittelwertsatz** und Anwendungen.", "```python", "def f(x): return x**2"].iter().enumerate() {
+            if i > 0 {
+                h.press(iced::keyboard::key::Named::Enter);
+            }
+            h.type_text(line);
+        }
+        h.events(&[]);
+        h.screenshot(out.join("m2-09-textpage.png"));
     }
     println!("screenshots in {}", out.display());
     let _ = std::fs::remove_dir_all(root);

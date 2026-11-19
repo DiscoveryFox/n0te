@@ -34,6 +34,9 @@ pub struct TextBox {
     pub text: String,
 }
 
+/// Id of the text page body when it is handed out as a [`TextBox`].
+pub const BODY_ID: &str = "__body";
+
 pub struct Sheet {
     doc: LoroDoc,
     objects: LoroMap,
@@ -241,6 +244,29 @@ impl Sheet {
         m.insert("size", size.clamp(4.0, 200.0) as f64)?;
         self.doc.commit();
         Ok(())
+    }
+
+    /// A text page's body (Markdown); empty for other sheets.
+    pub fn page_text(&self) -> String {
+        self.doc.get_text("body").to_string()
+    }
+
+    /// Replaces a text page's body as a minimal edit (concurrent typing elsewhere survives).
+    pub fn set_page_text(&self, markdown: &str) -> Result<()> {
+        self.doc.get_text("body").update(markdown, UpdateOptions::default()).map_err(|e| Error::Invalid(format!("{e:?}")))?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Text boxes plus, for a text page with a body, the body as a box inside the page's
+    /// margins (`page_width` points wide) — what a renderer or the PDF export draws.
+    pub fn text_boxes_with_body(&self, page_width: f32) -> Vec<TextBox> {
+        let mut out = self.text_boxes();
+        let body = self.page_text();
+        if !body.trim().is_empty() {
+            out.insert(0, TextBox { id: BODY_ID.into(), x: 56.0, y: 64.0, w: (page_width - 112.0).max(100.0), size: 12.0, text: body });
+        }
+        out
     }
 
     /// All text boxes, top to bottom.
@@ -545,6 +571,21 @@ mod tests {
 
     fn line(x0: f32, x1: f32, y: f32) -> Vec<InkPoint> {
         (0..=10).map(|i| InkPoint { x: x0 + (x1 - x0) * i as f32 / 10.0, y, pressure: 0.5, t_ms: i * 8 }).collect()
+    }
+
+    #[test]
+    fn text_page_body_merges_and_shows_as_a_box() {
+        let a = Sheet::create(12).unwrap();
+        assert!(a.text_boxes_with_body(595.0).is_empty());
+        a.set_page_text("# Mitschrift\n\nErster Absatz").unwrap();
+        let b = Sheet::load(13, &a.snapshot().unwrap()).unwrap();
+        a.set_page_text("# Mitschrift V08\n\nErster Absatz").unwrap();
+        b.set_page_text("# Mitschrift\n\nErster Absatz\n\n- Punkt").unwrap();
+        a.import(&b.updates_since(&a.version()).unwrap()).unwrap();
+        assert_eq!(a.page_text(), "# Mitschrift V08\n\nErster Absatz\n\n- Punkt");
+        let boxes = a.text_boxes_with_body(595.0);
+        assert_eq!((boxes[0].id.as_str(), boxes[0].w), (BODY_ID, 483.0));
+        assert!(a.strokes().is_empty() && a.text_boxes().is_empty(), "the body is neither a stroke nor a box");
     }
 
     #[test]

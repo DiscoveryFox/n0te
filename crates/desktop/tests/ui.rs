@@ -267,3 +267,43 @@ fn an_empty_box_disappears_and_ctrl_t_makes_one() {
     h.message(Message::DoneText);
     assert!(stored_texts(&root, &nb).is_empty(), "nothing typed: the box is gone");
 }
+
+fn stored_body(root: &std::path::Path, nb: &str, sheet: &str) -> String {
+    Library::open(root).unwrap().load_sheet(nb, sheet).unwrap().page_text()
+}
+
+#[test]
+fn text_page_with_markdown_shortcuts_saves_its_body() {
+    let (mut h, root, nb) = blank_notebook("textpage");
+    h.message(Message::NewTextPage);
+    let sheet = h.app.text_page.as_ref().expect("text page open").sheet_id.clone();
+    assert!(!h.app.text_page.as_ref().unwrap().docked);
+    h.type_text("# Mitschrift");
+    h.press(Named::Enter);
+    h.type_text("Der Mittelwertsatz.");
+    h.message(Message::CloseTextPage);
+    assert_eq!(stored_body(&root, &nb, &sheet), "# Mitschrift\n\nDer Mittelwertsatz.");
+    // It sits after the first page and shows in the outline as a text page.
+    let o = open(&h);
+    let p = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).unwrap();
+    assert_eq!((p.placed.number, p.placed.spec.background), (2, n0te_core::notebook::Background::Text));
+    // Opening it again from the canvas shows the stored body as blocks.
+    h.message(Message::OpenTextPage(sheet.clone(), false));
+    assert_eq!(h.app.text_page.as_ref().unwrap().doc.blocks.len(), 2);
+}
+
+#[test]
+fn notes_column_creates_a_side_text_page_and_follows_the_page() {
+    let (mut h, root, nb) = blank_notebook("notes");
+    h.message(Message::ToggleNotes);
+    let t = h.app.text_page.as_ref().expect("notes open");
+    assert!(t.docked);
+    let sheet = t.sheet_id.clone();
+    let o = open(&h);
+    let side = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).expect("notes sheet laid out");
+    assert_eq!((side.placed.side, side.placed.label()), (1, "1 R1".to_string()));
+    h.type_text("Frage: gilt das für komplexe Zahlen?");
+    h.message(Message::ToggleNotes);
+    assert!(h.app.text_page.is_none());
+    assert_eq!(stored_body(&root, &nb, &sheet), "Frage: gilt das für komplexe Zahlen?");
+}

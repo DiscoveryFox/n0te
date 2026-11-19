@@ -42,6 +42,9 @@ pub enum Background {
     Grid,
     Dots,
     Cornell,
+    /// A flowing text page: its content is the sheet's Markdown body ([`crate::sheet::Sheet::page_text`]).
+    /// Apps that predate it read it as blank paper.
+    Text,
 }
 
 impl Background {
@@ -52,6 +55,7 @@ impl Background {
             Background::Grid => "grid",
             Background::Dots => "dots",
             Background::Cornell => "cornell",
+            Background::Text => "text",
         }
     }
     pub fn parse(s: &str) -> Background {
@@ -60,6 +64,7 @@ impl Background {
             "grid" => Background::Grid,
             "dots" => Background::Dots,
             "cornell" => Background::Cornell,
+            "text" => Background::Text,
             _ => Background::Blank,
         }
     }
@@ -171,6 +176,20 @@ impl Notebook {
         self.meta.insert("cover", cover)?;
         self.doc.commit();
         Ok(())
+    }
+
+    /// Every sheet's spec (main and side sheets) by sheet id.
+    pub fn sheet_specs(&self) -> std::collections::HashMap<String, SheetSpec> {
+        let mut out = std::collections::HashMap::new();
+        for row in self.outline(true) {
+            if let OutlineRow::Sheet { sheet_id, spec, left, right, .. } = row {
+                out.insert(sheet_id, spec);
+                for s in left.into_iter().chain(right) {
+                    out.insert(s.sheet_id, s.spec);
+                }
+            }
+        }
+        out
     }
 
     /// The PDF blobs the notebook's sheets use as backgrounds.

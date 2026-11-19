@@ -41,6 +41,7 @@ pub fn view<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32) -> Eleme
                     match spec.pdf {
                         Some((_, page)) => format!("PDF-Seite {}", page + 1),
                         None if spec.is_board() => "Board".into(),
+                        None if spec.background == n0te_core::notebook::Background::Text => "Textseite".into(),
                         None => "Seite".into(),
                     }
                 } else {

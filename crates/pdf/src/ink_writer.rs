@@ -637,7 +637,7 @@ fn paper_content(out: &mut Vec<u8>, plan: &Plan) {
             line(out, 0.0, 70.0, w, 70.0);
             out.extend_from_slice(b"S\n");
         }
-        Background::Blank => {}
+        Background::Blank | Background::Text => {}
     }
     out.extend_from_slice(b"Q\n");
 }

@@ -46,6 +46,8 @@ const PENCIL_ALPHA: [f32; 3] = [0.84, 0.14, 0.24];
 pub struct SheetContent {
     pub strokes: Vec<Stroke>,
     pub texts: Vec<TextBox>,
+    /// A text page's Markdown body.
+    pub body: String,
 }
 
 /// Reads a sheet's content (from the library).
@@ -186,7 +188,7 @@ fn draw_pattern(frame: &mut canvas::Frame, bg: Background, w: f32, h: f32, step:
     let line = LineStroke::default().with_color(theme::PATTERN).with_width((1.0 / lod).max(0.5));
     let hline = |frame: &mut canvas::Frame, y: f32| frame.stroke(&Path::line(Point::new(0.0, y), Point::new(w, y)), line.clone());
     match bg {
-        Background::Blank => {}
+        Background::Blank | Background::Text => {}
         Background::Lines => {
             let mut y = step * 2.0;
             while y <= h {
@@ -286,7 +288,14 @@ impl Pages {
         let view = cam.view_rect();
         let mut out = Vec::new();
         for p in self.pages.iter().filter(|p| p.rect().intersects(&view)) {
-            for t in &p.content(&self.load).texts {
+            let c = p.content(&self.load);
+            if p.placed.spec.background == Background::Text {
+                // The text page's body, inside the page margins (an empty page shows a hint).
+                let text = if c.body.trim().is_empty() { "*Leere Textseite — anklicken zum Schreiben*".to_string() } else { c.body.clone() };
+                let w = (p.placed.rect.width() - 112.0).max(100.0);
+                out.push((p.placed.sheet_id.clone(), p.placed.rect, TextBox { id: n0te_core::sheet::BODY_ID.into(), x: 56.0, y: 64.0, w, size: 12.0, text }));
+            }
+            for t in &c.texts {
                 out.push((p.placed.sheet_id.clone(), p.placed.rect, t.clone()));
             }
         }
@@ -726,6 +735,7 @@ pub fn paper_code(spec: &SheetSpec) -> &'static str {
         Background::Grid => "KAR",
         Background::Dots => "PKT",
         Background::Cornell => "COR",
+        Background::Text => "TXT",
     }
 }
 

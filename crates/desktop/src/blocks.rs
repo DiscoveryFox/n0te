@@ -121,6 +121,96 @@ impl Doc {
         doc
     }
 
+    /// Blocks from Markdown (a text page's body): headings, bullets, ``` code, $$ formulas,
+    /// paragraphs (lines up to a blank line, joined with line breaks).
+    pub fn from_markdown(md: &str) -> Self {
+        let lines: Vec<&str> = md.split('\n').collect();
+        let mut items: Vec<(String, String)> = Vec::new();
+        let mut i = 0;
+        let special = |l: &str| {
+            let t = l.trim_start();
+            t.starts_with("# ") || t.starts_with("## ") || t.starts_with("### ") || t.starts_with("- ") || t.starts_with("* ") || t.starts_with("```") || t.trim() == "$$"
+        };
+        while i < lines.len() {
+            let line = lines[i];
+            let t = line.trim_start();
+            if t.trim().is_empty() {
+                i += 1;
+                continue;
+            }
+            if let Some(lang) = t.strip_prefix("```") {
+                let mut body = Vec::new();
+                i += 1;
+                while i < lines.len() && lines[i].trim() != "```" {
+                    body.push(lines[i]);
+                    i += 1;
+                }
+                items.push((format!("```{}", lang.trim()), body.join("\n")));
+                i += 1;
+                continue;
+            }
+            if t.trim() == "$$" {
+                let mut body = Vec::new();
+                i += 1;
+                while i < lines.len() && lines[i].trim() != "$$" {
+                    body.push(lines[i]);
+                    i += 1;
+                }
+                items.push(("$$".into(), body.join("\n")));
+                i += 1;
+                continue;
+            }
+            let heading = [("### ", "###"), ("## ", "##"), ("# ", "#")].into_iter().find_map(|(p, k)| t.strip_prefix(p).map(|rest| (k, rest)));
+            if let Some((k, rest)) = heading {
+                items.push((k.into(), rest.to_string()));
+                i += 1;
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+                items.push(("-".into(), rest.to_string()));
+                i += 1;
+                continue;
+            }
+            let mut para = vec![line];
+            i += 1;
+            while i < lines.len() && !lines[i].trim().is_empty() && !special(lines[i]) {
+                para.push(lines[i]);
+                i += 1;
+            }
+            items.push((String::new(), para.join("\n")));
+        }
+        let refs: Vec<(&str, &str)> = items.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+        Doc::new(&refs)
+    }
+
+    /// The page as Markdown (inverse of [`Doc::from_markdown`]); bullets in a row stay a list.
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let mut prev: Option<&Kind> = None;
+        for b in &self.blocks {
+            let text = b.text();
+            if let Some(p) = prev {
+                out.push_str(if *p == Kind::Bullet && b.kind == Kind::Bullet { "\n" } else { "\n\n" });
+            }
+            match &b.kind {
+                Kind::Paragraph => out.push_str(&text),
+                Kind::Heading(n) => {
+                    out.push_str(&"#".repeat(*n as usize));
+                    out.push(' ');
+                    out.push_str(&text);
+                }
+                Kind::Bullet => {
+                    out.push_str("- ");
+                    out.push_str(&text);
+                }
+                Kind::Code { lang } => out.push_str(&format!("```{lang}\n{text}\n```")),
+                Kind::Formula => out.push_str(&format!("$$\n{text}\n$$")),
+            }
+            prev = Some(&b.kind);
+        }
+        out
+    }
+
     fn alloc(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -534,6 +624,28 @@ fn bullet<'a>() -> Element<'a, Msg> {
     container(Space::new().width(6).height(6))
         .style(|_| container::Style { background: Some(theme::ACCENT.into()), ..Default::default() })
         .into()
+}
+
+#[cfg(test)]
+mod markdown_tests {
+    use super::*;
+
+    #[test]
+    fn markdown_round_trips_through_blocks() {
+        let md = "# Mitschrift V08\n\nErster Absatz\nmit Zeilenumbruch\n\n- eins\n- zwei\n\n```rust\nfn main() {}\n```\n\n$$\n\\int_0^1 x\\,dx\n$$\n\n## Ende";
+        let doc = Doc::from_markdown(md);
+        let kinds: Vec<Kind> = doc.blocks.iter().map(|b| b.kind.clone()).collect();
+        assert_eq!(kinds, vec![Kind::Heading(1), Kind::Paragraph, Kind::Bullet, Kind::Bullet, Kind::Code { lang: "rust".into() }, Kind::Formula, Kind::Heading(2)]);
+        assert_eq!(doc.blocks[1].text(), "Erster Absatz\nmit Zeilenumbruch");
+        assert_eq!(doc.to_markdown(), md);
+    }
+
+    #[test]
+    fn empty_markdown_is_one_empty_paragraph() {
+        let doc = Doc::from_markdown("");
+        assert_eq!(doc.blocks.len(), 1);
+        assert_eq!(doc.to_markdown(), "");
+    }
 }
 
 #[cfg(test)]
