@@ -1,0 +1,17 @@
+[Unit]
+Description=n0te sync (notebooks between this laptop, the tablet and guests)
+Documentation=file://%h/.local/share/n0te
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/n0te-sync
+Environment=N0TE_DEVICE_NAME=Laptop
+Restart=on-failure
+RestartSec=5
+# History checkpoints and verification use some CPU now and then; keep it polite.
+Nice=5
+
+[Install]
+WantedBy=default.target

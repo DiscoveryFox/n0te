@@ -1,0 +1,73 @@
+//! n0te sync engine: keeps notebooks the same on all of a person's devices and shares single
+//! notebooks with guests — peer to peer over [iroh] (QUIC with hole punching, LAN direct,
+//! encrypted relays as fallback; no server of our own).
+//!
+//! - **Own devices** are paired once with a pair code ([`Engine::pair_code`] /
+//!   [`Engine::accept_pair`]) and then trust each other fully: every notebook syncs, both
+//!   ways, as soon as they can reach each other ([`proto`] describes the protocol).
+//! - **Guests** get a signed invite link for one notebook, read-only or read-write
+//!   ([`Engine::create_invite`], [`Engine::join`], [`Engine::revoke`]).
+//! - **Live**: presence (viewport, laser pointer), strokes while they are drawn, "open this
+//!   notebook" and "follow me" requests ([`Engine::send_presence`] …), delivered as [`Event`]s.
+//! - **History**: checkpoints of changed notebooks with thinning and restore-as-copy
+//!   ([`history`]).
+//!
+//! The engine works on the same library directory as the notes app. Every write merges
+//! with what is on disk under a lock ([`n0te_core::store::Library::save_notebook`]), and the
+//! engine uses its own Loro peer id (`device.sync`), so the app and the engine can write at
+//! the same time. The engine itself never edits documents — it only merges — except when
+//! restoring a checkpoint as a new notebook.
+//!
+//! [iroh]: https://www.iroh.computer
+
+pub mod history;
+pub mod proto;
+
+mod engine;
+mod state;
+
+pub use engine::{DeviceInfo, Engine, EngineOptions, GuestInfo, InviteInfo, JoinedInfo, Status};
+pub use proto::{LiveBrush, Role};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Core(#[from] n0te_core::error::Error),
+    #[error("Netzwerk: {0}")]
+    Net(String),
+    #[error("Protokollfehler: {0}")]
+    Protocol(String),
+    #[error("{0}")]
+    Invalid(String),
+    #[error("abgelehnt: {0}")]
+    Rejected(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// What happened (delivered to the listener / the events channel, on an engine thread).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Event {
+    /// Another device changed a notebook here (reload `sheets`, and the outline if `index`).
+    RemoteChanged { notebook: String, index: bool, sheets: Vec<String> },
+    /// A blob (PDF) arrived.
+    BlobArrived { id: String },
+    DeviceOnline { device: DeviceInfo },
+    DeviceOffline { id: String },
+    /// A new own device was paired (on both sides).
+    Paired { device: DeviceInfo },
+    Presence { device: String, notebook: String, sheet: Option<String>, viewport: [f32; 4], zoom: f32, laser: Option<[f32; 2]> },
+    LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: LiveBrush, samples: Vec<u8>, done: bool },
+    /// An own device asks to open a notebook (live session button).
+    OpenRequest { device: String, notebook: String },
+    /// An own device asks this one to follow (or stop following) its view.
+    FollowRequest { device: String, on: bool },
+    /// Owner side: a guest connected / left.
+    GuestJoined { invite: String, notebook: String, name: String },
+    GuestLeft { invite: String, notebook: String },
+    /// Guest side: the owner revoked (or let expire) our invite.
+    AccessRevoked { notebook: String },
+    SyncError { message: String },
+}
