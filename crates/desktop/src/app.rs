@@ -649,7 +649,13 @@ impl App {
             },
             Message::PairToTablet => {
                 let Some(code) = self.pair_code.clone() else { return Task::none() };
-                return Task::perform(n0bridge(vec!["clipboard".into(), "set".into(), "--to".into(), "tablet".into(), code]), Message::PairSent);
+                return Task::perform(
+                    async move {
+                        let to = tablet_target();
+                        n0bridge(vec!["clipboard".into(), "set".into(), "--to".into(), to, code]).await
+                    },
+                    Message::PairSent,
+                );
             }
             Message::PairSent(r) => self.say(match r {
                 Ok(_) => "Code ist in der Tablet-Zwischenablage: dort n0te → Einstellungen → LAPTOP KOPPELN".to_string(),
@@ -1833,13 +1839,46 @@ async fn n0bridge(args: Vec<String>) -> Result<String, String> {
     if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
 }
 
+/// The paired tablet's n0bridge device id (`n0bridge devices`), since not every n0bridge
+/// command resolves the word "tablet"; falls back to "tablet".
+fn tablet_target() -> String {
+    std::process::Command::new("n0bridge")
+        .arg("devices")
+        .output()
+        .ok()
+        .and_then(|o| tablet_id(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_else(|| "tablet".into())
+}
+
+/// The id of the first device tagged `tablet` in `n0bridge devices` output.
+fn tablet_id(devices: &str) -> Option<String> {
+    devices.lines().find_map(|l| {
+        let mut words = l.split_whitespace();
+        let tagged = l.split_whitespace().any(|w| w.starts_with('[') && w.trim_matches(|c| c == '[' || c == ']').split(',').any(|t| t == "tablet"));
+        if !tagged {
+            return None;
+        }
+        words.find_map(|w| w.strip_prefix("id=")).map(str::to_string)
+    })
+}
+
 /// Sends a file to the tablet with the n0bridge CLI.
 async fn send_with_n0bridge(path: PathBuf) -> Result<String, String> {
     let out = std::process::Command::new("n0bridge")
-        .args(["send", "--to", "tablet"])
+        .args(["send", "--to", &tablet_target()])
         .arg(&path)
         .output()
         .map_err(|e| format!("n0bridge nicht gefunden ({e})"))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
+}
+
+#[cfg(test)]
+mod n0bridge_tests {
+    #[test]
+    fn finds_the_tablet_id() {
+        let out = "Tablet_s7_fe_flinn   id=b2b36918c88ef31d [tablet,terminal] app=0.14.6 akku=97%\nnothing-phone-3a-pro id=0c86c3a983ca106c [phone,primary,auth] app=0.14.2\n";
+        assert_eq!(super::tablet_id(out).as_deref(), Some("b2b36918c88ef31d"));
+        assert_eq!(super::tablet_id("phone id=1 [phone,primary]\n"), None);
+    }
 }
