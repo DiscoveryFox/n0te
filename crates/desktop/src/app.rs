@@ -1674,7 +1674,7 @@ impl App {
         }
         // The newest invite as a QR code (scan with the tablet/phone).
         if let Some(data) = &self.share_qr {
-            col = col.push(row![iced::widget::qr_code(data).cell_size(3), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
+            col = col.push(row![scannable_qr(data, 3.0), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
         }
         container(col).padding(14).width(Length::Fill).max_width(760).style(theme::panel).into()
     }
@@ -1726,7 +1726,7 @@ impl App {
                 if let Some(data) = &self.pair_qr {
                     col = col.push(
                         row![
-                            container(iced::widget::qr_code(data).cell_size(4)).padding(10).style(|_| container::Style { background: Some(iced::Color::WHITE.into()), ..Default::default() }),
+                            scannable_qr(data, 4.0),
                             Space::new().width(14),
                             text("Am Tablet: n0te → Einstellungen → LAPTOP (SYNC) → QR SCANNEN und diesen Code ansehen. Dafür braucht es kein n0bridge.").size(12).color(theme::p().muted).width(Length::Fixed(260.0)),
                         ]
@@ -1961,6 +1961,13 @@ async fn n0bridge(args: Vec<String>) -> Result<String, String> {
     let out = std::process::Command::new("n0bridge").args(&args).output().map_err(|e| format!("n0bridge nicht gefunden ({e})"))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
+}
+
+/// A QR code that scanners read in every design: black cells on white with a white quiet
+/// zone (iced's default takes the theme's text/background colours, inverted in dark themes).
+fn scannable_qr(data: &iced::widget::qr_code::Data, cell: f32) -> Element<'_, Message> {
+    let qr = iced::widget::qr_code(data).cell_size(cell).style(|_| iced::widget::qr_code::Style { cell: iced::Color::BLACK, background: iced::Color::WHITE });
+    container(qr).padding(4.0 * cell).style(|_| container::Style { background: Some(iced::Color::WHITE.into()), ..Default::default() }).into()
 }
 
 /// Whether the n0bridge CLI is installed (then codes can go straight to the tablet).
