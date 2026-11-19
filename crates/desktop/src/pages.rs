@@ -131,6 +131,24 @@ impl Page {
     }
 }
 
+/// Whether `strokes` holds the finished live stroke `l` (same colour, about the same place and
+/// size; a recognised shape keeps its extent, so it matches too).
+pub fn stored_has(strokes: &[Stroke], l: &LiveInk) -> bool {
+    let Some(first) = l.points.first() else { return true };
+    let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x, first.y);
+    for q in &l.points {
+        x0 = x0.min(q.x);
+        y0 = y0.min(q.y);
+        x1 = x1.max(q.x);
+        y1 = y1.max(q.y);
+    }
+    let tol = 2.0 + l.brush.width * 2.0 + 0.2 * (x1 - x0).max(y1 - y0);
+    strokes.iter().any(|s| {
+        let b = s.bounds;
+        s.brush.color == l.brush.color && (b.x0 - x0).abs() <= tol && (b.y0 - y0).abs() <= tol && (b.x1 - x1).abs() <= tol && (b.y1 - y1).abs() <= tol
+    })
+}
+
 /// Every how many samples the mesh keeps at a zoom (zoomed out, full resolution only costs).
 pub fn mesh_step(zoom: f32) -> usize {
     match zoom {
@@ -301,12 +319,16 @@ impl Pages {
 
     /// Drops a sheet's strokes and meshes (it changed on disk or was edited).
     pub fn reload_sheet(&self, sheet_id: &str) {
-        if let Some(p) = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id) {
-            *p.content.borrow_mut() = None;
-            *p.ink.borrow_mut() = None;
-        }
-        // Finished live strokes are now stored ones.
-        self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some()));
+        let Some(p) = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id) else {
+            self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some()));
+            return;
+        };
+        *p.content.borrow_mut() = None;
+        *p.ink.borrow_mut() = None;
+        // A finished live stroke goes only once the sheet holds it: the save that triggered this
+        // reload may predate it (drawn just after), and dropping it then made it blink.
+        let content = p.content(&self.load);
+        self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some() && stored_has(&content.strokes, l)));
     }
 
     /// New samples (packed LE f32 x, y, pressure, t) of a stroke another device is drawing.
@@ -822,6 +844,20 @@ pub fn paper_code(spec: &SheetSpec) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_stroke_stays_until_the_sheet_holds_it() {
+        let brush = ink::Brush { width: 1.0, thinning: 0.6, color: 0xFF11_1111, kind: 0 };
+        let pts = |x: f32| (0..20).map(|i| ink::InkPoint { x: x + i as f32 * 3.0, y: 100.0 + (i % 3) as f32, pressure: 0.5, t_ms: i * 8 }).collect::<Vec<_>>();
+        let live = LiveInk { sheet_id: "s".into(), brush, points: pts(50.0), done: Some(std::time::Instant::now()) };
+        let stored = |x: f32, color: u32| Stroke { id: "a".into(), brush: ink::Brush { color, ..brush }, bounds: Rect::new(x - 0.6, 99.4, x + 57.6, 102.6), points: pts(x) };
+        // The earlier save had only another stroke: keep the live one.
+        assert!(!stored_has(&[stored(300.0, brush.color)], &live));
+        // Same place, other colour: not it.
+        assert!(!stored_has(&[stored(50.0, 0xFFD7_1921)], &live));
+        // The save with it: drop the live copy.
+        assert!(stored_has(&[stored(300.0, brush.color), stored(50.0, brush.color)], &live));
+    }
 
     #[test]
     fn lod_is_next_power_of_two() {

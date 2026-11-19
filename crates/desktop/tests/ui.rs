@@ -362,7 +362,8 @@ fn live_events_show_the_tablet_and_changes_from_it() {
     h.message(Message::Live(LiveEvent::Stroke { device: "tab".into(), notebook: nb.clone(), sheet: sheet.clone(), stroke: 1, brush: (2.0, 0.5, 0xFF111111, 0), samples, done: true }));
     assert_eq!(open(&h).pages.live.borrow().values().next().unwrap().points.len(), 2);
     h.events(&[]);
-    // The stored stroke (and a new page) arrive: reload clears the live one.
+    // A save from just before the stroke (only a new page): the live stroke stays (it used to
+    // vanish here and come back with the next save).
     {
         let lib = Library::open(&root).unwrap();
         let n = lib.load_notebook(&nb).unwrap();
@@ -371,8 +372,18 @@ fn live_events_show_the_tablet_and_changes_from_it() {
     }
     h.message(Message::Live(LiveEvent::Changed { notebook: nb.clone(), index: true, sheets: vec![sheet.clone()] }));
     let o = open(&h);
-    assert!(o.pages.live.borrow().is_empty());
+    assert_eq!(o.pages.live.borrow().len(), 1, "not stored yet: still shown live");
     assert_eq!(o.pages.total_pages, 2, "the tablet's new page shows up");
+    // The stored stroke arrives: the live copy goes.
+    {
+        let lib = Library::open(&root).unwrap();
+        let sh = lib.load_sheet(&nb, &sheet).unwrap();
+        let pts = [(100.0, 600.0, 0u32), (140.0, 610.0, 8)].map(|(x, y, t)| n0te_core::ink::InkPoint { x, y, pressure: 0.5, t_ms: t });
+        sh.add_stroke(n0te_core::ink::Brush { width: 2.0, thinning: 0.5, color: 0xFF111111, kind: 0 }, &pts).unwrap();
+        lib.save_sheet(&nb, &sheet, &sh).unwrap();
+    }
+    h.message(Message::Live(LiveEvent::Changed { notebook: nb.clone(), index: false, sheets: vec![sheet.clone()] }));
+    assert!(open(&h).pages.live.borrow().is_empty(), "stored now: the live copy is gone");
 }
 
 #[test]
