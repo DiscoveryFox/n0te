@@ -662,9 +662,10 @@ impl Doc {
             .style(theme::code_box)
             .into(),
             // Not being edited: the formula itself (click edits it).
-            Kind::Formula if !focused && !b.content.is_empty() => mouse_area(
-                container(formula_view(&b.text(), true, 17.0)).center_x(Length::Fill).padding(Padding { top: 10.0, right: 12.0, bottom: 10.0, left: 12.0 }),
-            )
+            Kind::Formula if !focused && !b.content.is_empty() => mouse_area({
+                let c = container(formula_view(&b.text(), true, 17.0)).padding(Padding { top: 10.0, right: 12.0, bottom: 10.0, left: 12.0 });
+                if crate::settings::formula_center() { c.center_x(Length::Fill) } else { c.width(Length::Fill) }
+            })
             .on_press(Msg::FocusEnd(id))
             .interaction(iced::mouse::Interaction::Text)
             .into(),

@@ -12,9 +12,12 @@
 #   scripts/emu.sh key CODE            key event (66 Enter, 4 Back, 67 Delete)
 #   scripts/emu.sh stylus X1 Y1 X2 Y2  draw with the emulated stylus
 #   scripts/emu.sh text                the focused text field's content
+#   scripts/emu.sh field               tap the first text field
+#   scripts/emu.sh ui                  the UI tree (uiautomator XML)
 #   scripts/emu.sh stop
 set -euo pipefail
 SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
+[[ -x "$SDK/platform-tools/adb" ]] || SDK="$HOME/Android/Sdk"
 ADB="$SDK/platform-tools/adb"
 OUT="${N0TE_EMU_OUT:-${TMPDIR:-/tmp}/n0te-emu}"
 APK="$(cd "$(dirname "$0")/../.." && pwd)/app-android/n0te/build/outputs/apk/release/n0te-emu.apk"
@@ -46,6 +49,14 @@ for n in re.findall(r"<node [^>]*>", x):
 			sleep 0.3
 		done ;;
 	key) "$ADB" shell input keyevent "$2" ;;
+	ui) ui ;;
+	field)
+		xy=$(ui | python3 -I -c '
+import re, sys
+for n in re.findall(r"<node [^>]*class=\"android.widget.EditText\"[^>]*>", sys.stdin.read()):
+    b = list(map(int, re.search(r"bounds=\"\[(\d+),(\d+)\]\[(\d+),(\d+)\]\"", n).groups()))
+    print((b[0] + b[2]) // 2, (b[1] + b[3]) // 2); break')
+		[[ -n "$xy" ]] && "$ADB" shell input tap $xy && echo "field at $xy" || { echo "no text field" >&2; exit 1; } ;;
 	stylus) "$ADB" shell input stylus swipe "$2" "$3" "$4" "$5" "${6:-400}" ;;
 	text) ui | python3 -I -c '
 import html, re, sys
@@ -53,5 +64,5 @@ x = sys.stdin.read()
 m = re.search(r"<node [^>]*class=\"android.widget.EditText\"[^>]*focused=\"true\"[^>]*>", x) or re.search(r"<node [^>]*class=\"android.widget.EditText\"[^>]*>", x)
 print(html.unescape(re.search(r"text=\"([^\"]*)\"", m.group(0)).group(1)) if m else "")' ;;
 	stop) "$ADB" emu kill ;;
-	*) sed -n '2,17p' "$0"; exit 2 ;;
+	*) sed -n '2,19p' "$0"; exit 2 ;;
 esac

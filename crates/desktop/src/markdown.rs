@@ -40,6 +40,12 @@ fn inline(line: &str, size: f32, base: Font, color: Color) -> Vec<Span<'static, 
     out
 }
 
+/// A line that is only a display formula ($$…$$).
+fn is_display_line(s: &str) -> bool {
+    let t = s.trim();
+    t.len() > 4 && t.starts_with("$$") && t.ends_with("$$") && !t[2..t.len() - 2].contains('$')
+}
+
 fn has_math(s: &str) -> bool {
     crate::mdstyle::pairs(s).iter().any(|(_, _, m)| m.starts_with('$'))
 }
@@ -160,6 +166,7 @@ pub fn view<'a, M: 'a>(text: &str, size: f32, width: f32) -> Element<'a, M> {
             (line, size, theme::SANS, theme::INK, 0.0, None)
         };
         let lead_span = lead.map(|g| span(g).font(theme::SANS_BOLD).size(sz).color(theme::p().accent));
+        let centred = crate::settings::formula_center() && is_display_line(body);
         let para: Element<'a, M> = if has_math(body) {
             // With formulas: words and formula images in a wrapping row.
             let mut r = inline_flow(body, sz, f, color);
@@ -173,7 +180,8 @@ pub fn view<'a, M: 'a>(text: &str, size: f32, width: f32) -> Element<'a, M> {
             spans.extend(inline(body, sz, f, color));
             rich_text(spans).width(Length::Fill).into()
         };
-        col = col.push(container(para).padding(Padding { left: pad, ..Padding::ZERO }));
+        let para = container(para).padding(Padding { left: pad, ..Padding::ZERO });
+        col = col.push(if centred { para.center_x(Length::Fill) } else { para });
     }
     if let Some(lines) = code {
         let sp: Span<'static, (), Font> = span(lines.join("\n")).font(theme::MONO).size(size * 0.9).color(theme::INK);

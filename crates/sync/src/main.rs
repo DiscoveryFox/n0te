@@ -25,6 +25,10 @@ use n0te_sync::history::local_time;
 use n0te_sync::{Engine, EngineOptions, Event, LiveBrush, Role};
 
 /// Open GUI sessions: every engine event goes to each as a JSON line.
+mod recognize;
+
+/// The running engine (for answers sent from event handlers).
+static ENGINE: std::sync::OnceLock<Arc<Engine>> = std::sync::OnceLock::new();
 static SUBS: std::sync::OnceLock<std::sync::Mutex<Vec<mpsc::Sender<String>>>> = std::sync::OnceLock::new();
 
 fn broadcast(line: String) {
@@ -51,6 +55,8 @@ fn event_json(e: &Event) -> Option<String> {
         Event::Screenshot { device, image } => json!({ "t": "screenshot", "device": device, "bytes": image.len(), "path": shot_path(device) }),
         // The laptop has no screen to send (the app is the GUI, not this service).
         Event::ScreenshotRequest { device } => json!({ "t": "shot_request", "device": device }),
+        Event::LatexRequest { device, id, png } => json!({ "t": "latex_request", "device": device, "id": id, "bytes": png.len() }),
+        Event::LatexResult { device, id, latex, engine, error } => json!({ "t": "latex_result", "device": device, "id": id, "latex": latex, "engine": engine, "error": error }),
         Event::LiveErase { device, notebook, sheet, ids, dabs } => json!({ "t": "erase", "device": device, "notebook": notebook, "sheet": sheet, "ids": ids, "dabs": dabs }),
         Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
         Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
@@ -163,6 +169,23 @@ fn service() -> Res<()> {
     opts.local_only = std::env::var_os("N0TE_SYNC_LOCAL_ONLY").is_some();
     let _ = SUBS.set(std::sync::Mutex::new(Vec::new()));
     opts.listener = Some(Arc::new(|e: Event| {
+        if let Event::LatexRequest { device, id, png } = &e {
+            // Handwriting from the tablet: read it here, answer when done.
+            let (device, id, png) = (device.clone(), *id, png.clone());
+            std::thread::spawn(move || {
+                let r = recognize::recognize(&png);
+                for _ in 0..50 {
+                    if let Some(engine) = ENGINE.get() {
+                        let _ = match &r {
+                            Ok((latex, eng)) => engine.send_latex_result(&device, id, latex, eng, None),
+                            Err(err) => engine.send_latex_result(&device, id, "", "", Some(err)),
+                        };
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            });
+        }
         if let Event::Screenshot { device, image } = &e {
             // For `n0te-sync screenshot`: next to the socket, only for this user.
             let _ = write_private(&shot_path(device), image);
@@ -175,6 +198,7 @@ fn service() -> Res<()> {
         }
     }));
     let engine = Arc::new(Engine::start(&root, opts).map_err(|e| e.to_string())?);
+    let _ = ENGINE.set(engine.clone());
     log(&format!("n0te-sync {} · Bibliothek {} · Gerät {}", env!("CARGO_PKG_VERSION"), root.display(), engine.node_id()));
 
     // Checkpoints: now and every 5 minutes.
@@ -421,6 +445,12 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             let samples: Vec<u8> = args.get(9).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             engine.send_live_stroke(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, num(3) as u64, num(4) as u32, brush, &samples, args.get(10).is_some_and(|d| d == "1"));
             String::new()
+        }
+        // latex <png>: handwriting to LaTeX with the recognizers the tablet uses (for tests).
+        "latex" => {
+            let png = std::fs::read(arg(1, "PNG")?).map_err(|e| e.to_string())?;
+            let (latex, engine) = recognize::recognize(&png)?;
+            format!("{latex}\n({engine})")
         }
         // screenshot <device>: a picture of n0te on that own device (path printed when it's in).
         "screenshot" => {

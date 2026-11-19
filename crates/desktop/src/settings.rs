@@ -11,12 +11,21 @@ pub struct Settings {
     pub side_gap: f32,
     /// Show the other device's view as a red frame (live).
     pub remote_frame: bool,
+    /// Display formulas ($$…$$, formula blocks) centred.
+    pub formula_center: bool,
+}
+
+/// The current `formula_center` (read while drawing text; set from the settings).
+pub static FORMULA_CENTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn formula_center() -> bool {
+    FORMULA_CENTER.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Default for Settings {
     fn default() -> Self {
         let o = Options::default();
-        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap, remote_frame: true }
+        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap, remote_frame: true, formula_center: true }
     }
 }
 
@@ -39,6 +48,7 @@ impl Settings {
                 "row_gap" => s.row_gap = v.parse().unwrap_or(s.row_gap).clamp(4.0, 200.0),
                 "side_gap" => s.side_gap = v.parse().unwrap_or(s.side_gap).clamp(4.0, 200.0),
                 "remote_frame" => s.remote_frame = v != "0",
+                "formula_center" => s.formula_center = v != "0",
                 _ => {}
             }
         }
@@ -54,7 +64,17 @@ impl Settings {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, format!("theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\n", self.theme, self.row_gap, self.side_gap, if self.remote_frame { 1 } else { 0 }));
+        let _ = std::fs::write(
+            p,
+            format!(
+                "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\n",
+                self.theme,
+                self.row_gap,
+                self.side_gap,
+                if self.remote_frame { 1 } else { 0 },
+                if self.formula_center { 1 } else { 0 }
+            ),
+        );
     }
 
     pub fn layout(&self) -> Options {

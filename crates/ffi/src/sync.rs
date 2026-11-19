@@ -47,6 +47,10 @@ pub enum FfiSyncEvent {
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: Vec<f32>, zoom: f32, laser: Option<Vec<f32>> },
     /// Samples (packed LE f32 x, y, pressure, t_ms) of a stroke being drawn elsewhere.
     LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: FfiBrush, samples: Vec<u8>, done: bool },
+    /// (Laptop side; the tablet ignores it.)
+    LatexRequest { device: String, id: u64 },
+    /// The LaTeX for an earlier `request_latex`, which engine read it, or the error.
+    LatexResult { device: String, id: u64, latex: String, engine: String, error: Option<String> },
     /// An own device asks for a picture of this app's screen: answer with `send_screenshot`.
     ScreenshotRequest { device: String },
     /// A picture another device sent (JPEG).
@@ -142,6 +146,8 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::Paired { device: d } => FfiSyncEvent::Paired { device: device(d) },
         Event::Presence { device, notebook, sheet, viewport, zoom, laser } => FfiSyncEvent::Presence { device, notebook, sheet, viewport: viewport.to_vec(), zoom, laser: laser.map(|l| l.to_vec()) },
         Event::ScreenshotRequest { device } => FfiSyncEvent::ScreenshotRequest { device },
+        Event::LatexRequest { device, id, .. } => FfiSyncEvent::LatexRequest { device, id },
+        Event::LatexResult { device, id, latex, engine, error } => FfiSyncEvent::LatexResult { device, id, latex, engine, error },
         Event::Screenshot { device, image } => FfiSyncEvent::Screenshot { device, image },
         Event::LiveErase { device, notebook, sheet, ids, dabs } => FfiSyncEvent::LiveErase { device, notebook, sheet, ids, dabs: dabs.iter().flatten().copied().collect() },
         Event::LiveStroke { device, notebook, sheet, stroke, seq, brush, samples, done } => FfiSyncEvent::LiveStroke {
@@ -235,6 +241,10 @@ impl SyncEngine {
             e.send_presence(&notebook, sheet.as_deref(), v, zoom, l);
             Ok(())
         })
+    }
+    /// Handwriting (PNG) to LaTeX, read on the laptop: the answer arrives as `LatexResult`.
+    pub fn request_latex(&self, device: String, id: u64, png: Vec<u8>) -> R<()> {
+        self.with(|e| Ok(e.request_latex(&device, id, &png)?))
     }
     /// Answers a screenshot request from an own device (JPEG of this app's screen).
     pub fn send_screenshot(&self, device: String, image: Vec<u8>) -> R<()> {

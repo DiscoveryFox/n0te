@@ -405,6 +405,18 @@ impl Engine {
         Ok(())
     }
 
+    /// Asks an own device (the laptop) to read handwriting as LaTeX (answer: `Event::LatexResult`).
+    pub fn request_latex(&self, device: &str, id: u64, png: &[u8]) -> Result<()> {
+        self.own_session(device)?.send(Msg::LatexRequest { id, png: png.to_vec() });
+        Ok(())
+    }
+
+    /// Answers a LaTeX request.
+    pub fn send_latex_result(&self, device: &str, id: u64, latex: &str, engine: &str, error: Option<&str>) -> Result<()> {
+        self.own_session(device)?.send(Msg::LatexResult { id, latex: latex.into(), engine: engine.into(), error: error.map(Into::into) });
+        Ok(())
+    }
+
     /// Asks an own device for a picture of its n0te screen (arrives as `Event::Screenshot`).
     pub fn request_screenshot(&self, device: &str) -> Result<()> {
         self.own_session(device)?.send(Msg::Shot);
@@ -1130,6 +1142,8 @@ impl Inner {
             Msg::Open { notebook } if s.kind == Kind::Own => (self.emit)(Event::OpenRequest { device: s.id(), notebook }),
             Msg::Follow { on } if s.kind == Kind::Own => (self.emit)(Event::FollowRequest { device: s.id(), on }),
             Msg::Shot if s.kind == Kind::Own => (self.emit)(Event::ScreenshotRequest { device: s.id() }),
+            Msg::LatexRequest { id, png } if s.kind == Kind::Own => (self.emit)(Event::LatexRequest { device: s.id(), id, png }),
+            Msg::LatexResult { id, latex, engine, error } if s.kind == Kind::Own => (self.emit)(Event::LatexResult { device: s.id(), id, latex, engine, error }),
             Msg::ShotData { image } if s.kind == Kind::Own => (self.emit)(Event::Screenshot { device: s.id(), image }),
             Msg::Live(bytes) => {
                 if let Ok(live) = proto::decode::<Live>(&bytes) {

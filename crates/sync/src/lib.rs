@@ -72,6 +72,10 @@ pub enum Event {
     Paired { device: DeviceInfo },
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: [f32; 4], zoom: f32, laser: Option<[f32; 2]> },
     LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: LiveBrush, samples: Vec<u8>, done: bool },
+    /// An own device wants handwriting (PNG) as LaTeX (answer with `send_latex_result`).
+    LatexRequest { device: String, id: u64, png: Vec<u8> },
+    /// The LaTeX for an earlier `request_latex` (or the error).
+    LatexResult { device: String, id: u64, latex: String, engine: String, error: Option<String> },
     /// An own device asks for a picture of this app's screen (answer with `send_screenshot`).
     ScreenshotRequest { device: String },
     /// The picture another device sent (JPEG).

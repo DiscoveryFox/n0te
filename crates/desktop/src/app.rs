@@ -113,6 +113,7 @@ pub enum Message {
     ShowSettings(bool),
     SetTheme(&'static str),
     SetRowGap(f32),
+    FormulaCenter(bool),
     SetSideGap(f32),
     MoveText(iced::Vector),
     ResizeText(iced::Vector),
@@ -271,6 +272,7 @@ impl App {
 
     pub fn with_settings(root: impl AsRef<Path>, settings: Settings) -> Self {
         theme::set_theme(&settings.theme);
+        crate::settings::FORMULA_CENTER.store(settings.formula_center, std::sync::atomic::Ordering::Relaxed);
         let root = root.as_ref().to_path_buf();
         let lib = Rc::new(Library::open(&root).expect("library folder"));
         let pdf = match Pdf::start(&root) {
@@ -805,6 +807,13 @@ impl App {
                 if self.persist_settings { self.settings.save(); }
                 theme::set_theme(id);
                 self.reopen();
+            }
+            Message::FormulaCenter(on) => {
+                self.settings.formula_center = on;
+                crate::settings::FORMULA_CENTER.store(on, std::sync::atomic::Ordering::Relaxed);
+                if self.persist_settings {
+                    self.settings.save();
+                }
             }
             Message::SetRowGap(v) => {
                 self.settings.row_gap = v;
@@ -1748,6 +1757,8 @@ impl App {
             text("Abstände").size(14),
             slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap),
             slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap),
+            text("Text").size(14),
+            iced::widget::checkbox(self.settings.formula_center).label("Formeln zentrieren ($$…$$ und Formelblöcke)").on_toggle(Message::FormulaCenter).size(14).text_size(13),
             text("Geräte (Sync)").size(14),
             self.devices_view(),
             text("Exportierte PDFs bleiben weiß. Gespeichert in ~/.config/n0te/laptop.conf").size(12).color(theme::p().muted),

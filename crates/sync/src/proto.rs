@@ -68,6 +68,10 @@ pub enum Msg {
     Shot,
     /// The picture (JPEG).
     ShotData { image: Vec<u8> },
+    /// "Turn this handwriting into LaTeX" (PNG; the laptop has the recognizers).
+    LatexRequest { id: u64, png: Vec<u8> },
+    /// The answer: LaTeX and which engine read it, or why it failed.
+    LatexResult { id: u64, latex: String, engine: String, error: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
