@@ -7,7 +7,10 @@ use iced::widget::canvas::{self, Path, Stroke};
 use iced::widget::{Space, button, canvas as canvas_widget, column, container, row, text};
 use iced::{Alignment, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme, mouse};
 
-use crate::app::{App, Bundle, Entry, Message};
+use std::collections::HashSet;
+use std::path::PathBuf;
+
+use crate::app::{App, Bundle, Entry, ExportWhat, Message, Open};
 use crate::theme;
 
 pub fn view(app: &App) -> Element<'_, Message> {
@@ -18,6 +21,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             Space::new().width(18),
             text("BIBLIOTHEK").font(theme::MONO).size(theme::SMALL).color(theme::MUTED),
             Space::new().width(Length::Fill),
+            button(text("PDF IMPORTIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowPdfImport(!app.show_pdf_import)).style(theme::tab(app.show_pdf_import)),
+            Space::new().width(8),
             button(text(imports).font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowImports(!app.show_imports)).style(theme::tab(app.show_imports)),
             Space::new().width(8),
             button(text("+ NOTIZBUCH").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::StartCreate).style(theme::accent_button),
@@ -35,6 +40,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     if app.show_imports {
         content = content.push(imports_panel(&app.bundles));
+    }
+    if app.show_pdf_import {
+        content = content.push(pdf_panel(&app.pdfs, "PDF IMPORTIEREN — WIRD EIN NEUES NOTIZBUCH"));
     }
     if app.entries.is_empty() {
         content = content.push(
@@ -124,6 +132,65 @@ fn imports_panel(bundles: &[Bundle]) -> Element<'_, Message> {
     }
     list = list.push(text("Übernehmen führt mit dem Stand auf dem Laptop zusammen: nichts geht verloren.").size(12).color(theme::MUTED));
     container(list).padding(14).width(Length::Fill).style(theme::panel).into()
+}
+
+/// Recent PDFs to import; dropping a file onto the window works too.
+pub fn pdf_panel<'a>(pdfs: &'a [(PathBuf, SystemTime)], title: &'a str) -> Element<'a, Message> {
+    let mut list = column![text(title).font(theme::MONO).size(theme::LABEL).color(theme::MUTED)].spacing(6);
+    if pdfs.is_empty() {
+        list = list.push(text("Keine PDFs in Downloads oder Dokumente.").size(13).color(theme::MUTED));
+    }
+    for (path, modified) in pdfs.iter().take(14) {
+        let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let dir = path.parent().and_then(|d| d.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        list = list.push(
+            row![
+                text(fit(&name, 60)).size(14).color(theme::TEXT),
+                Space::new().width(10),
+                text(format!("{dir} · {}", age(*modified))).font(theme::MONO).size(theme::LABEL).color(theme::MUTED),
+                Space::new().width(Length::Fill),
+                button(text("NEHMEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ImportPdf(path.clone())).style(theme::tab(false)),
+            ]
+            .align_y(Alignment::Center),
+        );
+    }
+    list = list.push(text("Oder eine PDF- bzw. .n0te-Datei ins Fenster ziehen.").size(12).color(theme::MUTED));
+    container(list).padding(14).width(Length::Fill).max_width(900).style(theme::panel).into()
+}
+
+/// Export: whole notebook, this page, or the picked pages (with their side pages).
+pub fn export_panel<'a>(o: &'a Open, picked: &'a HashSet<String>) -> Element<'a, Message> {
+    let mut pages = column![].spacing(2);
+    for p in o.pages.pages.iter().filter(|p| p.placed.side == 0) {
+        let on = picked.contains(&p.placed.node);
+        let sides = o.pages.pages.iter().filter(|s| s.placed.main_node == p.placed.node && s.placed.side != 0).count();
+        let label = format!("{}  {:02}{}", if on { "■" } else { "□" }, p.placed.number, if sides > 0 { format!("  +{sides}") } else { String::new() });
+        pages = pages.push(button(text(label).font(theme::MONO).size(12)).padding([3, 8]).on_press(Message::TogglePick(p.placed.node.clone())).style(theme::row(on)));
+    }
+    let list = iced::widget::scrollable(pages).style(theme::scroll_dark).height(Length::Fixed(260.0));
+    container(
+        column![
+            text("PDF EXPORTIEREN — NACH ~/Downloads").font(theme::MONO).size(theme::LABEL).color(theme::MUTED),
+            row![
+                button(text("GANZES NOTIZBUCH").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::All)).style(theme::accent_button),
+                Space::new().width(8),
+                button(text("DIESE SEITE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::Current)).style(theme::tab(false)),
+                Space::new().width(8),
+                button(text(format!("AUSWAHL ({})", picked.len())).font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::Picked)).style(theme::tab(false)),
+                Space::new().width(Length::Fill),
+                button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowExport(false)).style(theme::ghost),
+            ]
+            .align_y(Alignment::Center),
+            text("Für AUSWAHL Seiten anklicken (Seitenblätter kommen mit):").size(12).color(theme::MUTED),
+            list,
+        ]
+        .spacing(10),
+    )
+    .padding(14)
+    .width(Length::Fill)
+    .max_width(640)
+    .style(theme::panel)
+    .into()
 }
 
 fn age(t: SystemTime) -> String {

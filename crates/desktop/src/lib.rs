@@ -6,6 +6,7 @@ pub mod blocks;
 pub mod demo;
 pub mod library;
 pub mod pages;
+pub mod pdf;
 pub mod sidebar;
 pub mod theme;
 

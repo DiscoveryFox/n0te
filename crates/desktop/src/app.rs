@@ -1,8 +1,10 @@
 //! The application: the library (notebooks by folder, import of `.n0te` bundles) and an open
 //! notebook (outline sidebar, page canvas, top and status bar).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use iced::keyboard::{self, Key, key::Named};
@@ -14,6 +16,7 @@ use n0te_core::notebook::{Background, Notebook, OutlineRow, SheetSpec};
 use n0te_core::store::Library;
 
 use crate::pages::{self, Camera, Pages};
+use crate::pdf::{self, Pdf};
 use crate::{library, sidebar, theme};
 
 /// A notebook in the library list.
@@ -53,6 +56,23 @@ pub enum Message {
     Create,
     CancelCreate,
     DismissStatus,
+    /// A PDF tile arrived (redraw).
+    TileReady,
+    FileDropped(PathBuf),
+    ShowPdfImport(bool),
+    ImportPdf(PathBuf),
+    ShowExport(bool),
+    Export(ExportWhat),
+    TogglePick(String),
+    OpenPath(PathBuf),
+}
+
+/// What to export as PDF.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportWhat {
+    All,
+    Current,
+    Picked,
 }
 
 pub struct Open {
@@ -70,6 +90,16 @@ pub enum Screen {
 
 pub struct App {
     pub lib: Rc<Library>,
+    pub root: PathBuf,
+    /// PDF rendering (None if pdfium is missing).
+    pub pdf: Option<Arc<Pdf>>,
+    pub show_pdf_import: bool,
+    pub pdfs: Vec<(PathBuf, SystemTime)>,
+    /// Export panel open, with the main sheets picked for "Auswahl".
+    pub export: Option<HashSet<String>>,
+    pub last_export: Option<PathBuf>,
+    /// Where exported PDFs go (~/Downloads).
+    pub export_dir: PathBuf,
     pub entries: Vec<Entry>,
     pub bundles: Vec<Bundle>,
     pub screen: Screen,
@@ -110,8 +140,32 @@ pub fn find_bundles(dirs: &[PathBuf]) -> Vec<Bundle> {
 
 impl App {
     pub fn new(root: impl AsRef<Path>) -> Self {
-        let lib = Rc::new(Library::open(root).expect("library folder"));
-        let mut app = App { lib, entries: Vec::new(), bundles: Vec::new(), screen: Screen::Library, status: None, creating: None, show_imports: false, sidebar: true };
+        let root = root.as_ref().to_path_buf();
+        let lib = Rc::new(Library::open(&root).expect("library folder"));
+        let pdf = match Pdf::start(&root) {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("n0te: no PDF rendering: {e}");
+                None
+            }
+        };
+        let mut app = App {
+            lib,
+            root,
+            pdf,
+            show_pdf_import: false,
+            pdfs: Vec::new(),
+            export: None,
+            last_export: None,
+            export_dir: downloads(),
+            entries: Vec::new(),
+            bundles: Vec::new(),
+            screen: Screen::Library,
+            status: None,
+            creating: None,
+            show_imports: false,
+            sidebar: true,
+        };
         app.refresh();
         app
     }
@@ -135,7 +189,14 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        keyboard::listen().map(Message::Key)
+        Subscription::batch([
+            keyboard::listen().map(Message::Key),
+            Pdf::subscription().map(|_| Message::TileReady),
+            iced::event::listen_with(|e, _, _| match e {
+                iced::Event::Window(iced::window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
+                _ => None,
+            }),
+        ])
     }
 
     fn refresh(&mut self) {
@@ -160,7 +221,7 @@ impl App {
         let layout = nl::layout(&rows, &nb.outline(true), Options::default());
         let lib = self.lib.clone();
         let nid = id.to_string();
-        let pages = Pages::new(layout, Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| s.strokes()).unwrap_or_default()));
+        let pages = Pages::new(layout, Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| s.strokes()).unwrap_or_default()), self.pdf.clone());
         self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, pages, camera: Camera::default() }));
         Ok(())
     }
@@ -278,8 +339,126 @@ impl App {
                 }
             }
             Message::DismissStatus => self.status = None,
+            Message::TileReady => {}
+            Message::FileDropped(p) => {
+                let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                return match ext.as_str() {
+                    "n0te" => self.update(Message::Import(p)),
+                    "pdf" => self.update(Message::ImportPdf(p)),
+                    _ => {
+                        self.say("Nur PDF- und .n0te-Dateien");
+                        Task::none()
+                    }
+                };
+            }
+            Message::ShowPdfImport(on) => {
+                self.show_pdf_import = on;
+                if on {
+                    self.pdfs = pdf::recent_pdfs();
+                }
+            }
+            Message::ImportPdf(path) => {
+                self.show_pdf_import = false;
+                self.import_pdf(&path);
+            }
+            Message::ShowExport(on) => self.export = on.then(HashSet::new),
+            Message::TogglePick(node) => {
+                if let Some(p) = &mut self.export
+                    && !p.remove(&node)
+                {
+                    p.insert(node);
+                }
+            }
+            Message::Export(what) => self.export_pdf(what),
+            Message::OpenPath(p) => {
+                let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+            }
         }
         Task::none()
+    }
+
+    /// Lays the open notebook out again after a structural change (keeps the camera).
+    fn relayout(&mut self) {
+        if let Screen::Notebook(o) = &mut self.screen {
+            o.rows = o.nb.outline(false);
+            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), Options::default()));
+            o.camera = o.pages.clamp(o.camera);
+        }
+    }
+
+    /// A PDF: in the library a new notebook named after the file, in a notebook new pages
+    /// right after the current one.
+    fn import_pdf(&mut self, path: &Path) {
+        let Some(pdf) = self.pdf.clone() else { return self.say("PDF geht nicht: libpdfium.so fehlt") };
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) => return self.say(format!("Nicht lesbar: {e}")),
+        };
+        let name = path.file_stem().map(|s| s.to_string_lossy().replace('_', " ")).unwrap_or_else(|| "PDF".into());
+        match &self.screen {
+            Screen::Notebook(o) => {
+                let current = o.pages.current_number(&o.camera);
+                let node = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone());
+                let (parent, index) = pdf::position_after(&o.nb, node.as_deref());
+                match pdf.import(&self.lib, &o.nb, bytes, parent.as_deref(), index) {
+                    Ok(n) => {
+                        self.relayout();
+                        self.say(format!("{n} Seiten aus „{name}“ eingefügt"));
+                    }
+                    Err(e) => self.say(format!("Import fehlgeschlagen: {e}")),
+                }
+            }
+            Screen::Library => {
+                let made = self.lib.create_notebook(&name).map_err(|e| e.to_string()).and_then(|nb| pdf.import(&self.lib, &nb, bytes, None, 0).map(|_| nb.id()));
+                match made {
+                    Ok(id) => {
+                        self.refresh();
+                        let _ = self.open(&id);
+                    }
+                    Err(e) => self.say(format!("Import fehlgeschlagen: {e}")),
+                }
+            }
+        }
+    }
+
+    /// Writes the PDF to ~/Downloads (a free name) and remembers it for "ÖFFNEN".
+    fn export_pdf(&mut self, what: ExportWhat) {
+        let Some(pdf) = self.pdf.clone() else { return self.say("PDF geht nicht: libpdfium.so fehlt") };
+        let Screen::Notebook(o) = &self.screen else { return };
+        let row = |main: &str| -> Vec<String> {
+            let mut r: Vec<&n0te_core::layout::Placed> = o.pages.pages.iter().map(|p| &p.placed).filter(|p| p.main_node == main).collect();
+            r.sort_by_key(|p| p.side);
+            r.into_iter().map(|p| p.sheet_id.clone()).collect()
+        };
+        let selected: Option<Vec<String>> = match what {
+            ExportWhat::All => None,
+            ExportWhat::Current => {
+                let current = o.pages.current_number(&o.camera);
+                o.pages.index_of_number(current).map(|i| row(&o.pages.pages[i].placed.node))
+            }
+            ExportWhat::Picked => {
+                let picked = self.export.clone().unwrap_or_default();
+                Some(o.pages.pages.iter().filter(|p| p.placed.side == 0 && picked.contains(&p.placed.node)).flat_map(|p| row(&p.placed.node)).collect())
+            }
+        };
+        if selected.as_ref().is_some_and(|s| s.is_empty()) {
+            return self.say("Keine Seite gewählt");
+        }
+        let title = o.nb.title();
+        match pdf.export(&self.lib, &o.nb, selected.as_deref()) {
+            Ok((bytes, pages)) => {
+                let path = free_path(&self.export_dir, &title, "pdf");
+                match n0te_core::store::write_atomic(&path, &bytes) {
+                    Ok(()) => {
+                        self.export = None;
+                        self.say(format!("{pages} Seiten exportiert: {}", path.display()));
+                        self.last_export = Some(path);
+                    }
+                    Err(e) => self.say(format!("Speichern fehlgeschlagen: {e}")),
+                }
+            }
+            Err(e) => self.say(format!("Export fehlgeschlagen: {e}")),
+        }
     }
 
     /// Global shortcuts (keys no focused widget consumed).
@@ -340,6 +519,15 @@ impl App {
             body = body.push(sidebar::view(&o.rows, &o.pages, current));
             body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
         }
+        let panel: Option<Element<'a, Message>> = if self.show_pdf_import {
+            Some(library::pdf_panel(&self.pdfs, "PDF EINFÜGEN — NACH DER AKTUELLEN SEITE"))
+        } else {
+            self.export.as_ref().map(|picked| crate::library::export_panel(o, picked))
+        };
+        let canvas: Element<'a, Message> = match panel {
+            Some(p) => iced::widget::stack![canvas, container(p).padding(16).width(Length::Fill)].into(),
+            None => canvas,
+        };
         body = body.push(canvas);
         column![
             self.top_bar(o, current),
@@ -363,6 +551,10 @@ impl App {
                 Space::new().width(8),
                 chip(format!("{current:02} / {:02}", o.pages.total_pages)),
                 Space::new().width(14),
+                button(text("PDF EINFÜGEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
+                Space::new().width(6),
+                button(text("EXPORT").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
+                Space::new().width(6),
                 button(text("AN TABLET").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::SendToTablet).style(theme::tab(false)),
             ]
             .align_y(Alignment::Center),
@@ -379,6 +571,11 @@ impl App {
             Some(s) => row![
                 text(s.as_str()).font(theme::MONO).size(10.5).color(theme::TEXT),
                 Space::new().width(10),
+                match &self.last_export {
+                    Some(p) => Element::from(button(text("ÖFFNEN").font(theme::MONO_BOLD).size(10)).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
+                    None => Space::new().into(),
+                },
+                Space::new().width(6),
                 button(text("×").size(12)).padding([0, 6]).on_press(Message::DismissStatus).style(theme::ghost),
             ]
             .align_y(Alignment::Center)
@@ -412,6 +609,21 @@ impl App {
     pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         scrollable(content).style(theme::scroll_dark).height(Length::Fill).width(Length::Fill).into()
     }
+}
+
+fn downloads() -> PathBuf {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads")).unwrap_or_else(std::env::temp_dir)
+}
+
+/// `dir/title.ext`, or `title (2).ext` … if taken; unsafe characters replaced.
+pub fn free_path(dir: &Path, title: &str, ext: &str) -> PathBuf {
+    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || " -_.,()".contains(c) { c } else { '_' }).collect();
+    let base = if safe.trim().is_empty() { "n0te".to_string() } else { safe.trim().to_string() };
+    let _ = std::fs::create_dir_all(dir);
+    (1..)
+        .map(|i| dir.join(if i == 1 { format!("{base}.{ext}") } else { format!("{base} ({i}).{ext}") }))
+        .find(|p| !p.exists())
+        .expect("a free name")
 }
 
 /// Sends a file to the tablet with the n0bridge CLI.

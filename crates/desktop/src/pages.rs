@@ -31,6 +31,7 @@ use n0te_core::layout::{self as nl, Header, Placed};
 use n0te_core::notebook::{Background, SheetSpec};
 use n0te_core::sheet::Stroke;
 
+use crate::pdf::{self, Pdf};
 use crate::theme;
 
 pub const MIN_ZOOM: f32 = 0.08;
@@ -242,18 +243,57 @@ pub struct Pages {
     pub bounds: Rect,
     pub total_pages: u32,
     load: Loader,
+    /// PDF backgrounds (None when pdfium is missing: PDF pages stay white).
+    pdf: Option<Arc<Pdf>>,
     frame: Cell<u64>,
+    /// Unique per opened notebook, so the view never carries a camera over to another one.
+    id: u64,
 }
 
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl Pages {
-    pub fn new(layout: nl::Layout, load: Loader) -> Self {
+    pub fn new(layout: nl::Layout, load: Loader, pdf: Option<Arc<Pdf>>) -> Self {
         Pages {
             pages: layout.sheets.into_iter().map(Page::new).collect(),
             headers: layout.headers,
             bounds: layout.bounds,
             total_pages: layout.total_pages,
             load,
+            pdf,
             frame: Cell::new(0),
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
+    }
+
+    /// Drops a sheet's strokes and meshes (it changed on disk or was edited).
+    pub fn reload_sheet(&self, sheet_id: &str) {
+        if let Some(p) = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id) {
+            *p.strokes.borrow_mut() = None;
+            *p.ink.borrow_mut() = None;
+        }
+    }
+
+    /// Draws a PDF page's background: the thumbnail, sharp tiles of the visible part on top.
+    fn draw_pdf(&self, r: &mut iced::Renderer, page: &Page, at: Point, cam: &Camera, view: &Rect, clip: Rectangle) {
+        use iced::advanced::image::{FilterMethod, Image, Renderer as _};
+        let (Some(pdf), Some((blob, index))) = (&self.pdf, &page.placed.spec.pdf) else { return };
+        let rect = page.rect();
+        let size = n0te_pdf::PageSize { width: rect.width(), height: rect.height() };
+        let whole = Rect::new(0.0, 0.0, size.width, size.height);
+        let visible = Rect::new(view.x0.max(rect.x0) - rect.x0, view.y0.max(rect.y0) - rect.y0, view.x1.min(rect.x1) - rect.x0, view.y1.min(rect.y1) - rect.y0);
+        let mut levels = vec![pdf.tiles_for(blob, *index, size, pdf::THUMB, whole, n0te_pdf::worker::priority::BACKGROUND)];
+        let b = pdf::bucket(cam.zoom);
+        if b > pdf::THUMB && !visible.is_empty() {
+            levels.push(pdf.tiles_for(blob, *index, size, b, visible, n0te_pdf::worker::priority::VISIBLE));
+        }
+        for tiles in levels {
+            for (t, img) in tiles {
+                if let Some(h) = img {
+                    let bounds = Rectangle::new(Point::new(at.x + t.x0 * cam.zoom, at.y + t.y0 * cam.zoom), Size::new(t.width() * cam.zoom, t.height() * cam.zoom));
+                    r.draw_image(Image::new(h).filter_method(FilterMethod::Linear), bounds, clip);
+                }
+            }
         }
     }
 
@@ -399,9 +439,10 @@ struct State {
     /// Where a left/middle drag started (screen) and whether it moved (else it's a click).
     drag: Option<(Point, Point, bool)>,
     modifiers: keyboard::Modifiers,
-    /// (camera the app gave us, camera we published from it): iced delivers a batch of events
-    /// before the app applies the camera, so each event builds on what we already published.
-    pending: Option<(Camera, Camera)>,
+    /// (notebook, camera the app gave us, camera we published from it): iced delivers a batch
+    /// of events before the app applies the camera, so each event builds on what we already
+    /// published — for the same notebook only.
+    pending: Option<(u64, Camera, Camera)>,
 }
 
 /// Pixels per wheel "line".
@@ -435,13 +476,13 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         let state = tree.state.downcast_mut::<State>();
         let bounds = layout.bounds();
         let cam = match state.pending {
-            Some((seen, published)) if seen == self.camera => published,
+            Some((id, seen, published)) if id == self.pages.id && seen == self.camera => published,
             _ => self.camera,
         };
         // Tell the app our size (first frame, resizes); it owns the camera.
         if cam.viewport != bounds.size() {
             let next = if cam.viewport.width <= 0.0 { self.pages.initial_camera(bounds.size()) } else { self.pages.clamp(Camera { viewport: bounds.size(), ..cam }) };
-            state.pending = Some((self.camera, next));
+            state.pending = Some((self.pages.id, self.camera, next));
             shell.publish((self.on_camera)(next));
             return;
         }
@@ -503,7 +544,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         if let Some(c) = next {
             let c = self.pages.clamp(c);
             if c != cam {
-                state.pending = Some((self.camera, c));
+                state.pending = Some((self.pages.id, self.camera, c));
                 shell.publish((self.on_camera)(c));
             }
             shell.capture_event();
@@ -561,17 +602,35 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 bounds,
             );
         };
+        let visible: Vec<&Page> = pages.pages.iter().filter(|p| p.rect().intersects(&view)).collect();
+        // Three layers: paper (+ PDF images), then ink, then labels — within one layer iced
+        // draws images after meshes, which would put the PDF over the ink.
         renderer.with_layer(bounds, |r| {
-            for page in pages.pages.iter().filter(|p| p.rect().intersects(&view)) {
+            for page in &visible {
                 page.last_frame.set(frame_no);
                 let geometry = page.background(r, lod);
-                let ink = page.ink_mesh(cam.zoom, &pages.load);
                 let rect = page.rect();
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
+                });
+                pages.draw_pdf(r, page, at, &cam, &view, bounds);
+            }
+        });
+        renderer.with_layer(bounds, |r| {
+            for page in &visible {
+                let ink = page.ink_mesh(cam.zoom, &pages.load);
+                let rect = page.rect();
+                let at = cam.to_screen(bounds, rect.x0, rect.y0);
+                r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(ink));
                 });
+            }
+        });
+        renderer.with_layer(bounds, |r| {
+            for page in &visible {
+                let rect = page.rect();
+                let at = cam.to_screen(bounds, rect.x0, rect.y0);
                 // Number left of main pages, "3 L1" above side pages, BOARD over boards.
                 if cam.zoom >= 0.18 {
                     let p = &page.placed;

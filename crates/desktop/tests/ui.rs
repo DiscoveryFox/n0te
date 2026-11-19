@@ -130,3 +130,74 @@ fn importing_a_bundle_adds_and_opens_the_notebook() {
     assert_eq!(h.app.entries.len(), 1);
     assert!(matches!(&h.app.screen, Screen::Notebook(o) if o.id == id));
 }
+
+/// A two-page PDF made with the app's own pdfium.
+fn two_page_pdf(app: &App) -> Vec<u8> {
+    use n0te_pdf::pdfium_render::prelude::*;
+    let pdf = app.pdf.as_ref().expect("pdfium (third_party/pdfium) for the PDF tests");
+    pdf.worker
+        .call(10, |docs| {
+            docs.engine().with_raw(|p| {
+                let mut doc = p.create_new_pdf().unwrap();
+                let font = doc.fonts_mut().helvetica();
+                for i in 0..2 {
+                    let mut page = doc.pages_mut().create_page_at_end(PdfPagePaperSize::a4()).unwrap();
+                    page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(742.0), &format!("Folie {i}"), font, PdfPoints::new(24.0)).unwrap();
+                }
+                doc.save_to_bytes().unwrap()
+            })
+        })
+        .unwrap()
+}
+
+#[test]
+fn pdf_import_insert_and_export() {
+    let root = temp_root("pdf");
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    let file = root.join("Vorlesung_03.pdf");
+    std::fs::write(&file, two_page_pdf(&h.app)).unwrap();
+    // In the library a PDF becomes a notebook named after the file.
+    h.message(Message::ImportPdf(file.clone()));
+    assert_eq!(h.app.entries.len(), 1);
+    assert_eq!(h.app.entries[0].title, "Vorlesung 03");
+    let pdf_pages = |h: &Harness| open(h).pages.pages.iter().filter(|p| p.placed.spec.pdf.is_some()).count();
+    assert_eq!(pdf_pages(&h), 2);
+    // Inside the notebook it is inserted after the current page.
+    h.message(Message::FileDropped(file));
+    assert_eq!(pdf_pages(&h), 4);
+    // Tiles render in the background and show up on a later frame.
+    h.events(&[]);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    h.events(&[]);
+    // Export: whole notebook and the picked pages, into the export folder.
+    h.app.export_dir = root.join("out");
+    h.message(Message::Export(n0te_desktop::app::ExportWhat::All));
+    let all = h.app.last_export.clone().expect("exported");
+    let bytes = std::fs::read(&all).unwrap();
+    assert!(bytes.starts_with(b"%PDF"));
+    h.message(Message::ShowExport(true));
+    let first = open(&h).pages.pages[0].placed.node.clone();
+    h.message(Message::TogglePick(first));
+    h.message(Message::Export(n0te_desktop::app::ExportWhat::Picked));
+    let picked = h.app.last_export.clone().unwrap();
+    assert_ne!(picked, all, "a free name, not overwritten");
+    assert!(std::fs::metadata(&picked).unwrap().len() < bytes.len() as u64);
+}
+
+#[test]
+fn opening_another_notebook_directly_gets_its_own_camera() {
+    let root = temp_root("switch");
+    let lib = Library::open(&root).unwrap();
+    let a = demo::save_into(&lib);
+    let other = lib.create_notebook("B").unwrap();
+    other.add_sheet(None, 0, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+    lib.save_notebook(&other).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::Open(a));
+    h.events(&[]);
+    h.message(Message::Zoom(2.0));
+    // Straight to B without passing the library (e.g. a dropped .n0te file).
+    h.message(Message::Open(other.id()));
+    h.events(&[]);
+    assert!(open(&h).camera.viewport.width > 0.0, "B got a camera for the view");
+}
