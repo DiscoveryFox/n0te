@@ -58,6 +58,9 @@ pub enum Message {
     SendToTablet,
     Sent(Result<String, String>),
     StartCreate,
+    NewPaper(Background),
+    NewSpacing(f32),
+    NewFormat(usize),
     NewTitle(String),
     Create,
     CancelCreate,
@@ -239,6 +242,10 @@ pub struct App {
     pub screen: Screen,
     pub status: Option<String>,
     pub creating: Option<String>,
+    /// Paper, spacing (pt) and format (index into [`FORMATS`]) of the notebook being created.
+    pub new_paper: Background,
+    pub new_spacing: f32,
+    pub new_format: usize,
     pub show_imports: bool,
     pub sidebar: bool,
 }
@@ -325,6 +332,9 @@ impl App {
             screen: Screen::Library,
             status: None,
             creating: None,
+            new_paper: Background::Grid,
+            new_spacing: 17.0,
+            new_format: 0,
             show_imports: false,
             sidebar: true,
         };
@@ -504,13 +514,22 @@ impl App {
                 Err(e) => format!("Senden fehlgeschlagen: {e}"),
             }),
             Message::StartCreate => self.creating = Some(String::new()),
+            Message::NewPaper(b) => {
+                if b != self.new_paper {
+                    self.new_paper = b;
+                    self.new_spacing = default_spacing(b);
+                }
+            }
+            Message::NewSpacing(v) => self.new_spacing = v,
+            Message::NewFormat(i) => self.new_format = i.min(FORMATS.len() - 1),
             Message::NewTitle(t) => self.creating = Some(t),
             Message::CancelCreate => self.creating = None,
             Message::Create => {
                 let title = self.creating.take().unwrap_or_default();
                 let title = if title.trim().is_empty() { "Neues Notizbuch".to_string() } else { title.trim().to_string() };
                 let made = self.lib.create_notebook(&title).and_then(|nb| {
-                    nb.add_sheet(None, 0, &SheetSpec { spacing: 17.0, ..SheetSpec::a4(Background::Grid) })?;
+                    let (_, w, h) = FORMATS[self.new_format];
+                    nb.add_sheet(None, 0, &SheetSpec { width: w, height: h, background: self.new_paper, spacing: self.new_spacing, pdf: None })?;
                     self.lib.save_notebook(&nb)?;
                     Ok(nb.id())
                 });
@@ -1961,21 +1980,72 @@ impl App {
     /// The "new notebook" title field (library).
     pub fn create_row(&self) -> Option<Element<'_, Message>> {
         let t = self.creating.as_ref()?;
-        Some(
+        let choice = |label: &str, on: bool, m: Message| button(theme::btn_small(label)).padding(theme::pad()).on_press(m).style(theme::tab(on));
+        let mut papers = row![].spacing(6);
+        for (b, label) in [(Background::Blank, "Leer"), (Background::Lines, "Linien"), (Background::Grid, "Kästchen"), (Background::Dots, "Punkte"), (Background::Cornell, "Cornell")] {
+            papers = papers.push(choice(label, self.new_paper == b, Message::NewPaper(b)));
+        }
+        let mut formats = row![].spacing(6);
+        for (i, (label, _, _)) in FORMATS.iter().enumerate() {
+            formats = formats.push(choice(label, self.new_format == i, Message::NewFormat(i)));
+        }
+        let label = |s: &str| container(theme::caption(s)).width(Length::Fixed(130.0));
+        let mut col = column![
+            theme::heading("Neues Notizbuch", 20.0),
             row![
-                text_input("Titel, z. B. Analysis I", t).on_input(Message::NewTitle).on_submit(Message::Create).padding(10).size(15).width(Length::Fixed(380.0)).style(theme::field),
+                text_input("Titel, z. B. Analysis I", t).on_input(Message::NewTitle).on_submit(Message::Create).padding(10).size(15).style(theme::field),
                 Space::new().width(10),
                 button(theme::btn("Anlegen")).padding(theme::pad()).on_press(Message::Create).style(theme::accent_button),
-                Space::new().width(8),
+                Space::new().width(6),
                 button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::CancelCreate).style(theme::ghost),
             ]
-            .align_y(Alignment::Center)
-            .into(),
-        )
+            .align_y(Alignment::Center),
+            row![label("Papier"), papers].align_y(Alignment::Center),
+        ]
+        .spacing(12);
+        if self.new_paper != Background::Blank {
+            let what = match self.new_paper {
+                Background::Grid => "Kästchengröße",
+                Background::Dots => "Punktabstand",
+                _ => "Linienabstand",
+            };
+            let mut quick = row![].spacing(6);
+            for (mm, l) in [(4.0f32, "4 mm"), (5.0, "5 mm"), (7.0, "7 mm"), (8.5, "8,5 mm")] {
+                let pt = mm / 0.3528;
+                // Units keep their case, also in the mono designs ("5 mm", not "5 MM").
+                let on = (self.new_spacing - pt).abs() < 0.6;
+                quick = quick.push(button(text(l).font(theme::label_font()).size(theme::label_size() - 1.5)).padding(theme::pad()).on_press(Message::NewSpacing(pt)).style(theme::tab(on)));
+            }
+            col = col.push(
+                row![
+                    label(what),
+                    iced::widget::slider(8.0..=40.0, self.new_spacing, Message::NewSpacing).step(0.5_f32).style(theme::slider_style).width(Length::Fixed(220.0)),
+                    Space::new().width(12),
+                    // 1 pt = 0.3528 mm: what you'd measure on paper.
+                    text(format!("{:.0} pt · {:.1} mm", self.new_spacing, self.new_spacing * 0.3528)).font(theme::MONO).size(12).width(Length::Fixed(120.0)),
+                    quick,
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(row![label("Format"), formats].align_y(Alignment::Center));
+        Some(container(col).padding(20).width(Length::Fill).max_width(960).style(theme::panel).into())
     }
 
     pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         scrollable(content).style(theme::scroll_dark).height(Length::Fill).width(Length::Fill).into()
+    }
+}
+
+/// Page formats for a new notebook: name, width, height (pt).
+pub const FORMATS: [(&str, f32, f32); 4] = [("A4 hoch", 595.0, 842.0), ("A4 quer", 842.0, 595.0), ("A5 hoch", 420.0, 595.0), ("Letter", 612.0, 792.0)];
+
+/// The usual spacing of a paper (pt): 6 mm boxes, 7.8 mm lines, 7 mm dots.
+fn default_spacing(b: Background) -> f32 {
+    match b {
+        Background::Grid => 17.0,
+        Background::Dots => 20.0,
+        _ => 22.0,
     }
 }
 

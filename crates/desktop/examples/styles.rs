@@ -37,6 +37,11 @@ fn main() {
         h.message(Message::Back);
         h.events(&[]);
         h.screenshot(out.join(format!("{}-1-library.png", t.id)));
+        h.message(Message::StartCreate);
+        h.message(Message::NewTitle("Analysis II".into()));
+        h.events(&[]);
+        h.screenshot(out.join(format!("{}-1b-create.png", t.id)));
+        h.message(Message::CancelCreate);
         h.message(Message::ShowSettings(true));
         h.events(&[]);
         h.screenshot(out.join(format!("{}-2-settings.png", t.id)));
