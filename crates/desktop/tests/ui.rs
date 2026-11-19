@@ -343,3 +343,44 @@ fn theme_and_gaps_change_and_the_view_follows() {
     assert!(matches!(h.app.screen, Screen::Notebook(_)), "still in the notebook");
     h.message(Message::SetTheme("nothing"));
 }
+
+#[test]
+fn live_events_show_the_tablet_and_changes_from_it() {
+    use n0te_desktop::live::LiveEvent;
+    let (mut h, root, nb) = blank_notebook("live");
+    let sheet = open(&h).pages.pages[0].placed.sheet_id.clone();
+    // The tablet's view and laser pointer appear; following moves the camera there.
+    h.app.live_session = Some(n0te_desktop::app::LiveSession { device: "tab".into(), name: "Tablet".into(), follow_them: true, they_follow: false });
+    let before = open(&h).camera;
+    h.message(Message::Live(LiveEvent::Presence { device: "tab".into(), notebook: nb.clone(), sheet: Some(sheet.clone()), viewport: [100.0, 500.0, 400.0, 700.0], zoom: 2.0, laser: Some([150.0, 550.0]) }));
+    let o = open(&h);
+    assert_eq!(o.pages.remote.borrow().len(), 1);
+    assert_eq!(o.pages.remote.borrow()[0].laser, Some((150.0, 550.0)));
+    assert!(o.camera != before && (o.camera.zoom - o.camera.viewport.width / 300.0).abs() < 0.01, "followed: {:?}", o.camera);
+    // A stroke being drawn shows live, until the stored one arrives.
+    let samples: Vec<u8> = [100.0f32, 600.0, 0.5, 0.0, 140.0, 610.0, 0.5, 8.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+    h.message(Message::Live(LiveEvent::Stroke { device: "tab".into(), notebook: nb.clone(), sheet: sheet.clone(), stroke: 1, brush: (2.0, 0.5, 0xFF111111, 0), samples, done: true }));
+    assert_eq!(open(&h).pages.live.borrow().values().next().unwrap().points.len(), 2);
+    h.events(&[]);
+    // The stored stroke (and a new page) arrive: reload clears the live one.
+    {
+        let lib = Library::open(&root).unwrap();
+        let n = lib.load_notebook(&nb).unwrap();
+        n.add_sheet(None, 1, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+        lib.save_notebook(&n).unwrap();
+    }
+    h.message(Message::Live(LiveEvent::Changed { notebook: nb.clone(), index: true, sheets: vec![sheet.clone()] }));
+    let o = open(&h);
+    assert!(o.pages.live.borrow().is_empty());
+    assert_eq!(o.pages.total_pages, 2, "the tablet's new page shows up");
+}
+
+#[test]
+fn an_open_request_from_the_tablet_opens_the_notebook_live() {
+    use n0te_desktop::live::LiveEvent;
+    let (mut h, _root, nb) = blank_notebook("openreq");
+    h.message(Message::Back);
+    h.message(Message::Live(LiveEvent::Open { device: "tab".into(), notebook: nb.clone() }));
+    assert!(matches!(&h.app.screen, Screen::Notebook(o) if o.id == nb));
+    assert_eq!(h.app.live_session.as_ref().map(|l| l.device.as_str()), Some("tab"));
+}

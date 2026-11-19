@@ -21,6 +21,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
             Space::new().width(18),
             text("BIBLIOTHEK").font(theme::MONO).size(theme::SMALL).color(theme::p().muted),
             Space::new().width(Length::Fill),
+            button(text("EINLADUNG").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::StartJoin).style(theme::tab(app.joining.is_some())),
+            Space::new().width(8),
             button(text("PDF IMPORTIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowPdfImport(!app.show_pdf_import)).style(theme::tab(app.show_pdf_import)),
             Space::new().width(8),
             button(text(imports).font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowImports(!app.show_imports)).style(theme::tab(app.show_imports)),
@@ -37,6 +39,26 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut content = column![].spacing(18).padding(Padding { top: 18.0, right: 24.0, bottom: 32.0, left: 24.0 });
     if let Some(r) = app.create_row() {
         content = content.push(r);
+    }
+    if let Some(link) = &app.joining {
+        content = content.push(
+            container(
+                column![
+                    text("EINLADUNG ÖFFNEN — DAS NOTIZBUCH WIRD DIREKT VOM BESITZER GELADEN").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+                    row![
+                        iced::widget::text_input("n0te://invite/…", link).on_input(Message::JoinLink).on_submit(Message::Join).padding(10).size(14),
+                        Space::new().width(8),
+                        button(text("BEITRETEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([8, 14]).on_press(Message::Join).style(theme::accent_button),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(8),
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .max_width(900)
+            .style(theme::panel),
+        );
     }
     if app.show_imports {
         content = content.push(imports_panel(&app.bundles));

@@ -245,8 +245,30 @@ pub fn argb(c: u32) -> Color {
     Color::from_rgba8((c >> 16) as u8, (c >> 8) as u8, c as u8, ((c >> 24) as f32) / 255.0)
 }
 
+/// Another device's view on this notebook: the part of a sheet it shows, its laser pointer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RemoteMark {
+    pub sheet_id: String,
+    /// Sheet points.
+    pub rect: Rect,
+    pub laser: Option<(f32, f32)>,
+    pub name: String,
+}
+
+/// A stroke another device is drawing right now (shown until the stored stroke arrives).
+pub struct LiveInk {
+    pub sheet_id: String,
+    pub brush: ink::Brush,
+    pub points: Vec<ink::InkPoint>,
+    pub done: Option<std::time::Instant>,
+}
+
 /// The laid-out notebook.
 pub struct Pages {
+    /// Other devices' views (live session).
+    pub remote: RefCell<Vec<RemoteMark>>,
+    /// Strokes being drawn on other devices, by (device, stroke).
+    pub live: RefCell<HashMap<(String, u64), LiveInk>>,
     pub pages: Vec<Page>,
     pub headers: Vec<Header>,
     pub bounds: Rect,
@@ -264,6 +286,8 @@ static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 impl Pages {
     pub fn new(layout: nl::Layout, load: Loader, pdf: Option<Arc<Pdf>>) -> Self {
         Pages {
+            remote: RefCell::new(Vec::new()),
+            live: RefCell::new(HashMap::new()),
             pages: layout.sheets.into_iter().map(Page::new).collect(),
             headers: layout.headers,
             bounds: layout.bounds,
@@ -281,6 +305,28 @@ impl Pages {
             *p.content.borrow_mut() = None;
             *p.ink.borrow_mut() = None;
         }
+        // Finished live strokes are now stored ones.
+        self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some()));
+    }
+
+    /// New samples (packed LE f32 x, y, pressure, t) of a stroke another device is drawing.
+    pub fn live_samples(&self, device: &str, stroke: u64, sheet_id: &str, brush: (f32, f32, u32, u8), samples: &[u8], done: bool) {
+        let mut live = self.live.borrow_mut();
+        let l = live.entry((device.to_string(), stroke)).or_insert_with(|| LiveInk {
+            sheet_id: sheet_id.to_string(),
+            brush: ink::Brush { width: brush.0, thinning: brush.1, color: brush.2, kind: brush.3 },
+            points: Vec::new(),
+            done: None,
+        });
+        for c in samples.chunks_exact(16) {
+            let f = |i: usize| f32::from_le_bytes(c[i..i + 4].try_into().expect("4 bytes"));
+            l.points.push(ink::InkPoint { x: f(0), y: f(4), pressure: f(8), t_ms: f(12).max(0.0) as u32 });
+        }
+        if done {
+            l.done = Some(std::time::Instant::now());
+        }
+        // Done strokes whose stored version never came: drop after a while.
+        live.retain(|_, l| l.done.is_none_or(|t| t.elapsed().as_secs() < 8));
     }
 
     /// Text boxes on the pages in view: (sheet id, the sheet's rect, box).
@@ -670,6 +716,20 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             }
         });
         renderer.with_layer(bounds, |r| {
+            for l in pages.live.borrow().values() {
+                let Some(page) = visible.iter().find(|p| p.placed.sheet_id == l.sheet_id) else { continue };
+                let rect = page.rect();
+                let stroke = Stroke { id: String::new(), brush: l.brush, bounds: Rect::EMPTY, points: l.points.clone() };
+                let meshes = ink_meshes(std::slice::from_ref(&stroke), 1, Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height())));
+                if meshes.is_empty() {
+                    continue;
+                }
+                let at = cam.to_screen(bounds, rect.x0, rect.y0);
+                let cache = mesh::Cache::new(Arc::from(meshes));
+                r.with_translation(Vector::new(at.x, at.y), |r| {
+                    r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(cache));
+                });
+            }
             for page in &visible {
                 let ink = page.ink_mesh(cam.zoom, &pages.load);
                 let rect = page.rect();
@@ -709,6 +769,26 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let title = if h.title.trim().is_empty() { "Gruppe".to_string() } else { h.title.clone() };
                 label(r, format!("{title}   {}", h.count), Point::new(at.x + size * 1.4, y), w - size * 1.4, theme::p().text, size, theme::SANS_BOLD, text::Alignment::Left);
                 r.fill_quad(renderer::Quad { bounds: Rectangle::new(Point::new(at.x, at.y + hh - 1.0), Size::new(w, 1.0)), ..Default::default() }, theme::p().border);
+            }
+            // Other devices: their view as a frame, their laser pointer as a red dot.
+            for m in pages.remote.borrow().iter() {
+                let Some(page) = pages.pages.iter().find(|p| p.placed.sheet_id == m.sheet_id) else { continue };
+                let o = page.rect();
+                let a = cam.to_screen(bounds, o.x0 + m.rect.x0, o.y0 + m.rect.y0);
+                let b = cam.to_screen(bounds, o.x0 + m.rect.x1, o.y0 + m.rect.y1);
+                let frame = Rectangle::new(a, Size::new((b.x - a.x).max(4.0), (b.y - a.y).max(4.0)));
+                r.fill_quad(
+                    renderer::Quad { bounds: frame, border: iced::Border { color: theme::alpha(theme::p().accent, 0.8), width: 2.0, radius: 4.0.into() }, ..Default::default() },
+                    Color::TRANSPARENT,
+                );
+                label(r, m.name.to_uppercase(), Point::new(frame.x + 4.0, frame.y + 4.0), 200.0, theme::p().accent, 10.0, theme::MONO_BOLD, text::Alignment::Left);
+                if let Some((x, y)) = m.laser {
+                    let c = cam.to_screen(bounds, o.x0 + x, o.y0 + y);
+                    r.fill_quad(
+                        renderer::Quad { bounds: Rectangle::new(Point::new(c.x - 7.0, c.y - 7.0), Size::new(14.0, 14.0)), border: iced::Border { radius: 7.0.into(), ..Default::default() }, ..Default::default() },
+                        Color::from_rgba8(255, 59, 48, 0.9),
+                    );
+                }
             }
         });
         pages.evict_stale();

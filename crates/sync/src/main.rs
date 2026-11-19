@@ -22,7 +22,42 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use n0te_sync::history::local_time;
-use n0te_sync::{Engine, EngineOptions, Event, Role};
+use n0te_sync::{Engine, EngineOptions, Event, LiveBrush, Role};
+
+/// Open GUI sessions: every engine event goes to each as a JSON line.
+static SUBS: std::sync::OnceLock<std::sync::Mutex<Vec<mpsc::Sender<String>>>> = std::sync::OnceLock::new();
+
+fn broadcast(line: String) {
+    if let Some(subs) = SUBS.get()
+        && let Ok(mut v) = subs.lock()
+    {
+        v.retain(|tx| tx.send(line.clone()).is_ok());
+    }
+}
+
+/// An engine event as a JSON line for GUI sessions (None: not of interest to apps).
+fn event_json(e: &Event) -> Option<String> {
+    use serde_json::json;
+    let v = match e {
+        Event::RemoteChanged { notebook, index, sheets } => json!({ "t": "changed", "notebook": notebook, "index": index, "sheets": sheets }),
+        Event::DeviceOnline { device } => json!({ "t": "online", "id": device.id, "name": device.name }),
+        Event::DeviceOffline { id } => json!({ "t": "offline", "id": id }),
+        Event::Paired { device } => json!({ "t": "paired", "id": device.id, "name": device.name }),
+        Event::Presence { device, notebook, sheet, viewport, zoom, laser } => json!({ "t": "presence", "device": device, "notebook": notebook, "sheet": sheet, "viewport": viewport, "zoom": zoom, "laser": laser }),
+        Event::LiveStroke { device, notebook, sheet, stroke, seq, brush, samples, done } => json!({
+            "t": "live", "device": device, "notebook": notebook, "sheet": sheet, "stroke": stroke, "seq": seq,
+            "brush": { "width": brush.width, "thinning": brush.thinning, "color": brush.color, "kind": brush.kind }, "samples": samples, "done": done
+        }),
+        Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
+        Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
+        Event::GuestJoined { invite, notebook, name } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "name": name, "on": true }),
+        Event::GuestLeft { invite, notebook } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "on": false }),
+        Event::AccessRevoked { notebook } => json!({ "t": "revoked", "notebook": notebook }),
+        Event::SyncError { message } => json!({ "t": "error", "message": message }),
+        Event::BlobArrived { .. } => return None,
+    };
+    Some(v.to_string())
+}
 
 fn library_root() -> PathBuf {
     if let Some(p) = std::env::var_os("N0TE_LIBRARY") {
@@ -100,9 +135,15 @@ fn service() -> Res<()> {
         return Err("läuft schon".into());
     }
     let mut opts = EngineOptions::new(device_name());
+    // Tests: no relays, no address lookup.
+    opts.local_only = std::env::var_os("N0TE_SYNC_LOCAL_ONLY").is_some();
+    let _ = SUBS.set(std::sync::Mutex::new(Vec::new()));
     opts.listener = Some(Arc::new(|e: Event| {
         if let Some(s) = describe(&e) {
             log(&s);
+        }
+        if let Some(line) = event_json(&e) {
+            broadcast(line);
         }
     }));
     let engine = Arc::new(Engine::start(&root, opts).map_err(|e| e.to_string())?);
@@ -140,15 +181,49 @@ fn service() -> Res<()> {
 }
 
 fn serve(engine: &Engine, conn: UnixStream) -> std::io::Result<()> {
+    let mut reader = BufReader::new(conn.try_clone()?);
     let mut line = String::new();
-    BufReader::new(conn.try_clone()?).read_line(&mut line)?;
+    reader.read_line(&mut line)?;
     let args: Vec<String> = serde_json::from_str(&line).unwrap_or_default();
+    if args.first().map(String::as_str) == Some("session") {
+        return session(engine, conn, reader);
+    }
     let reply = match dispatch(engine, &args) {
         Ok(out) => serde_json::json!({ "ok": true, "out": out }),
         Err(e) => serde_json::json!({ "ok": false, "out": e }),
     };
     let mut w = conn;
     writeln!(w, "{reply}")
+}
+
+/// A GUI session: the app sends live commands (one JSON array per line, no replies) and gets
+/// every engine event as a JSON line, until either side closes.
+fn session(engine: &Engine, conn: UnixStream, reader: BufReader<UnixStream>) -> std::io::Result<()> {
+    let (tx, rx) = mpsc::channel::<String>();
+    if let Some(subs) = SUBS.get() {
+        subs.lock().expect("subs").push(tx.clone());
+    }
+    // A hello with this device's id, so the app can tell its own echo apart.
+    let _ = tx.send(serde_json::json!({ "t": "hello", "node": engine.node_id() }).to_string());
+    let mut w = conn.try_clone()?;
+    let writer = std::thread::spawn(move || {
+        for line in rx {
+            if writeln!(w, "{line}").is_err() {
+                break;
+            }
+        }
+    });
+    for line in reader.lines() {
+        let Ok(line) = line else { break };
+        let args: Vec<String> = serde_json::from_str(&line).unwrap_or_default();
+        if let Err(err) = dispatch(engine, &args) {
+            let _ = tx.send(serde_json::json!({ "t": "error", "message": err }).to_string());
+        }
+    }
+    drop(tx);
+    let _ = conn.shutdown(std::net::Shutdown::Both);
+    let _ = writer.join();
+    Ok(())
 }
 
 /// A CLI command: through the service if it runs, else with a short-lived engine.
@@ -168,6 +243,8 @@ fn client(args: &[String]) -> Res<i32> {
     }
     let (tx, rx) = mpsc::channel::<Event>();
     let mut opts = EngineOptions::new(device_name());
+    // Tests: no relays, no address lookup.
+    opts.local_only = std::env::var_os("N0TE_SYNC_LOCAL_ONLY").is_some();
     let tx = std::sync::Mutex::new(tx);
     opts.listener = Some(Arc::new(move |e| {
         let _ = tx.lock().expect("tx").send(e);
@@ -281,6 +358,45 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
         "checkpoint" => {
             let p = engine.checkpoint();
             format!("{} gesichert, {} fehlgeschlagen, {} alte entfernt", p.written.len(), p.failed.len(), p.removed)
+        }
+        // For apps (JSON).
+        "devices-json" => serde_json::to_string(&engine.devices().iter().map(|d| serde_json::json!({ "id": d.id, "name": d.name, "online": d.online, "last_seen": d.last_seen })).collect::<Vec<_>>()).unwrap_or_default(),
+        "invites-json" => serde_json::to_string(
+            &engine
+                .list_invites()
+                .iter()
+                .map(|i| serde_json::json!({ "id": i.id, "notebook": i.notebook, "title": i.title, "rw": i.role == Role::ReadWrite, "revoked": i.revoked, "expires": i.expires, "online": i.online, "link": i.link }))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap_or_default(),
+        "joined-json" => serde_json::to_string(&engine.joined().iter().map(|j| serde_json::json!({ "invite": j.invite, "notebook": j.notebook, "title": j.title, "owner": j.owner_name, "online": j.online, "revoked": j.revoked })).collect::<Vec<_>>()).unwrap_or_default(),
+        "node" => engine.node_id(),
+        // Live (sessions): presence, stroke samples, open / follow requests.
+        "presence" => {
+            let f = |i: usize| args.get(i).and_then(|v| v.parse::<f32>().ok());
+            let sheet = args.get(2).filter(|s| !s.is_empty()).map(String::as_str);
+            let viewport = [f(3).unwrap_or(0.0), f(4).unwrap_or(0.0), f(5).unwrap_or(0.0), f(6).unwrap_or(0.0)];
+            let laser = match (f(8), f(9)) {
+                (Some(x), Some(y)) => Some([x, y]),
+                _ => None,
+            };
+            engine.send_presence(&arg(1, "Notizbuch")?, sheet, viewport, f(7).unwrap_or(1.0), laser);
+            String::new()
+        }
+        "live" => {
+            let num = |i: usize| args.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let brush = LiveBrush { width: num(5) as f32, thinning: num(6) as f32, color: num(7) as u32, kind: num(8) as u8 };
+            let samples: Vec<u8> = args.get(9).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            engine.send_live_stroke(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, num(3) as u64, num(4) as u32, brush, &samples, args.get(10).is_some_and(|d| d == "1"));
+            String::new()
+        }
+        "open" => {
+            engine.request_open(&arg(1, "Gerät")?, &arg(2, "Notizbuch")?).map_err(e)?;
+            String::new()
+        }
+        "follow" => {
+            engine.set_follow(&arg(1, "Gerät")?, args.get(2).is_some_and(|v| v == "1")).map_err(e)?;
+            String::new()
         }
         other => return Err(format!("unbekannter Befehl {other} (n0te-sync help)")),
     })

@@ -5,6 +5,7 @@ pub mod app;
 pub mod blocks;
 pub mod demo;
 pub mod library;
+pub mod live;
 pub mod markdown;
 pub mod pages;
 pub mod palette;

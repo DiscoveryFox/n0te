@@ -18,6 +18,7 @@ use n0te_core::store::Library;
 
 use crate::pages::{self, Camera, Pages, SheetContent};
 use crate::pdf::{self, Pdf};
+use crate::live::{self, LiveEvent};
 use crate::palette::{self, Command};
 use crate::settings::Settings;
 use crate::{library, sidebar, theme};
@@ -80,6 +81,22 @@ pub enum Message {
     Blocks(crate::blocks::Msg),
     NewTextPage,
     ToggleNotes,
+    /// Sync service events; live session (M4); pairing; sharing with guests.
+    Live(LiveEvent),
+    StartLive,
+    StopLive,
+    FollowThem(bool),
+    TheyFollow(bool),
+    PairStart,
+    PairToTablet,
+    PairSent(Result<String, String>),
+    ShowShare(bool),
+    Invite(bool, u64),
+    Revoke(String),
+    CopyText(String),
+    StartJoin,
+    JoinLink(String),
+    Join,
     /// Command palette, help, settings.
     OpenPalette,
     PaletteQuery(String),
@@ -111,6 +128,17 @@ pub struct Editing {
     pub size: f32,
     pub dirty: bool,
     pub last_change: Instant,
+}
+
+/// A live session with another own device.
+#[derive(Debug, Clone)]
+pub struct LiveSession {
+    pub device: String,
+    pub name: String,
+    /// This view follows the other device's view.
+    pub follow_them: bool,
+    /// The other device follows this view.
+    pub they_follow: bool,
 }
 
 /// A text page being edited (full page, or docked next to the slide as notes).
@@ -172,6 +200,22 @@ pub struct App {
     pub palette: Option<(String, usize)>,
     pub show_help: bool,
     pub show_settings: bool,
+    /// The sync service connection (None: not running).
+    pub sync: Option<Arc<live::Session>>,
+    pub devices: Vec<live::Device>,
+    devices_at: Option<Instant>,
+    pub live_session: Option<LiveSession>,
+    presence_at: Option<Instant>,
+    pub pair_code: Option<String>,
+    /// Share panel open, with the invites of the open notebook.
+    pub share: Option<Vec<live::Invite>>,
+    /// The newest invite link as a QR code (the view borrows it).
+    pub share_qr: Option<iced::widget::qr_code::Data>,
+    pub joining: Option<String>,
+    /// Change stamp of the open notebook (saves by other processes on this machine).
+    stamp: u64,
+    /// Without a service connection (tests): don't try to connect.
+    pub offline: bool,
     pub entries: Vec<Entry>,
     pub bundles: Vec<Bundle>,
     pub screen: Screen,
@@ -243,6 +287,17 @@ impl App {
             palette: None,
             show_help: false,
             show_settings: false,
+            sync: None,
+            devices: Vec::new(),
+            devices_at: None,
+            live_session: None,
+            presence_at: None,
+            pair_code: None,
+            share: None,
+            share_qr: None,
+            joining: None,
+            stamp: 0,
+            offline: true,
             entries: Vec::new(),
             bundles: Vec::new(),
             screen: Screen::Library,
@@ -259,6 +314,8 @@ impl App {
     pub fn boot_with(root: PathBuf, import: Option<PathBuf>) -> (Self, Task<Message>) {
         let mut app = Self::with_settings(root, Settings::load());
         app.persist_settings = true;
+        app.offline = false;
+        app.connect_sync();
         let task = import.map(|p| Task::done(Message::Import(p))).unwrap_or_else(Task::none);
         (app, task)
     }
@@ -279,6 +336,7 @@ impl App {
             keyboard::listen().map(Message::Key),
             Pdf::subscription().map(|_| Message::TileReady),
             Subscription::run(ticks).map(|_| Message::Tick),
+            live::subscription().map(Message::Live),
             iced::event::listen_with(|e, _, _| match e {
                 iced::Event::Window(iced::window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
                 _ => None,
@@ -315,6 +373,7 @@ impl App {
         );
         self.finish_text();
         self.close_text_page();
+        self.stamp = self.lib.change_stamp(id);
         self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, pages, camera: Camera::default() }));
         Ok(())
     }
@@ -333,6 +392,8 @@ impl App {
             Message::Back => {
                 self.finish_text();
                 self.close_text_page();
+                self.live_session = None;
+                self.share = None;
                 self.screen = Screen::Library;
                 self.refresh();
             }
@@ -342,6 +403,7 @@ impl App {
                     o.camera = c;
                 }
                 self.follow_notes();
+                self.send_presence();
             }
             Message::Fold(node) => {
                 let lib = self.lib.clone();
@@ -516,6 +578,131 @@ impl App {
                 if self.text_page.as_ref().is_some_and(|t| t.dirty && t.last_change.elapsed().as_millis() > 800) {
                     self.save_text_page();
                 }
+                if !self.offline {
+                    if self.sync.is_none() {
+                        self.connect_sync();
+                    } else if self.devices_at.is_none_or(|t| t.elapsed().as_secs() >= 10) {
+                        self.devices = live::devices();
+                        self.devices_at = Some(Instant::now());
+                    }
+                }
+                // Saves by another process here (the sync service, a second window).
+                if let Screen::Notebook(o) = &self.screen {
+                    let now = self.lib.change_stamp(&o.id);
+                    if now != self.stamp {
+                        self.stamp = now;
+                        self.refresh_open(true, &[]);
+                    }
+                }
+            }
+            Message::Live(e) => return self.on_live(e),
+            Message::StartLive => {
+                let Some(d) = self.devices.iter().find(|d| d.online).cloned() else {
+                    self.say("Kein Gerät online: Tablet koppeln (Einstellungen) und n0te dort öffnen");
+                    return Task::none();
+                };
+                let Some(nb) = self.notebook_id() else { return Task::none() };
+                if let Some(s) = &self.sync {
+                    s.send(&["open".into(), d.id.clone(), nb]);
+                }
+                self.live_session = Some(LiveSession { device: d.id, name: d.name.clone(), follow_them: false, they_follow: false });
+                self.presence_at = None;
+                self.send_presence();
+                self.say(format!("Live mit {}: es öffnet das Notizbuch", d.name));
+            }
+            Message::StopLive => {
+                if let (Some(l), Some(s)) = (&self.live_session, &self.sync)
+                    && l.they_follow
+                {
+                    s.send(&["follow".into(), l.device.clone(), "0".into()]);
+                }
+                self.live_session = None;
+                if let Screen::Notebook(o) = &self.screen {
+                    o.pages.remote.borrow_mut().clear();
+                }
+            }
+            Message::FollowThem(on) => {
+                if let Some(l) = &mut self.live_session {
+                    l.follow_them = on;
+                }
+            }
+            Message::TheyFollow(on) => {
+                if let Some(l) = &mut self.live_session {
+                    l.they_follow = on;
+                    if let Some(s) = &self.sync {
+                        s.send(&["follow".into(), l.device.clone(), if on { "1".into() } else { "0".into() }]);
+                    }
+                }
+                self.presence_at = None;
+                self.send_presence();
+            }
+            Message::PairStart => match live::request(&["pair-code"]) {
+                Ok(code) => self.pair_code = Some(code),
+                Err(e) => self.say(format!("Koppeln: {e}")),
+            },
+            Message::PairToTablet => {
+                let Some(code) = self.pair_code.clone() else { return Task::none() };
+                return Task::perform(n0bridge(vec!["clipboard".into(), "set".into(), "--to".into(), "tablet".into(), code]), Message::PairSent);
+            }
+            Message::PairSent(r) => self.say(match r {
+                Ok(_) => "Code ist in der Tablet-Zwischenablage: dort n0te → Einstellungen → LAPTOP KOPPELN".to_string(),
+                Err(e) => format!("Senden fehlgeschlagen: {e}"),
+            }),
+            Message::ShowShare(on) => {
+                self.share = if on {
+                    let nb = self.notebook_id().unwrap_or_default();
+                    Some(live::invites().into_iter().filter(|i| i.notebook == nb).collect())
+                } else {
+                    None
+                };
+                self.share_qr = self.share.as_ref().and_then(|v| v.iter().rev().find(|i| !i.revoked)).and_then(|i| iced::widget::qr_code::Data::new(i.link.as_bytes()).ok());
+            }
+            Message::Invite(rw, days) => {
+                let Some(nb) = self.notebook_id() else { return Task::none() };
+                let days = days.to_string();
+                let mut args = vec!["invite", nb.as_str()];
+                if rw {
+                    args.push("--rw");
+                }
+                if days != "0" {
+                    args.push("--days");
+                    args.push(&days);
+                }
+                match live::request(&args) {
+                    Ok(link) => {
+                        self.say("Einladung erstellt und kopiert");
+                        let _ = self.update(Message::ShowShare(true));
+                        return iced::clipboard::write(link);
+                    }
+                    Err(e) => self.say(format!("Einladen: {e}")),
+                }
+            }
+            Message::Revoke(id) => {
+                match live::request(&["revoke", &id]) {
+                    Ok(_) => self.say("Widerrufen: der Gast ist getrennt"),
+                    Err(e) => self.say(format!("Widerrufen: {e}")),
+                }
+                return self.update(Message::ShowShare(true));
+            }
+            Message::CopyText(t) => {
+                self.say("Kopiert");
+                return iced::clipboard::write(t);
+            }
+            Message::StartJoin => self.joining = Some(String::new()),
+            Message::JoinLink(l) => self.joining = Some(l),
+            Message::Join => {
+                let link = self.joining.take().unwrap_or_default();
+                match live::request(&["join", link.trim()]) {
+                    Ok(out) => {
+                        self.refresh();
+                        let id = out.rsplit(' ').next().unwrap_or_default().to_string();
+                        if self.entries.iter().any(|e| e.id == id) {
+                            let _ = self.open(&id);
+                        }
+                        self.say("Beigetreten");
+                    }
+                    Err(e) => self.say(format!("Beitreten: {e}")),
+                }
             }
             Message::OpenPalette => {
                 self.palette = Some((String::new(), 0));
@@ -594,6 +781,136 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    fn connect_sync(&mut self) {
+        if let Some(s) = live::Session::connect() {
+            self.sync = Some(Arc::new(s));
+            self.devices = live::devices();
+            self.devices_at = Some(Instant::now());
+        }
+    }
+
+    /// What the sync service reports.
+    fn on_live(&mut self, e: LiveEvent) -> Task<Message> {
+        match e {
+            LiveEvent::Hello { .. } => {}
+            LiveEvent::Changed { notebook, index, sheets } => {
+                if self.notebook_id().as_deref() == Some(notebook.as_str()) {
+                    self.refresh_open(index, &sheets);
+                } else if matches!(self.screen, Screen::Library) {
+                    self.refresh();
+                }
+            }
+            LiveEvent::Online { .. } | LiveEvent::Offline { .. } | LiveEvent::Paired { .. } => {
+                if let LiveEvent::Paired { name, .. } = &e {
+                    self.pair_code = None;
+                    self.say(format!("Gekoppelt mit {name}"));
+                }
+                self.devices = live::devices();
+                self.devices_at = Some(Instant::now());
+            }
+            LiveEvent::Presence { device, notebook, sheet, viewport, laser, .. } => {
+                let Screen::Notebook(o) = &mut self.screen else { return Task::none() };
+                if o.id != notebook {
+                    return Task::none();
+                }
+                let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
+                let Some(sheet) = sheet else { return Task::none() };
+                let mark = crate::pages::RemoteMark { sheet_id: sheet.clone(), rect: n0te_core::ink::Rect::new(viewport[0], viewport[1], viewport[2], viewport[3]), laser: laser.map(|l| (l[0], l[1])), name };
+                {
+                    let mut marks = o.pages.remote.borrow_mut();
+                    marks.retain(|m| m.name != mark.name);
+                    marks.push(mark.clone());
+                }
+                // Following: show what the other device shows.
+                if self.live_session.as_ref().is_some_and(|l| l.follow_them && l.device == device)
+                    && let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).map(|p| p.placed.rect)
+                    && mark.rect.width() > 1.0
+                {
+                    let c = o.camera;
+                    let zoom = (c.viewport.width / mark.rect.width()).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
+                    let (cx, cy) = (page.x0 + (mark.rect.x0 + mark.rect.x1) / 2.0, page.y0 + (mark.rect.y0 + mark.rect.y1) / 2.0);
+                    o.camera = o.pages.clamp(Camera { x: cx - c.viewport.width / zoom / 2.0, y: cy - c.viewport.height / zoom / 2.0, zoom, ..c });
+                }
+            }
+            LiveEvent::Stroke { device, notebook, sheet, stroke, brush, samples, done } => {
+                if let Screen::Notebook(o) = &self.screen
+                    && o.id == notebook
+                {
+                    o.pages.live_samples(&device, stroke, &sheet, brush, &samples, done);
+                }
+            }
+            LiveEvent::Open { device, notebook } => {
+                let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
+                if self.entries.iter().any(|e| e.id == notebook) || self.lib.load_notebook(&notebook).is_ok() {
+                    let _ = self.open(&notebook);
+                    self.live_session = Some(LiveSession { device, name: name.clone(), follow_them: false, they_follow: false });
+                    self.say(format!("{name} hat dieses Notizbuch live geöffnet"));
+                }
+            }
+            LiveEvent::Follow { device, on } => {
+                if let Some(l) = self.live_session.as_mut().filter(|l| l.device == device) {
+                    l.follow_them = on;
+                } else if on {
+                    let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
+                    self.live_session = Some(LiveSession { device, name, follow_them: true, they_follow: false });
+                }
+            }
+            LiveEvent::Guest { name, on, .. } => self.say(if on { format!("Gast verbunden: {name}") } else { "Gast getrennt".to_string() }),
+            LiveEvent::Revoked { .. } => self.say("Die Einladung zu diesem Notizbuch wurde widerrufen"),
+            LiveEvent::Error { message } => self.say(format!("Sync: {message}")),
+            LiveEvent::Disconnected => self.sync = None,
+        }
+        Task::none()
+    }
+
+    /// Another device changed the open notebook: outline and/or sheets read again.
+    fn refresh_open(&mut self, index: bool, sheets: &[String]) {
+        let lib = self.lib.clone();
+        let Screen::Notebook(o) = &mut self.screen else { return };
+        if index || sheets.is_empty() {
+            let _ = lib.refresh_notebook(&o.nb);
+            o.rows = o.nb.outline(false);
+            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
+            o.camera = o.pages.clamp(o.camera);
+        }
+        let all: Vec<String> = if sheets.is_empty() { o.pages.pages.iter().map(|p| p.placed.sheet_id.clone()).collect() } else { sheets.to_vec() };
+        for s in &all {
+            o.pages.reload_sheet(s);
+        }
+        // An open text page that hasn't been typed in since: show the new text.
+        let id = o.id.clone();
+        if let Some(t) = &mut self.text_page
+            && !t.dirty
+            && all.contains(&t.sheet_id)
+            && lib.refresh_sheet(&id, &t.sheet_id, &t.sheet).unwrap_or(false)
+        {
+            t.saved = t.sheet.page_text();
+            t.doc = crate::blocks::Doc::from_markdown(&t.saved);
+        }
+        if let Some(e) = &self.editing
+            && all.contains(&e.sheet_id)
+        {
+            let _ = lib.refresh_sheet(&id, &e.sheet_id, &e.sheet);
+        }
+    }
+
+    /// Live: where this view is (sheet points of the page in the middle), at most 10× a second.
+    fn send_presence(&mut self) {
+        let (Some(_), Some(sync)) = (&self.live_session, &self.sync) else { return };
+        if self.presence_at.is_some_and(|t| t.elapsed().as_millis() < 100) {
+            return;
+        }
+        let Screen::Notebook(o) = &self.screen else { return };
+        let c = o.camera;
+        let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
+        let Some(p) = o.pages.sheet_at(cx, cy).or_else(|| o.pages.pages.iter().map(|p| &p.placed).min_by(|a, b| (a.rect.y0 - cy).abs().total_cmp(&(b.rect.y0 - cy).abs()))) else { return };
+        let v = c.view_rect();
+        let r = [v.x0 - p.rect.x0, v.y0 - p.rect.y0, v.x1 - p.rect.x0, v.y1 - p.rect.y0];
+        let args: Vec<String> = ["presence".to_string(), o.id.clone(), p.sheet_id.clone()].into_iter().chain(r.iter().map(|x| format!("{x:.1}"))).chain([format!("{:.3}", c.zoom)]).collect();
+        sync.send(&args);
+        self.presence_at = Some(Instant::now());
     }
 
     fn palette_items(&self) -> Vec<palette::Item> {
@@ -1122,6 +1439,50 @@ impl App {
         }
     }
 
+    /// Share with guests: invite links (read / read-write), active invites with revoke.
+    fn share_panel<'a>(&'a self, invites: &'a [live::Invite]) -> Element<'a, Message> {
+        let mut col = column![
+            text("TEILEN — GÄSTE OHNE SERVER (DIREKT VERBUNDEN)").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+            row![
+                button(text("NUR LESEN · 7 TAGE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Invite(false, 7)).style(theme::tab(false)),
+                Space::new().width(8),
+                button(text("LESEN & SCHREIBEN · 7 TAGE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Invite(true, 7)).style(theme::tab(false)),
+                Space::new().width(8),
+                button(text("OHNE ABLAUF").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Invite(false, 0)).style(theme::ghost),
+                Space::new().width(Length::Fill),
+                button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowShare(false)).style(theme::ghost),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .spacing(10);
+        if self.sync.is_none() {
+            col = col.push(text("Der Sync-Dienst läuft nicht (systemctl --user enable --now n0te-sync).").size(13).color(theme::p().accent));
+        }
+        if invites.is_empty() {
+            col = col.push(text("Noch keine Einladungen. Der Link wird beim Erstellen kopiert; Gäste öffnen ihn in n0te (EINLADUNG).").size(13).color(theme::p().muted));
+        }
+        for i in invites.iter().rev() {
+            let state = if i.revoked { "widerrufen".to_string() } else if i.online > 0 { format!("{} verbunden", i.online) } else { "nicht verbunden".to_string() };
+            let mut r = row![
+                text(if i.rw { "LESEN & SCHREIBEN" } else { "NUR LESEN" }).font(theme::MONO_BOLD).size(11).width(Length::Fixed(150.0)),
+                text(state).size(12).color(theme::p().muted).width(Length::Fixed(130.0)),
+                Space::new().width(Length::Fill),
+            ]
+            .align_y(Alignment::Center)
+            .spacing(6);
+            if !i.revoked {
+                r = r.push(button(text("LINK KOPIEREN").font(theme::MONO_BOLD).size(10)).padding([3, 8]).on_press(Message::CopyText(i.link.clone())).style(theme::ghost));
+                r = r.push(button(text("WIDERRUFEN").font(theme::MONO_BOLD).size(10)).padding([3, 8]).on_press(Message::Revoke(i.id.clone())).style(theme::ghost));
+            }
+            col = col.push(r);
+        }
+        // The newest invite as a QR code (scan with the tablet/phone).
+        if let Some(data) = &self.share_qr {
+            col = col.push(row![iced::widget::qr_code(data).cell_size(3), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
+        }
+        container(col).padding(14).width(Length::Fill).max_width(760).style(theme::panel).into()
+    }
+
     fn help_view(&self) -> Element<'_, Message> {
         let keys = [
             ("Strg K", "Befehle, Seiten, Notizbücher suchen"),
@@ -1146,6 +1507,37 @@ impl App {
         }
         col = col.push(button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowHelp(false)).style(theme::ghost));
         container(container(col).padding(20).width(Length::Fixed(640.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
+    }
+
+    fn devices_view(&self) -> Element<'_, Message> {
+        let mut col = column![].spacing(6);
+        if self.sync.is_none() {
+            col = col.push(text("Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync").size(13).color(theme::p().accent));
+            return col.into();
+        }
+        if self.devices.is_empty() {
+            col = col.push(text("Noch kein Gerät gekoppelt.").size(13).color(theme::p().muted));
+        }
+        for d in &self.devices {
+            col = col.push(row![text(if d.online { "●" } else { "○" }).color(if d.online { theme::p().accent } else { theme::p().muted }).width(Length::Fixed(18.0)), text(d.name.clone()).size(14)]);
+        }
+        match &self.pair_code {
+            None => col = col.push(button(text("TABLET KOPPELN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairStart).style(theme::tab(false))),
+            Some(code) => {
+                col = col.push(text("Koppel-Code (15 Minuten gültig, einmal):").size(12).color(theme::p().muted));
+                col = col.push(text_input("", code).size(12).font(theme::MONO).padding(8));
+                col = col.push(
+                    row![
+                        button(text("AN TABLET SCHICKEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairToTablet).style(theme::accent_button),
+                        Space::new().width(8),
+                        button(text("KOPIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::CopyText(code.clone())).style(theme::ghost),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+                col = col.push(text("Auf dem Tablet: n0te → Einstellungen → LAPTOP KOPPELN (fügt den Code aus der Zwischenablage ein).").size(12).color(theme::p().muted));
+            }
+        }
+        col.into()
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
@@ -1175,6 +1567,8 @@ impl App {
             text("Abstände").size(14),
             slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap),
             slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap),
+            text("Geräte (Sync)").size(14),
+            self.devices_view(),
             text("Exportierte PDFs bleiben weiß. Gespeichert in ~/.config/n0te/laptop.conf").size(12).color(theme::p().muted),
             button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowSettings(false)).style(theme::ghost),
         ]
@@ -1193,7 +1587,9 @@ impl App {
             body = body.push(sidebar::view(&o.rows, &o.pages, current));
             body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
         }
-        let panel: Option<Element<'a, Message>> = if self.show_pdf_import {
+        let panel: Option<Element<'a, Message>> = if let Some(invites) = &self.share {
+            Some(self.share_panel(invites))
+        } else if self.show_pdf_import {
             Some(library::pdf_panel(&self.pdfs, "PDF EINFÜGEN — NACH DER AKTUELLEN SEITE"))
         } else {
             self.export.as_ref().map(|picked| crate::library::export_panel(o, picked))
@@ -1211,9 +1607,29 @@ impl App {
             }
             None => body = body.push(canvas),
         }
+        let live_bar: Element<'a, Message> = match &self.live_session {
+            Some(l) => container(
+                row![
+                    text(format!("LIVE MIT {}", l.name.to_uppercase())).font(theme::MONO_BOLD).size(theme::LABEL).color(theme::p().accent),
+                    Space::new().width(18),
+                    iced::widget::checkbox(l.follow_them).label("Ansicht folgt dem Tablet").on_toggle(Message::FollowThem).size(14).text_size(12),
+                    Space::new().width(18),
+                    iced::widget::checkbox(l.they_follow).label("Tablet folgt mir").on_toggle(Message::TheyFollow).size(14).text_size(12),
+                    Space::new().width(Length::Fill),
+                    button(text("BEENDEN").font(theme::MONO_BOLD).size(10)).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
+                ]
+                .align_y(Alignment::Center),
+            )
+            .padding([4, 14])
+            .width(Length::Fill)
+            .style(theme::chrome)
+            .into(),
+            None => Space::new().height(0).into(),
+        };
         column![
             self.top_bar(o, current),
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
+            live_bar,
             body.height(Length::Fill),
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
             self.status_bar(),
@@ -1241,7 +1657,12 @@ impl App {
                 Space::new().width(6),
                 button(text("EXPORT").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
                 Space::new().width(6),
-                button(text("AN TABLET").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::SendToTablet).style(theme::tab(false)),
+                button(text("TEILEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
+                Space::new().width(6),
+                match &self.live_session {
+                    Some(l) => button(text(format!("● LIVE · {}", l.name.to_uppercase())).font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::StopLive).style(theme::accent_button),
+                    None => button(text("LIVE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::StartLive).style(theme::tab(false)),
+                },
             ]
             .align_y(Alignment::Center),
         )
@@ -1322,6 +1743,13 @@ fn ticks() -> iced::futures::stream::BoxStream<'static, ()> {
         }
     });
     rx.boxed()
+}
+
+/// Runs the n0bridge CLI.
+async fn n0bridge(args: Vec<String>) -> Result<String, String> {
+    let out = std::process::Command::new("n0bridge").args(&args).output().map_err(|e| format!("n0bridge nicht gefunden ({e})"))?;
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
 }
 
 /// Sends a file to the tablet with the n0bridge CLI.

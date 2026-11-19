@@ -12,7 +12,8 @@ path = "src/main.rs"
 [dependencies]
 n0te-core.workspace = true
 n0te-pdf.workspace = true
-iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "wayland", "x11", "crisp", "thread-pool", "canvas", "advanced", "highlighter", "image"] }
+serde_json = "1"
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "wayland", "x11", "crisp", "thread-pool", "canvas", "advanced", "highlighter", "image", "qr_code"] }
 
 [dev-dependencies]
 iced_test = "0.14"
