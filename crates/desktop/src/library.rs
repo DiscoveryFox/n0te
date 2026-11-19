@@ -62,6 +62,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     ]
                     .align_y(Alignment::Center),
                     text("Das Notizbuch wird direkt vom Gerät geladen, das es geteilt hat, ohne Server.").size(12).color(theme::p().muted),
+                    // The invite asks for a PIN (whoever invited you tells it).
+                    match app.join_pin.as_ref() {
+                        Some(pin) => Element::from(
+                            row![
+                                text("PIN").size(13).color(theme::p().text),
+                                iced::widget::text_input("z. B. 4821", pin).on_input(Message::JoinPin).on_submit(Message::Join).padding(10).size(14).width(Length::Fixed(160.0)).style(theme::field),
+                                text("Wer dich eingeladen hat, sagt sie dir.").size(12).color(theme::p().muted),
+                            ]
+                            .spacing(10)
+                            .align_y(Alignment::Center),
+                        ),
+                        None => Space::new().into(),
+                    },
                 ]
                 .spacing(10),
             )

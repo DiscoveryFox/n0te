@@ -4,9 +4,14 @@
 //!   n0te-sync pair-code               code for pairing a device (tablet: paste it in n0te)
 //!   n0te-sync accept <code>           pair with the device that made <code>
 //!   n0te-sync devices | status
-//!   n0te-sync invite <notebook> [--rw] [--days N]    guest link (read-only unless --rw)
+//!   n0te-sync invite <notebook> [--rw] [--days N] [--approve] [--single] [--pin P]
+//!                                     guest link (read-only unless --rw)
 //!   n0te-sync invites | revoke <invite-id>
-//!   n0te-sync join <link> | leave <invite-id>
+//!   n0te-sync set-role <invite> read|write | set-expiry <invite> <days|0>
+//!   n0te-sync set-options <invite> [--approve] [--single] | set-pin <invite> <pin|off>
+//!   n0te-sync admit <device> | deny <device>         let a waiting guest in / turn it away
+//!   n0te-sync remove-guest <device> | allow-again <invite> <device>
+//!   n0te-sync join <link> [--pin P] | leave <invite-id>
 //!   n0te-sync remove-device <id>
 //!   n0te-sync history <notebook> | restore <notebook> <unix-seconds> | checkpoint
 //!
@@ -64,6 +69,8 @@ fn event_json(e: &Event) -> Option<String> {
         Event::GuestLeft { invite, notebook, device } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "device": device, "on": false }),
         Event::RoleChanged { notebook, write } => json!({ "t": "role", "notebook": notebook, "write": write }),
         Event::AccessRevoked { notebook } => json!({ "t": "revoked", "notebook": notebook }),
+        Event::GuestWaiting { invite, notebook, name, device, on } => json!({ "t": "waiting", "invite": invite, "notebook": notebook, "name": name, "device": device, "on": on }),
+        Event::JoinWaiting { owner } => json!({ "t": "join_waiting", "owner": owner }),
         Event::SyncError { message } => json!({ "t": "error", "message": message }),
         Event::BlobArrived { .. } => return None,
     };
@@ -147,6 +154,9 @@ fn describe(e: &Event) -> Option<String> {
         Event::GuestJoined { notebook, name, .. } => format!("Gast verbunden: {name} → {notebook}"),
         Event::GuestLeft { notebook, .. } => format!("Gast getrennt: {notebook}"),
         Event::RoleChanged { notebook, write } => format!("Rechte geändert: {notebook} → {}", if *write { "lesen & schreiben" } else { "nur lesen" }),
+        Event::GuestWaiting { name, notebook, device, on: true, .. } => format!("{name} wartet auf Einlass in {notebook} (n0te-sync admit {device})"),
+        Event::GuestWaiting { name, on: false, .. } => format!("{name} wartet nicht mehr"),
+        Event::JoinWaiting { owner } => format!("Warte, bis {owner} dich hereinlässt …"),
         Event::AccessRevoked { notebook } => format!("Zugriff widerrufen: {notebook}"),
         Event::SyncError { message } => format!("Fehler: {message}"),
         Event::OpenRequest { notebook, .. } => format!("Öffnen angefragt: {notebook}"),
@@ -376,12 +386,17 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             let rw = args.iter().any(|a| a == "--rw");
             let days = args.iter().position(|a| a == "--days").and_then(|i| args.get(i + 1)).and_then(|d| d.parse::<u64>().ok());
             let expires = days.map(|d| n0te_sync::proto::now_secs() + d * 86_400).unwrap_or(0);
-            engine.create_invite(&nb, if rw { Role::ReadWrite } else { Role::Read }, expires).map_err(e)?
+            let opts = n0te_sync::InviteOptions {
+                approve: args.iter().any(|a| a == "--approve"),
+                single: args.iter().any(|a| a == "--single"),
+                pin: args.iter().position(|a| a == "--pin").and_then(|i| args.get(i + 1)).cloned(),
+            };
+            engine.create_invite_with(&nb, if rw { Role::ReadWrite } else { Role::Read }, expires, opts).map_err(e)?
         }
         "invites" => engine
             .list_invites()
             .iter()
-            .map(|i| format!("{}  {:<20} {:?}{}{}  {} verbunden", i.id, i.title, i.role, if i.revoked { " widerrufen" } else { "" }, if i.expires > 0 { format!(" bis {}", local_time(i.expires)) } else { String::new() }, i.online))
+            .map(|i| format!("{}  {:<20} {:?}{}{}{}{}{}  {} verbunden", i.id, i.title, i.role, if i.revoked { " widerrufen" } else { "" }, if i.expires > 0 { format!(" bis {}", local_time(i.expires)) } else { String::new() }, if i.approve { " · bestätigen" } else { "" }, if i.single { " · ein Gerät" } else { "" }, if i.pin.is_some() { " · PIN" } else { "" }, i.online))
             .collect::<Vec<_>>()
             .join("\n"),
         "revoke" => {
@@ -401,8 +416,40 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             "OK".into()
         }
         "guests-json" => serde_json::to_string(&engine.status().guests.iter().map(|g| serde_json::json!({ "invite": g.invite, "notebook": g.notebook, "name": g.name, "device": g.device, "write": g.role == Role::ReadWrite })).collect::<Vec<_>>()).unwrap_or_default(),
+        "set-expiry" => {
+            let id = arg(1, "Einladungs-ID")?;
+            let days: u64 = arg(2, "Tage (0 = ohne Ablauf)")?.parse().map_err(|_| "Tage als Zahl".to_string())?;
+            engine.set_expiry(&id, if days == 0 { 0 } else { n0te_sync::proto::now_secs() + days * 86_400 }).map_err(e)?;
+            if days == 0 { "Ohne Ablauf.".into() } else { format!("Gilt noch {days} Tag(e).") }
+        }
+        "set-options" => {
+            let id = arg(1, "Einladungs-ID")?;
+            let (approve, single) = (args.iter().any(|a| a == "--approve"), args.iter().any(|a| a == "--single"));
+            engine.set_invite_options(&id, approve, single).map_err(e)?;
+            format!("Bestätigen: {} · nur ein Gerät: {}", if approve { "an" } else { "aus" }, if single { "an" } else { "aus" })
+        }
+        "set-pin" => {
+            let id = arg(1, "Einladungs-ID")?;
+            let pin = arg(2, "PIN oder off")?;
+            engine.set_pin(&id, if pin == "off" { None } else { Some(pin.as_str()) }).map_err(e)?;
+            if pin == "off" { "Ohne PIN.".into() } else { format!("PIN: {pin}") }
+        }
+        "admit" | "deny" => {
+            engine.admit(&arg(1, "Geräte-ID")?, args[0] == "admit").map_err(e)?;
+            if args[0] == "admit" { "Hereingelassen.".into() } else { "Abgewiesen.".into() }
+        }
+        "remove-guest" => {
+            engine.remove_guest(&arg(1, "Geräte-ID")?).map_err(e)?;
+            "Entfernt: das Gerät kommt mit dieser Einladung nicht mehr herein.".into()
+        }
+        "allow-again" => {
+            engine.allow_again(&arg(1, "Einladungs-ID")?, &arg(2, "Geräte-ID")?).map_err(e)?;
+            "Darf wieder herein.".into()
+        }
+        "waiting-json" => serde_json::to_string(&engine.status().waiting.iter().map(|g| serde_json::json!({ "invite": g.invite, "notebook": g.notebook, "name": g.name, "device": g.device, "write": g.role == Role::ReadWrite })).collect::<Vec<_>>()).unwrap_or_default(),
         "join" => {
-            let nb = engine.join(&arg(1, "Link")?).map_err(e)?;
+            let pin = args.iter().position(|a| a == "--pin").and_then(|i| args.get(i + 1)).cloned();
+            let nb = engine.join_with(&arg(1, "Link")?, pin.as_deref()).map_err(e)?;
             format!("Beigetreten: {nb}")
         }
         "leave" => {
@@ -436,7 +483,13 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             &engine
                 .list_invites()
                 .iter()
-                .map(|i| serde_json::json!({ "id": i.id, "notebook": i.notebook, "title": i.title, "rw": i.role == Role::ReadWrite, "revoked": i.revoked, "expires": i.expires, "online": i.online, "link": i.link }))
+                .map(|i| {
+                    serde_json::json!({
+                        "id": i.id, "notebook": i.notebook, "title": i.title, "rw": i.role == Role::ReadWrite, "revoked": i.revoked,
+                        "expires": i.expires, "online": i.online, "link": i.link, "approve": i.approve, "single": i.single, "pin": i.pin,
+                        "members": i.members, "banned": i.banned.iter().map(|b| serde_json::json!({ "device": b.device, "name": b.name })).collect::<Vec<_>>()
+                    })
+                })
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_default(),

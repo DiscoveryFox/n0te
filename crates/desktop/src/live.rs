@@ -35,6 +35,10 @@ pub enum LiveEvent {
     Guest { name: String, notebook: String, device: String, on: bool },
     /// As a guest: the owner changed our rights.
     Role { notebook: String, write: bool },
+    /// Owner: a new guest waits to be let in (`on`), or no longer.
+    Waiting { name: String, notebook: String, device: String, on: bool },
+    /// Joining: the owner lets us in by hand.
+    JoinWaiting { owner: String },
     Revoked { notebook: String },
     Error { message: String },
     Disconnected,
@@ -92,6 +96,8 @@ fn parse(line: &str) -> Option<LiveEvent> {
         "follow" => LiveEvent::Follow { device: s("device"), on: v["on"].as_bool().unwrap_or(false) },
         "guest" => LiveEvent::Guest { name: s("name"), notebook: s("notebook"), device: s("device"), on: v["on"].as_bool().unwrap_or(false) },
         "role" => LiveEvent::Role { notebook: s("notebook"), write: v["write"].as_bool().unwrap_or(false) },
+        "waiting" => LiveEvent::Waiting { name: s("name"), notebook: s("notebook"), device: s("device"), on: v["on"].as_bool().unwrap_or(false) },
+        "join_waiting" => LiveEvent::JoinWaiting { owner: s("owner") },
         "revoked" => LiveEvent::Revoked { notebook: s("notebook") },
         "error" => LiveEvent::Error { message: s("message") },
         _ => return None,
@@ -186,6 +192,15 @@ pub struct Invite {
     pub online: u64,
     pub link: String,
     pub expires: u64,
+    /// New guests wait until the owner lets them in.
+    pub approve: bool,
+    /// Only one device may come in.
+    pub single: bool,
+    pub pin: Option<String>,
+    /// Devices that came in so far.
+    pub members: u64,
+    /// Removed devices: (device, name).
+    pub banned: Vec<(String, String)>,
 }
 
 pub fn invites() -> Vec<Invite> {
@@ -202,6 +217,14 @@ pub fn invites() -> Vec<Invite> {
                     online: i["online"].as_u64().unwrap_or(0),
                     link: i["link"].as_str().unwrap_or_default().into(),
                     expires: i["expires"].as_u64().unwrap_or(0),
+                    approve: i["approve"].as_bool().unwrap_or(false),
+                    single: i["single"].as_bool().unwrap_or(false),
+                    pin: i["pin"].as_str().map(Into::into),
+                    members: i["members"].as_u64().unwrap_or(0),
+                    banned: i["banned"]
+                        .as_array()
+                        .map(|b| b.iter().map(|x| (x["device"].as_str().unwrap_or_default().to_string(), x["name"].as_str().unwrap_or_default().to_string())).collect())
+                        .unwrap_or_default(),
                 })
                 .collect()
         })
@@ -219,7 +242,16 @@ pub struct Guest {
 }
 
 pub fn guests() -> Vec<Guest> {
-    let Ok(out) = request(&["guests-json"]) else { return Vec::new() };
+    guest_list("guests-json")
+}
+
+/// New guests waiting to be let in (invites with approval).
+pub fn waiting() -> Vec<Guest> {
+    guest_list("waiting-json")
+}
+
+fn guest_list(cmd: &str) -> Vec<Guest> {
+    let Ok(out) = request(&[cmd]) else { return Vec::new() };
     let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
     v.as_array()
         .map(|a| {

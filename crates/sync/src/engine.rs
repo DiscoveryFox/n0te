@@ -16,7 +16,7 @@ use n0te_core::store::Library;
 use tokio::sync::{Notify, mpsc};
 
 use crate::proto::{self, ALPN, Auth, CHUNK, DocKey, Invite, Live, LiveBrush, Msg, NbState, PROTO, PairCode, Role, SignedInvite, now_secs};
-use crate::state::{self, DeviceRecord, InviteRecord, JoinedRecord, PendingPair, State};
+use crate::state::{self, Banned, DeviceRecord, InviteRecord, JoinedRecord, PendingPair, State};
 use crate::{Error, Event, Result};
 
 pub struct EngineOptions {
@@ -68,7 +68,31 @@ pub struct InviteInfo {
     pub link: String,
     /// Guests connected with it right now.
     pub online: usize,
+    /// New guests wait until the owner lets them in.
+    pub approve: bool,
+    /// Only one device may come in with it.
+    pub single: bool,
+    pub pin: Option<String>,
+    /// Devices that came in so far.
+    pub members: usize,
+    /// Devices the owner removed.
+    pub banned: Vec<Banned>,
 }
+
+/// How a new invite lets guests in.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct InviteOptions {
+    /// New guests wait until the owner lets them in ([`Engine::admit`]).
+    pub approve: bool,
+    /// Only the first device may come in.
+    pub single: bool,
+    /// New guests have to give it (devices already in don't).
+    pub pin: Option<String>,
+}
+
+/// Why a guest was turned away (the app asks for the PIN on these).
+pub const PIN_NEEDED: &str = "PIN nötig";
+pub const PIN_WRONG: &str = "PIN falsch";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct JoinedInfo {
@@ -87,6 +111,8 @@ pub struct Status {
     pub node_id: String,
     pub devices: Vec<DeviceInfo>,
     pub guests: Vec<GuestInfo>,
+    /// New guests waiting to be let in.
+    pub waiting: Vec<GuestInfo>,
     pub joined: Vec<JoinedInfo>,
     /// (notebook, unix seconds of the last change received or sent).
     pub last_sync: Vec<(String, u64)>,
@@ -164,6 +190,18 @@ struct Inner {
     stamps: Mutex<HashMap<String, u64>>,
     closed: AtomicBool,
     shutdown: Notify,
+    /// New guests waiting for the owner (invites with approval).
+    lobby: Mutex<Vec<Knock>>,
+}
+
+/// A guest at the door: let in (true) or turned away (false) through `tx`.
+struct Knock {
+    invite: String,
+    notebook: String,
+    name: String,
+    device: EndpointId,
+    role: Role,
+    tx: tokio::sync::oneshot::Sender<bool>,
 }
 
 /// The running sync engine. Methods block briefly (they hand work to the engine's runtime).
@@ -244,6 +282,7 @@ impl Engine {
             stamps: Mutex::new(HashMap::new()),
             closed: AtomicBool::new(false),
             shutdown: Notify::new(),
+            lobby: Mutex::new(Vec::new()),
         });
         // Changes made before we started count as seen; the first announce covers them.
         for id in inner.lib.notebook_ids().unwrap_or_default() {
@@ -353,6 +392,13 @@ impl Engine {
             })
             .collect();
         drop(sessions);
+        let waiting = inner
+            .lobby
+            .lock()
+            .expect("lobby")
+            .iter()
+            .map(|k| GuestInfo { invite: k.invite.clone(), notebook: k.notebook.clone(), name: k.name.clone(), device: k.device.to_string(), role: k.role })
+            .collect();
         let st = inner.state.lock().expect("state");
         let joined = st
             .joined
@@ -365,7 +411,7 @@ impl Engine {
         let addr = inner.ep.addr();
         let relay = addr.relay_urls().next().map(|u| u.to_string());
         let direct_addrs = addr.ip_addrs().count();
-        Status { node_id: inner.ep.id().to_string(), devices: inner.device_infos(), guests, joined, last_sync, relay, direct_addrs }
+        Status { node_id: inner.ep.id().to_string(), devices: inner.device_infos(), guests, waiting, joined, last_sync, relay, direct_addrs }
     }
 
     /// Tell the engine a notebook was saved here (it also notices by itself within a second).
@@ -496,6 +542,11 @@ impl Engine {
 
     /// An invite link for one notebook. `expires`: unix seconds, 0 = never.
     pub fn create_invite(&self, notebook: &str, role: Role, expires: u64) -> Result<String> {
+        self.create_invite_with(notebook, role, expires, InviteOptions::default())
+    }
+
+    /// The same with approval, single use and / or a PIN.
+    pub fn create_invite_with(&self, notebook: &str, role: Role, expires: u64, opts: InviteOptions) -> Result<String> {
         let inner = &self.inner;
         if inner.lib.is_trashed(notebook) {
             return Err(Error::Invalid("Notizbuch ist im Papierkorb".into()));
@@ -509,7 +560,21 @@ impl Engine {
         let invite = Invite { v: 1, id: id.clone(), notebook: notebook.into(), title: title.clone(), role, expires, owner: inner.ep.addr(), owner_name: inner.name.clone() };
         let link = SignedInvite::sign(&invite, &inner.key).to_link();
         let mut st = inner.state.lock().expect("state");
-        st.invites.push(InviteRecord { id, notebook: notebook.into(), title, role, expires, created: now_secs(), revoked: false, link: link.clone() });
+        st.invites.push(InviteRecord {
+            id,
+            notebook: notebook.into(),
+            title,
+            role,
+            expires,
+            created: now_secs(),
+            revoked: false,
+            link: link.clone(),
+            approve: opts.approve,
+            single: opts.single,
+            pin: opts.pin.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()),
+            members: Vec::new(),
+            banned: Vec::new(),
+        });
         st.save_invites()?;
         Ok(link)
     }
@@ -523,8 +588,127 @@ impl Engine {
             .expect("state")
             .invites
             .iter()
-            .map(|r| InviteInfo { id: r.id.clone(), notebook: r.notebook.clone(), title: r.title.clone(), role: r.role, expires: r.expires, created: r.created, revoked: r.revoked, link: r.link.clone(), online: online(&r.id) })
+            .map(|r| InviteInfo {
+                id: r.id.clone(),
+                notebook: r.notebook.clone(),
+                title: r.title.clone(),
+                role: r.role,
+                expires: r.expires,
+                created: r.created,
+                revoked: r.revoked,
+                link: r.link.clone(),
+                online: online(&r.id),
+                approve: r.approve,
+                single: r.single,
+                pin: r.pin.clone(),
+                members: r.members.len(),
+                banned: r.banned.clone(),
+            })
             .collect()
+    }
+
+    /// Lets a waiting guest in (`yes`) or turns it away.
+    pub fn admit(&self, device: &str, yes: bool) -> Result<()> {
+        let id = parse_id(device)?;
+        let knock = {
+            let mut lobby = self.inner.lobby.lock().expect("lobby");
+            let i = lobby.iter().position(|k| k.device == id).ok_or_else(|| Error::Invalid("niemand wartet mit dieser Id".into()))?;
+            lobby.remove(i)
+        };
+        let _ = knock.tx.send(yes);
+        Ok(())
+    }
+
+    /// Removes one guest device: disconnected, and its invite won't let it back in
+    /// ([`Engine::allow_again`] undoes it). The invite stays for everyone else.
+    pub fn remove_guest(&self, device: &str) -> Result<()> {
+        let id = parse_id(device)?;
+        let dev = id.to_string();
+        let sessions: Vec<Arc<Session>> = {
+            let mut map = self.inner.sessions.lock().expect("sessions");
+            match map.get(&id) {
+                Some(s) if matches!(s.kind, Kind::Guest { .. }) => map.remove(&id).into_iter().collect(),
+                _ => Vec::new(),
+            }
+        };
+        let waiting = self.inner.lobby.lock().expect("lobby").iter().find(|k| k.device == id).map(|k| (k.invite.clone(), k.name.clone()));
+        {
+            let mut st = self.inner.state.lock().expect("state");
+            let name_of = |inv: &str| sessions.iter().find(|s| matches!(&s.kind, Kind::Guest { invite, .. } if invite == inv)).map(|s| s.name.clone());
+            let mut hit = false;
+            for r in st.invites.iter_mut() {
+                let here = name_of(&r.id).or_else(|| waiting.as_ref().filter(|(i, _)| *i == r.id).map(|(_, n)| n.clone()));
+                if here.is_some() || r.members.contains(&dev) {
+                    hit = true;
+                    r.members.retain(|m| *m != dev);
+                    if !r.banned.iter().any(|b| b.device == dev) {
+                        r.banned.push(Banned { device: dev.clone(), name: here.unwrap_or_else(|| "Gast".into()) });
+                    }
+                }
+            }
+            if !hit {
+                return Err(Error::Invalid("kein Gast mit dieser Id".into()));
+            }
+            st.save_invites()?;
+        }
+        if waiting.is_some() {
+            let _ = self.admit(&dev, false);
+        }
+        for s in sessions {
+            s.conn.close(5u32.into(), b"removed");
+            if let Kind::Guest { invite, notebook, .. } = &s.kind {
+                (self.inner.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone(), device: s.id() });
+            }
+        }
+        Ok(())
+    }
+
+    /// A removed device may come in with `invite` again.
+    pub fn allow_again(&self, invite: &str, device: &str) -> Result<()> {
+        self.edit_invite(invite, |r| r.banned.retain(|b| b.device != device))
+    }
+
+    /// Changes until when an invite works (unix seconds, 0 = never) — also for links already
+    /// sent: the owner checks, not the date in the link.
+    pub fn set_expiry(&self, invite: &str, expires: u64) -> Result<()> {
+        self.edit_invite(invite, |r| r.expires = expires)
+    }
+
+    /// Approval and single use of an invite (for devices that aren't in yet).
+    pub fn set_invite_options(&self, invite: &str, approve: bool, single: bool) -> Result<()> {
+        self.edit_invite(invite, |r| {
+            r.approve = approve;
+            r.single = single;
+        })
+    }
+
+    /// The PIN new guests have to give (None: no PIN).
+    pub fn set_pin(&self, invite: &str, pin: Option<&str>) -> Result<()> {
+        let pin = pin.map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+        self.edit_invite(invite, |r| r.pin = pin.clone())
+    }
+
+    /// Changes an invite record; guests connected with it count as in from now on (so new
+    /// conditions only ever apply to new devices).
+    fn edit_invite(&self, invite: &str, f: impl FnOnce(&mut InviteRecord)) -> Result<()> {
+        let here: Vec<String> = self
+            .inner
+            .sessions
+            .lock()
+            .expect("sessions")
+            .values()
+            .filter(|s| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite))
+            .map(|s| s.id())
+            .collect();
+        let mut st = self.inner.state.lock().expect("state");
+        let r = st.invites.iter_mut().find(|r| r.id == invite).ok_or_else(|| Error::Invalid(format!("keine Einladung {invite}")))?;
+        for d in here {
+            if !r.members.contains(&d) {
+                r.members.push(d);
+            }
+        }
+        f(r);
+        st.save_invites()
     }
 
     /// Revokes an invite: its guests are disconnected and can't come back.
@@ -553,16 +737,61 @@ impl Engine {
 
     /// Joins a notebook as a guest; it syncs into this library from now on. Returns its id.
     pub fn join(&self, link: &str) -> Result<String> {
+        self.join_with(link, None)
+    }
+
+    /// Joins with the invite's PIN. With approval this waits (up to 3 minutes) until the
+    /// owner lets us in ([`Event::JoinWaiting`] meanwhile). Turned away: `Rejected` with the
+    /// reason ([`PIN_NEEDED`], [`PIN_WRONG`], …).
+    pub fn join_with(&self, link: &str, pin: Option<&str>) -> Result<String> {
         let signed = SignedInvite::parse_link(link)?;
         let invite = signed.verify()?;
         let inner = self.inner.clone();
         if invite.owner.id == inner.ep.id() {
             return Err(Error::Invalid("Das ist eine eigene Einladung".into()));
         }
-        if invite.expires != 0 && invite.expires < now_secs() {
-            return Err(Error::Rejected("Einladung abgelaufen".into()));
+        // Expiry is the owner's to decide (it can be changed after the link went out).
+        let bytes = proto::encode(&signed);
+        let auth = match pin.map(str::trim).filter(|p| !p.is_empty()) {
+            Some(p) => Auth::GuestPin { invite: bytes, pin: p.to_string() },
+            None => Auth::Guest { invite: bytes },
+        };
+        // One membership per notebook: an older invite to the same notebook (from the same
+        // owner) gives way — its connection would block the new one. Back if this join fails.
+        let owner_id = invite.owner.id.to_string();
+        let older: Vec<JoinedRecord> = {
+            let mut st = inner.state.lock().expect("state");
+            let (old, keep): (Vec<JoinedRecord>, Vec<JoinedRecord>) = st.joined.drain(..).partition(|j| j.notebook == invite.notebook && j.owner == owner_id && j.invite != invite.id);
+            st.joined = keep;
+            if !old.is_empty() {
+                st.save_joined()?;
+            }
+            old
+        };
+        if !older.is_empty() {
+            let mut sessions = inner.sessions.lock().expect("sessions");
+            let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Host { invite: i, .. } if older.iter().any(|o| o.invite == *i))).map(|(k, _)| *k).collect();
+            for k in gone {
+                if let Some(s) = sessions.remove(&k) {
+                    s.conn.close(0u32.into(), b"replaced");
+                }
+            }
         }
-        let est = self.rt().block_on(connect(&inner, invite.owner.clone(), Auth::Guest { invite: proto::encode(&signed) }))?;
+        let est = match self.rt().block_on(connect(&inner, invite.owner.clone(), auth)) {
+            Ok(est) => est,
+            Err(e) => {
+                if !older.is_empty() {
+                    let mut st = inner.state.lock().expect("state");
+                    st.joined.extend(older.iter().cloned());
+                    let _ = st.save_joined();
+                    drop(st);
+                    for o in older {
+                        self.rt().spawn(host_loop(inner.clone(), o.invite, None));
+                    }
+                }
+                return Err(e);
+            }
+        };
         {
             let mut st = inner.state.lock().expect("state");
             st.joined.retain(|j| j.invite != invite.id);
@@ -671,7 +900,14 @@ async fn connect(inner: &Arc<Inner>, addr: EndpointAddr, auth: Auth) -> Result<E
         .map_err(|e| Error::Net(e.to_string()))?;
     let (mut send, mut recv) = conn.open_bi().await.map_err(|e| Error::Net(e.to_string()))?;
     proto::write_msg(&mut send, &Msg::Hello { proto: PROTO, name: inner.name.clone(), addr: inner.ep.addr(), auth }).await?;
-    let reply = tokio::time::timeout(Duration::from_secs(15), proto::read_msg(&mut recv)).await.map_err(|_| Error::Net("keine Antwort".into()))??;
+    let mut reply = tokio::time::timeout(Duration::from_secs(15), proto::read_msg(&mut recv)).await.map_err(|_| Error::Net("keine Antwort".into()))??;
+    if let Msg::Waiting { name } = reply {
+        // The owner lets new guests in by hand: wait for it (a few minutes at most).
+        (inner.emit)(Event::JoinWaiting { owner: name });
+        reply = tokio::time::timeout(Duration::from_secs(180), proto::read_msg(&mut recv))
+            .await
+            .map_err(|_| Error::Rejected("Der Besitzer hat dich nicht hereingelassen (keine Antwort)".into()))??;
+    }
     match reply {
         Msg::Welcome { name, role, .. } => Ok(Established { conn, send, recv, name, role }),
         Msg::Reject { reason } => {
@@ -810,6 +1046,7 @@ async fn accept_one(inner: Arc<Inner>, conn: Connection) -> Result<()> {
         proto::write_msg(&mut send, &reject("andere n0te-Version")).await?;
         return Ok(());
     }
+    let mut needs_ok = false;
     let decision: std::result::Result<Kind, String> = match auth {
         Auth::Own => {
             if inner.is_device(&peer) {
@@ -837,7 +1074,41 @@ async fn accept_one(inner: Arc<Inner>, conn: Connection) -> Result<()> {
                 None => Err("Kopplung fehlgeschlagen (Code falsch oder abgelaufen)".into()),
             }
         }
-        Auth::Guest { invite } => inner.check_invite(&invite).map(|(inv, rec)| Kind::Guest { invite: inv.id, notebook: rec.notebook, role: rec.role }),
+        Auth::Guest { invite } => inner.check_invite(&invite).and_then(|(inv, rec)| inner.gate(&rec, &peer, None).map(|wait| (Kind::Guest { invite: inv.id, notebook: rec.notebook, role: rec.role }, wait))).map(|(k, wait)| {
+            needs_ok = wait;
+            k
+        }),
+        Auth::GuestPin { invite, pin } => inner.check_invite(&invite).and_then(|(inv, rec)| inner.gate(&rec, &peer, Some(&pin)).map(|wait| (Kind::Guest { invite: inv.id, notebook: rec.notebook, role: rec.role }, wait))).map(|(k, wait)| {
+            needs_ok = wait;
+            k
+        }),
+    };
+    // A new guest of an invite with approval: wait at the door until the owner decides.
+    let decision = match decision {
+        Ok(Kind::Guest { invite, notebook, role }) if needs_ok => {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            inner.lobby.lock().expect("lobby").push(Knock { invite: invite.clone(), notebook: notebook.clone(), name: name.clone(), device: peer, role, tx });
+            (inner.emit)(Event::GuestWaiting { invite: invite.clone(), notebook: notebook.clone(), name: name.clone(), device: peer.to_string(), on: true });
+            let _ = proto::write_msg(&mut send, &Msg::Waiting { name: inner.name.clone() }).await;
+            let answer = tokio::select! {
+                a = rx => a.ok(),
+                _ = conn.closed() => None,
+                _ = tokio::time::sleep(Duration::from_secs(200)) => None,
+            };
+            inner.lobby.lock().expect("lobby").retain(|k| k.device != peer);
+            (inner.emit)(Event::GuestWaiting { invite: invite.clone(), notebook: notebook.clone(), name: name.clone(), device: peer.to_string(), on: false });
+            match answer {
+                Some(true) => Ok(Kind::Guest { invite, notebook, role }),
+                Some(false) => Err("Der Besitzer hat dich nicht hereingelassen".to_string()),
+                None => return Ok(()),
+            }
+        }
+        other => other,
+    };
+    // In: remember the device (it comes back without the checks); single use binds here.
+    let decision = match decision {
+        Ok(Kind::Guest { invite, notebook, role }) => inner.add_member(&invite, &peer).map(|_| Kind::Guest { invite, notebook, role }),
+        other => other,
     };
     let kind = match decision {
         Ok(k) => k,
@@ -1096,6 +1367,45 @@ impl Inner {
     // --- guests ----------------------------------------------------------------------------
 
     /// Owner side: is this a valid, unrevoked invite of ours for an existing notebook?
+    /// Whether a guest device may come in with this invite: Ok(true) = only after the owner
+    /// lets it in. Devices already in skip approval, PIN and single use.
+    fn gate(&self, rec: &InviteRecord, peer: &EndpointId, pin: Option<&str>) -> std::result::Result<bool, String> {
+        let dev = peer.to_string();
+        if rec.banned.iter().any(|b| b.device == dev) {
+            return Err("Vom Besitzer entfernt".into());
+        }
+        if rec.members.contains(&dev) {
+            return Ok(false);
+        }
+        if rec.single && !rec.members.is_empty() {
+            return Err("Diese Einladung wurde schon benutzt".into());
+        }
+        if let Some(want) = &rec.pin {
+            match pin.map(str::trim) {
+                None | Some("") => return Err(PIN_NEEDED.into()),
+                Some(p) if p != want => return Err(PIN_WRONG.into()),
+                _ => {}
+            }
+        }
+        Ok(rec.approve)
+    }
+
+    /// A guest device is in: remembered for the invite (single use: only if it's the first).
+    fn add_member(&self, invite: &str, peer: &EndpointId) -> std::result::Result<(), String> {
+        let dev = peer.to_string();
+        let mut st = self.state.lock().expect("state");
+        let Some(r) = st.invites.iter_mut().find(|r| r.id == invite) else { return Err("Einladung unbekannt".into()) };
+        if r.members.contains(&dev) {
+            return Ok(());
+        }
+        if r.single && !r.members.is_empty() {
+            return Err("Diese Einladung wurde schon benutzt".into());
+        }
+        r.members.push(dev);
+        let _ = st.save_invites();
+        Ok(())
+    }
+
     fn check_invite(&self, bytes: &[u8]) -> std::result::Result<(Invite, InviteRecord), String> {
         let signed: SignedInvite = proto::decode(bytes).map_err(|_| "Einladung unlesbar".to_string())?;
         let inv = signed.verify().map_err(|e| e.to_string())?;

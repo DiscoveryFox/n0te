@@ -30,6 +30,27 @@ pub struct InviteRecord {
     pub created: u64,
     pub revoked: bool,
     pub link: String,
+    /// New guests wait until the owner lets them in.
+    #[serde(default)]
+    pub approve: bool,
+    /// Only one device may ever come in with it.
+    #[serde(default)]
+    pub single: bool,
+    /// Asked once from new guests (devices already in don't need it again).
+    #[serde(default)]
+    pub pin: Option<String>,
+    /// Devices that came in (they come back without approval, PIN or single-use checks).
+    #[serde(default)]
+    pub members: Vec<String>,
+    /// Devices the owner removed: they can't come back with this invite.
+    #[serde(default)]
+    pub banned: Vec<Banned>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Banned {
+    pub device: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

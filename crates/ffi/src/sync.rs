@@ -64,6 +64,10 @@ pub enum FfiSyncEvent {
     RoleChanged { notebook: String, write: bool },
     AccessRevoked { notebook: String },
     SyncError { message: String },
+    /// Owner side: a new guest waits to be let in (`on`), or doesn't any more.
+    GuestWaiting { invite: String, notebook: String, name: String, device: String, on: bool },
+    /// Guest side, while joining: the owner lets us in by hand.
+    JoinWaiting { owner: String },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -87,6 +91,21 @@ pub struct FfiInvite {
     pub revoked: bool,
     pub link: String,
     pub online: u32,
+    /// New guests wait until the owner lets them in.
+    pub approve: bool,
+    /// Only one device may come in.
+    pub single: bool,
+    pub pin: Option<String>,
+    /// Devices that came in so far.
+    pub members: u32,
+    /// Devices the owner removed (can be let back).
+    pub banned: Vec<FfiBanned>,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiBanned {
+    pub device: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -112,6 +131,8 @@ pub struct FfiSyncStatus {
     pub node_id: String,
     pub devices: Vec<FfiDevice>,
     pub guests: Vec<FfiGuest>,
+    /// New guests waiting to be let in.
+    pub waiting: Vec<FfiGuest>,
     pub joined: Vec<FfiJoined>,
     pub last_sync: Vec<FfiLastSync>,
     /// Home relay URL (None: reachable only directly / on the LAN).
@@ -132,6 +153,10 @@ pub struct FfiCheckpoint {
 
 fn device(d: n0te_sync::DeviceInfo) -> FfiDevice {
     FfiDevice { id: d.id, name: d.name, online: d.online, last_seen: d.last_seen }
+}
+
+fn guest(g: n0te_sync::GuestInfo) -> FfiGuest {
+    FfiGuest { invite: g.invite, notebook: g.notebook, name: g.name, device: g.device, write: g.role == Role::ReadWrite }
 }
 
 fn role(r: Role) -> FfiRole {
@@ -171,6 +196,8 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::RoleChanged { notebook, write } => FfiSyncEvent::RoleChanged { notebook, write },
         Event::AccessRevoked { notebook } => FfiSyncEvent::AccessRevoked { notebook },
         Event::SyncError { message } => FfiSyncEvent::SyncError { message },
+        Event::GuestWaiting { invite, notebook, name, device, on } => FfiSyncEvent::GuestWaiting { invite, notebook, name, device, on },
+        Event::JoinWaiting { owner } => FfiSyncEvent::JoinWaiting { owner },
     }
 }
 
@@ -222,7 +249,8 @@ impl SyncEngine {
             Ok(FfiSyncStatus {
                 node_id: s.node_id,
                 devices: s.devices.into_iter().map(device).collect(),
-                guests: s.guests.into_iter().map(|g| FfiGuest { invite: g.invite, notebook: g.notebook, name: g.name, device: g.device.clone(), write: g.role == Role::ReadWrite }).collect(),
+                guests: s.guests.into_iter().map(guest).collect(),
+                waiting: s.waiting.into_iter().map(guest).collect(),
                 joined: s.joined.into_iter().map(joined).collect(),
                 last_sync: s.last_sync.into_iter().map(|(notebook, at)| FfiLastSync { notebook, at }).collect(),
                 relay: s.relay,
@@ -281,11 +309,51 @@ impl SyncEngine {
     pub fn create_invite(&self, notebook: String, role: FfiRole, expires: u64) -> R<String> {
         self.with(|e| Ok(e.create_invite(&notebook, if role == FfiRole::ReadWrite { Role::ReadWrite } else { Role::Read }, expires)?))
     }
+    /// An invite with approval, single use and / or a PIN.
+    pub fn create_invite_with(&self, notebook: String, role: FfiRole, expires: u64, approve: bool, single: bool, pin: Option<String>) -> R<String> {
+        self.with(|e| Ok(e.create_invite_with(&notebook, if role == FfiRole::ReadWrite { Role::ReadWrite } else { Role::Read }, expires, n0te_sync::InviteOptions { approve, single, pin })?))
+    }
+    /// Lets a waiting guest in (`yes`) or turns it away.
+    pub fn admit(&self, device: String, yes: bool) -> R<()> {
+        self.with(|e| Ok(e.admit(&device, yes)?))
+    }
+    /// Removes one guest device (its invite won't let it back in; the others stay).
+    pub fn remove_guest(&self, device: String) -> R<()> {
+        self.with(|e| Ok(e.remove_guest(&device)?))
+    }
+    pub fn allow_again(&self, invite: String, device: String) -> R<()> {
+        self.with(|e| Ok(e.allow_again(&invite, &device)?))
+    }
+    /// Until when an invite works (unix seconds, 0 = never), also for links already sent.
+    pub fn set_expiry(&self, invite: String, expires: u64) -> R<()> {
+        self.with(|e| Ok(e.set_expiry(&invite, expires)?))
+    }
+    pub fn set_invite_options(&self, invite: String, approve: bool, single: bool) -> R<()> {
+        self.with(|e| Ok(e.set_invite_options(&invite, approve, single)?))
+    }
+    pub fn set_pin(&self, invite: String, pin: Option<String>) -> R<()> {
+        self.with(|e| Ok(e.set_pin(&invite, pin.as_deref())?))
+    }
     pub fn list_invites(&self) -> R<Vec<FfiInvite>> {
         self.with(|e| {
             Ok(e.list_invites()
                 .into_iter()
-                .map(|i| FfiInvite { id: i.id, notebook: i.notebook, title: i.title, role: role(i.role), expires: i.expires, created: i.created, revoked: i.revoked, link: i.link, online: i.online as u32 })
+                .map(|i| FfiInvite {
+                    id: i.id,
+                    notebook: i.notebook,
+                    title: i.title,
+                    role: role(i.role),
+                    expires: i.expires,
+                    created: i.created,
+                    revoked: i.revoked,
+                    link: i.link,
+                    online: i.online as u32,
+                    approve: i.approve,
+                    single: i.single,
+                    pin: i.pin,
+                    members: i.members as u32,
+                    banned: i.banned.into_iter().map(|b| FfiBanned { device: b.device, name: b.name }).collect(),
+                })
                 .collect())
         })
     }
@@ -306,6 +374,10 @@ impl SyncEngine {
     /// Joins a notebook from an invite link; returns its id.
     pub fn join(&self, link: String) -> R<String> {
         self.with(|e| Ok(e.join(&link)?))
+    }
+    /// Joins with the invite's PIN; with approval it waits until the owner lets us in.
+    pub fn join_with(&self, link: String, pin: Option<String>) -> R<String> {
+        self.with(|e| Ok(e.join_with(&link, pin.as_deref())?))
     }
     pub fn joined(&self) -> R<Vec<FfiJoined>> {
         self.with(|e| Ok(e.joined().into_iter().map(joined).collect()))

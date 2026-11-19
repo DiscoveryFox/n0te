@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use n0te_core::ink::{Brush, InkPoint};
 use n0te_core::notebook::{Background, SheetSpec};
 use n0te_core::store::Library;
-use n0te_sync::{Engine, EngineOptions, Event, LiveBrush, Role};
+use n0te_sync::{Engine, EngineOptions, Event, InviteOptions, LiveBrush, Role};
 
 fn root(tag: &str) -> PathBuf {
     std::env::temp_dir().join(format!("n0te-sync-{tag}-{}-{}", std::process::id(), n0te_core::ids::new_id(21)))
@@ -225,6 +225,134 @@ fn owner_switches_a_guest_between_read_and_write_and_sees_its_live_view() {
     owner.set_share_view(true);
     owner.send_presence(&nb, Some(&s1), [0.0, 0.0, 100.0, 100.0], 2.0, None);
     wait_event(&guest_events, "presence when shared", |e| matches!(e, Event::Presence { .. }));
+}
+
+#[test]
+fn one_guest_can_be_removed_the_others_stay_and_it_can_be_let_back() {
+    let (ro, ra, rb) = (root("rmo"), root("rma"), root("rmb"));
+    let owner = engine(&ro, "Laptop");
+    let (nb, s1) = notebook_with_strokes(&ro, "Entfernen", 1);
+    let (mia, ben) = (engine(&ra, "Mia"), engine(&rb, "Ben"));
+    let mia_events = mia.events().unwrap();
+    let link = owner.create_invite(&nb, Role::Read, 0).unwrap();
+    mia.join(&link).unwrap();
+    ben.join(&link).unwrap();
+    wait("both guests in", || owner.status().guests.len() == 2);
+    wait("mia synced", || strokes(&ra, &nb, &s1) == 1);
+    let dev = |name: &str| owner.status().guests.iter().find(|g| g.name == name).map(|g| g.device.clone()).unwrap();
+    let mia_dev = dev("Mia");
+
+    owner.remove_guest(&mia_dev).unwrap();
+    // Mia is out for good (her reconnect is turned away), Ben stays.
+    wait_event(&mia_events, "mia told she is out", |e| matches!(e, Event::AccessRevoked { .. }));
+    assert!(mia.joined()[0].revoked);
+    std::thread::sleep(Duration::from_millis(500));
+    let names: Vec<String> = owner.status().guests.iter().map(|g| g.name.clone()).collect();
+    assert_eq!(names, vec!["Ben".to_string()]);
+    let inv = owner.list_invites()[0].clone();
+    assert_eq!((inv.banned.len(), inv.banned[0].name.as_str(), inv.members), (1, "Mia", 1));
+    let err = mia.join(&link).unwrap_err().to_string();
+    assert!(err.contains("entfernt"), "{err}");
+
+    // Let back in: the same link works again.
+    owner.allow_again(&inv.id, &mia_dev).unwrap();
+    mia.join(&link).unwrap();
+    wait("mia back", || owner.status().guests.len() == 2);
+}
+
+#[test]
+fn pin_approval_single_use_and_a_changed_expiry() {
+    let (ro, ra, rb) = (root("gto"), root("gta"), root("gtb"));
+    let owner = engine(&ro, "Laptop");
+    let (nb, s1) = notebook_with_strokes(&ro, "Tür", 1);
+    let (mia, ben) = (engine(&ra, "Mia"), engine(&rb, "Ben"));
+    let owner_events = owner.events().unwrap();
+    let mia_events = mia.events().unwrap();
+    let link = owner.create_invite_with(&nb, Role::Read, 0, InviteOptions { approve: true, single: true, pin: Some("4821".into()) }).unwrap();
+    let id = owner.list_invites()[0].id.clone();
+
+    // PIN first.
+    let err = mia.join(&link).unwrap_err().to_string();
+    assert!(err.contains("PIN nötig"), "{err}");
+    let err = mia.join_with(&link, Some("1111")).unwrap_err().to_string();
+    assert!(err.contains("PIN falsch"), "{err}");
+
+    // Right PIN: Mia waits at the door until the owner lets her in.
+    std::thread::scope(|sc| {
+        let joining = sc.spawn(|| mia.join_with(&link, Some("4821")));
+        let device = match wait_event(&owner_events, "mia knocks", |e| matches!(e, Event::GuestWaiting { on: true, .. })) {
+            Event::GuestWaiting { name, device, .. } => {
+                assert_eq!(name, "Mia");
+                device
+            }
+            _ => unreachable!(),
+        };
+        assert_eq!(owner.status().waiting.len(), 1);
+        wait_event(&mia_events, "mia is told to wait", |e| matches!(e, Event::JoinWaiting { owner } if owner == "Laptop"));
+        owner.admit(&device, true).unwrap();
+        assert_eq!(joining.join().unwrap().unwrap(), nb);
+    });
+    wait("mia synced", || strokes(&ra, &nb, &s1) == 1);
+    assert!(owner.status().waiting.is_empty());
+    assert_eq!(owner.list_invites()[0].members, 1);
+
+    // Single use: nobody else gets in, even with the PIN.
+    let err = ben.join_with(&link, Some("4821")).unwrap_err().to_string();
+    assert!(err.contains("schon benutzt"), "{err}");
+
+    // Mia, once in, comes back without PIN or approval (a role change reconnects her).
+    owner.set_role(&id, Role::ReadWrite).unwrap();
+    wait_event(&mia_events, "rights changed", |e| matches!(e, Event::RoleChanged { write: true, .. }));
+    wait("mia back without asking", || owner.status().guests.len() == 1);
+    assert!(owner.status().waiting.is_empty());
+
+    // Expiry: the owner's date counts, not the one in the link.
+    let short = owner.create_invite(&nb, Role::Read, n0te_sync::proto::now_secs() + 1).unwrap();
+    let short_id = owner.list_invites().iter().find(|i| i.link == short).unwrap().id.clone();
+    std::thread::sleep(Duration::from_millis(2100));
+    let err = ben.join(&short).unwrap_err().to_string();
+    assert!(err.contains("abgelaufen"), "{err}");
+    owner.set_expiry(&short_id, n0te_sync::proto::now_secs() + 3600).unwrap();
+    ben.join(&short).unwrap();
+    wait("ben in with the extended link", || owner.status().guests.len() == 2);
+
+    // Turned away at the door.
+    let rc = root("gtc");
+    let cleo = engine(&rc, "Cleo");
+    let door = owner.create_invite_with(&nb, Role::Read, 0, InviteOptions { approve: true, ..Default::default() }).unwrap();
+    std::thread::scope(|sc| {
+        let joining = sc.spawn(|| cleo.join(&door));
+        let device = match wait_event(&owner_events, "cleo knocks", |e| matches!(e, Event::GuestWaiting { on: true, name, .. } if name == "Cleo")) {
+            Event::GuestWaiting { device, .. } => device,
+            _ => unreachable!(),
+        };
+        owner.admit(&device, false).unwrap();
+        let err = joining.join().unwrap().unwrap_err().to_string();
+        assert!(err.contains("nicht hereingelassen"), "{err}");
+    });
+}
+
+#[test]
+fn a_new_invite_to_the_same_notebook_replaces_the_old_membership() {
+    let (ro, rg) = (root("rpo"), root("rpg"));
+    let owner = engine(&ro, "Laptop");
+    let (nb, s1) = notebook_with_strokes(&ro, "Zweimal", 1);
+    let guest = engine(&rg, "Mia");
+    let first = owner.create_invite(&nb, Role::Read, 0).unwrap();
+    guest.join(&first).unwrap();
+    wait("in with the first invite", || owner.status().guests.len() == 1);
+    // A wrong PIN on the new invite keeps the old membership.
+    let second = owner.create_invite_with(&nb, Role::ReadWrite, 0, InviteOptions { pin: Some("1234".into()), ..Default::default() }).unwrap();
+    assert!(guest.join_with(&second, Some("9999")).is_err());
+    assert_eq!(guest.joined().len(), 1);
+    wait("still in with the first", || owner.status().guests.len() == 1);
+    // The right PIN: one membership, the new one, and it connects (not refused as a duplicate).
+    guest.join_with(&second, Some("1234")).unwrap();
+    let j = guest.joined();
+    assert_eq!((j.len(), j[0].role), (1, Role::ReadWrite));
+    let second_id = owner.list_invites().iter().find(|i| i.link == second).unwrap().id.clone();
+    wait("connected with the second invite", || owner.status().guests.iter().any(|g| g.invite == second_id) && guest.joined()[0].online);
+    assert_eq!(strokes(&rg, &nb, &s1), 1);
 }
 
 fn wait_event(rx: &Receiver<Event>, what: &str, f: impl Fn(&Event) -> bool) -> Event {

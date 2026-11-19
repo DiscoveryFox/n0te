@@ -517,7 +517,26 @@ fn guests_are_named_their_frames_can_be_hidden_and_the_share_panel_lists_them() 
     assert_eq!(marks(&h), vec!["Mia".to_string()]);
 
     // The share panel with who's here and the invite's rights draws (no service needed).
-    h.app.share = Some(vec![Invite { id: "inv1".into(), notebook: nb, rw: false, revoked: false, online: 1, link: "n0te://invite/x".into(), expires: 0 }]);
+    // ... with someone at the door, a removed guest, approval and a PIN.
+    h.app.waiting = vec![Guest { invite: "inv1".into(), notebook: nb.clone(), name: "Cleo".into(), device: "dev-cleo".into(), write: false }];
+    h.app.share = Some(vec![Invite {
+        id: "inv1".into(),
+        notebook: nb,
+        rw: false,
+        revoked: false,
+        online: 1,
+        link: "n0te://invite/x".into(),
+        expires: 0,
+        approve: true,
+        single: false,
+        pin: Some("4821".into()),
+        members: 2,
+        banned: vec![("dev-ben".into(), "Ben".into())],
+    }]);
+    h.events(&[]);
+    // "Entfernen" asks first: one click only arms it (nothing sent yet).
+    h.message(Message::RemoveGuest("dev-mia".into()));
+    assert_eq!(h.app.removing.as_deref(), Some("dev-mia"));
     h.events(&[]);
     if let Some(dir) = std::env::var_os("N0TE_UI_SHOTS") {
         h.screenshot(std::path::Path::new(&dir).join("share-guests.png"));

@@ -105,6 +105,20 @@ pub enum Message {
     SetRole(String, bool),
     GuestFrames(bool),
     ShareView(bool),
+    /// Waiting guest: let in (true) or turn away.
+    Admit(String, bool),
+    /// First click asks, the second removes the guest device.
+    RemoveGuest(String),
+    AllowAgain(String, String),
+    /// Invite valid for N more days (0 = no expiry).
+    SetExpiry(String, u64),
+    /// Approval, single use.
+    SetInviteOptions(String, bool, bool),
+    /// PIN on (a new random one) / off.
+    SetPin(String, bool),
+    JoinPin(String),
+    /// The service answered a join (link, its output or why not).
+    Joined(String, Result<String, String>),
     /// After joining: the notebook arrived (or not, after the wait).
     JoinReady(String, bool),
     /// Version history of the open notebook: (unix time, label) per checkpoint.
@@ -231,6 +245,12 @@ pub struct App {
     /// Guests in our notebooks right now, and notebooks we joined as a guest.
     pub guests: Vec<live::Guest>,
     pub joined: Vec<live::Joined>,
+    /// New guests waiting to be let in (our invites with approval).
+    pub waiting: Vec<live::Guest>,
+    /// The guest whose "Entfernen" was clicked once (second click removes).
+    pub removing: Option<String>,
+    /// Joining an invite with a PIN: what's typed so far (Some: the field shows).
+    pub join_pin: Option<String>,
     presence_at: Option<Instant>,
     pub pair_code: Option<String>,
     /// Share panel open, with the invites of the open notebook.
@@ -329,6 +349,9 @@ impl App {
             live_session: None,
             guests: Vec::new(),
             joined: Vec::new(),
+            waiting: Vec::new(),
+            removing: None,
+            join_pin: None,
             presence_at: None,
             pair_code: None,
             share: None,
@@ -849,6 +872,59 @@ impl App {
                     self.say("Beigetreten — das Notizbuch kommt, sobald der Besitzer erreichbar ist");
                 }
             }
+            Message::Admit(device, yes) => {
+                if let Err(e) = live::request(&[if yes { "admit" } else { "deny" }, &device]) {
+                    self.say(format!("Einlass: {e}"));
+                }
+                self.refresh_guests();
+                return self.update(Message::ShowShare(true));
+            }
+            Message::RemoveGuest(device) => {
+                if self.removing.as_deref() != Some(device.as_str()) {
+                    self.removing = Some(device);
+                    return Task::none();
+                }
+                self.removing = None;
+                let name = self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| "Der Gast".into());
+                match live::request(&["remove-guest", &device]) {
+                    Ok(_) => self.say(format!("{name} ist entfernt und kommt mit dem Link nicht mehr herein")),
+                    Err(e) => self.say(format!("Entfernen: {e}")),
+                }
+                self.refresh_guests();
+                return self.update(Message::ShowShare(true));
+            }
+            Message::AllowAgain(invite, device) => {
+                if let Err(e) = live::request(&["allow-again", &invite, &device]) {
+                    self.say(format!("Zulassen: {e}"));
+                }
+                return self.update(Message::ShowShare(true));
+            }
+            Message::SetExpiry(invite, days) => {
+                if let Err(e) = live::request(&["set-expiry", &invite, &days.to_string()]) {
+                    self.say(format!("Ablauf: {e}"));
+                }
+                return self.update(Message::ShowShare(true));
+            }
+            Message::SetInviteOptions(invite, approve, single) => {
+                let mut args = vec!["set-options", invite.as_str()];
+                if approve {
+                    args.push("--approve");
+                }
+                if single {
+                    args.push("--single");
+                }
+                if let Err(e) = live::request(&args) {
+                    self.say(format!("Einladung: {e}"));
+                }
+                return self.update(Message::ShowShare(true));
+            }
+            Message::SetPin(invite, on) => {
+                let pin = if on { new_pin() } else { "off".into() };
+                if let Err(e) = live::request(&["set-pin", &invite, &pin]) {
+                    self.say(format!("PIN: {e}"));
+                }
+                return self.update(Message::ShowShare(true));
+            }
             Message::Revoke(id) => {
                 match live::request(&["revoke", &id]) {
                     Ok(_) => self.say("Widerrufen: der Gast ist getrennt"),
@@ -863,9 +939,33 @@ impl App {
             Message::StartJoin => self.joining = Some(String::new()),
             Message::CancelJoin => self.joining = None,
             Message::JoinLink(l) => self.joining = Some(l),
+            Message::JoinPin(p) => self.join_pin = Some(p.chars().filter(char::is_ascii_digit).take(8).collect()),
             Message::Join => {
                 let link = self.joining.take().unwrap_or_default();
-                match live::request(&["join", link.trim()]) {
+                let pin = self.join_pin.take().filter(|p| !p.is_empty());
+                self.say("Verbinde mit dem Besitzer …");
+                // Off the UI thread: with approval the owner may take a while to let us in.
+                return Task::perform(
+                    async move {
+                        let mut args = vec!["join".to_string(), link.trim().to_string()];
+                        if let Some(p) = pin {
+                            args.extend(["--pin".to_string(), p]);
+                        }
+                        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                        let r = live::request(&refs);
+                        (link, r)
+                    },
+                    |(link, r)| Message::Joined(link, r),
+                );
+            }
+            Message::Joined(link, r) => {
+                match r {
+                    Err(e) if e.contains("PIN") => {
+                        // The invite has a PIN: the field shows, then join again.
+                        self.joining = Some(link);
+                        self.join_pin = Some(String::new());
+                        self.say(if e.contains("falsch") { "Die PIN stimmt nicht" } else { "Diese Einladung braucht eine PIN" });
+                    }
                     Ok(out) => {
                         let id = out.rsplit(' ').next().unwrap_or_default().to_string();
                         self.say("Lade das Notizbuch vom Besitzer …");
@@ -1117,6 +1217,16 @@ impl App {
                     return self.update(Message::ShowShare(true));
                 }
             }
+            LiveEvent::Waiting { name, on, .. } => {
+                self.refresh_guests();
+                if on {
+                    self.say(format!("{name} möchte herein (Teilen → Hereinlassen)"));
+                }
+                if self.share.is_some() {
+                    return self.update(Message::ShowShare(true));
+                }
+            }
+            LiveEvent::JoinWaiting { owner } => self.say(format!("Warte, bis {owner} dich hereinlässt …")),
             LiveEvent::Role { write, .. } => {
                 self.refresh_guests();
                 self.say(if write { "Du darfst jetzt mitschreiben" } else { "Ab jetzt nur noch lesen" });
@@ -1165,6 +1275,7 @@ impl App {
         if self.sync.is_some() {
             self.guests = live::guests();
             self.joined = live::joined();
+            self.waiting = live::waiting();
         }
     }
 
@@ -1819,39 +1930,123 @@ impl App {
         if invites.is_empty() {
             col = col.push(text("Noch keine Einladungen. Der Link wird beim Erstellen kopiert; Gäste öffnen ihn in n0te (EINLADUNG).").size(13).color(theme::p().muted));
         }
-        // Who is here right now, with their rights.
         let nb = self.notebook_id().unwrap_or_default();
+        let small = |t: &str, m: Message| button(theme::btn_small(t)).padding(theme::pad()).on_press(m).style(theme::ghost);
+        // At the door (invites with approval): let in or turn away.
+        let knocking: Vec<&live::Guest> = self.waiting.iter().filter(|g| g.notebook == nb).collect();
+        if !knocking.is_empty() {
+            col = col.push(theme::caption("Wartet auf Einlass"));
+            for g in knocking {
+                col = col.push(
+                    row![
+                        text(g.name.clone()).size(14).color(theme::p().text),
+                        text(if g.write { "möchte herein · lesen & schreiben" } else { "möchte herein · nur lesen" }).size(12).color(theme::p().muted),
+                        Space::new().width(Length::Fill),
+                        small("Ablehnen", Message::Admit(g.device.clone(), false)),
+                        button(theme::btn_small("Hereinlassen")).padding(theme::pad()).on_press(Message::Admit(g.device.clone(), true)).style(theme::accent_button),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        // Who is here right now, with their rights; one can be removed (second click confirms).
         let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
         col = col.push(theme::caption("Jetzt da"));
         if here.is_empty() {
             col = col.push(text("Gerade ist kein Gast verbunden.").size(13).color(theme::p().muted));
         }
         for g in here {
+            let sure = self.removing.as_deref() == Some(g.device.as_str());
             col = col.push(
                 row![
                     container(Space::new().width(8).height(8)).style(|_| container::Style { background: Some(theme::p().accent.into()), border: iced::Border { radius: 4.0.into(), ..Default::default() }, ..Default::default() }),
                     text(g.name.clone()).size(14).color(theme::p().text),
                     text(if g.write { "lesen & schreiben" } else { "nur lesen" }).size(12).color(theme::p().muted),
+                    Space::new().width(Length::Fill),
+                    if sure {
+                        button(theme::btn_small("Wirklich entfernen?")).padding(theme::pad()).on_press(Message::RemoveGuest(g.device.clone())).style(theme::accent_button)
+                    } else {
+                        small("Entfernen", Message::RemoveGuest(g.device.clone()))
+                    },
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
             );
         }
         col = col.push(theme::caption("Einladungen"));
+        let now = unix_now();
         for i in invites.iter().rev().filter(|i| !i.revoked) {
-            let state = if i.online > 0 { format!("{} verbunden", i.online) } else { "niemand verbunden".to_string() };
-            let r = row![
-                // The rights, switchable: guests reconnect with them at once.
-                button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
-                button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
-                text(state).size(12).color(theme::p().muted),
-                Space::new().width(Length::Fill),
-                button(theme::btn_small("Link kopieren")).padding(theme::pad()).on_press(Message::CopyText(i.link.clone())).style(theme::ghost),
-                button(theme::btn_small("Widerrufen")).padding(theme::pad()).on_press(Message::Revoke(i.id.clone())).style(theme::ghost),
+            let mut state = if i.online > 0 { format!("{} verbunden", i.online) } else { "niemand verbunden".to_string() };
+            if i.members > 0 {
+                state.push_str(&format!(" · {} dabei gewesen", i.members));
+            }
+            let until = match i.expires {
+                0 => "ohne Ablauf".to_string(),
+                e if e < now => "abgelaufen".to_string(),
+                e => remaining(e - now),
+            };
+            let mut card = column![
+                row![
+                    // The rights, switchable: guests reconnect with them at once.
+                    button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
+                    button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
+                    text(state).size(12).color(theme::p().muted),
+                    Space::new().width(Length::Fill),
+                    small("Link kopieren", Message::CopyText(i.link.clone())),
+                    small("Widerrufen", Message::Revoke(i.id.clone())),
+                ]
+                .align_y(Alignment::Center)
+                .spacing(6),
+                // How long it works — also for links already sent (the owner checks).
+                row![
+                    text(format!("Gültig ({until})")).size(12).color(theme::p().muted).width(Length::Fixed(190.0)),
+                    button(theme::btn_small("1 Tag")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 1)).style(theme::tab(false)),
+                    button(theme::btn_small("7 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 7)).style(theme::tab(false)),
+                    button(theme::btn_small("30 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 30)).style(theme::tab(false)),
+                    button(theme::btn_small("Ohne Ablauf")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 0)).style(theme::tab(i.expires == 0)),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+                // Who gets in (new devices; those already in stay).
+                row![
+                    iced::widget::toggler(i.approve).label("Beitritt bestätigen").on_toggle({
+                        let (id, single) = (i.id.clone(), i.single);
+                        move |on| Message::SetInviteOptions(id.clone(), on, single)
+                    }).size(16).text_size(12).spacing(8).style(theme::switch),
+                    Space::new().width(18),
+                    iced::widget::toggler(i.single).label("Nur ein Gerät").on_toggle({
+                        let (id, approve) = (i.id.clone(), i.approve);
+                        move |on| Message::SetInviteOptions(id.clone(), approve, on)
+                    }).size(16).text_size(12).spacing(8).style(theme::switch),
+                    Space::new().width(18),
+                    iced::widget::toggler(i.pin.is_some()).label("PIN").on_toggle({
+                        let id = i.id.clone();
+                        move |on| Message::SetPin(id.clone(), on)
+                    }).size(16).text_size(12).spacing(8).style(theme::switch),
+                ]
+                .align_y(Alignment::Center),
             ]
-            .align_y(Alignment::Center)
-            .spacing(6);
-            col = col.push(r);
+            .spacing(8);
+            if let Some(pin) = &i.pin {
+                card = card.push(
+                    row![
+                        text(pin.clone()).font(theme::MONO_BOLD).size(22).color(theme::p().text),
+                        text("Neue Gäste geben sie ein · getrennt vom Link sagen").size(12).color(theme::p().muted),
+                        Space::new().width(Length::Fill),
+                        small("Neue PIN", Message::SetPin(i.id.clone(), true)),
+                    ]
+                    .spacing(12)
+                    .align_y(Alignment::Center),
+                );
+            }
+            for (device, name) in &i.banned {
+                card = card.push(
+                    row![text(format!("Entfernt: {name}")).size(12).color(theme::p().muted), Space::new().width(Length::Fill), small("Wieder zulassen", Message::AllowAgain(i.id.clone(), device.clone()))]
+                        .align_y(Alignment::Center),
+                );
+            }
+            col = col.push(container(card).padding(12).width(Length::Fill).style(theme::group));
         }
         col = col.push(
             row![
@@ -1865,7 +2060,8 @@ impl App {
         if let Some(data) = &self.share_qr {
             col = col.push(row![scannable_qr(data, 3.0), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
         }
-        container(col).padding(20).width(Length::Fill).max_width(760).style(theme::panel).into()
+        // Long with several invites: scrolls inside the window.
+        container(iced::widget::scrollable(container(col).padding(20)).height(Length::Shrink)).width(Length::Fill).max_width(820).max_height(760).style(theme::panel).into()
     }
 
     fn help_view(&self) -> Element<'_, Message> {
@@ -2113,6 +2309,10 @@ impl App {
         if let Some(j) = self.joined.iter().find(|j| j.notebook == nb) {
             return format!("{} Gast bei {}{}", if j.online { "●" } else { "○" }, j.owner_name, if j.write { "" } else { " · nur lesen" });
         }
+        let knocking: Vec<&live::Guest> = self.waiting.iter().filter(|g| g.notebook == nb).collect();
+        if !knocking.is_empty() {
+            return if knocking.len() == 1 { format!("Teilen · ● {} wartet", knocking[0].name) } else { format!("Teilen · ● {} warten", knocking.len()) };
+        }
         let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
         match here.len() {
             0 => "Teilen".into(),
@@ -2351,4 +2551,26 @@ mod n0bridge_tests {
         assert_eq!(super::tablet_id(out).as_deref(), Some("b2b36918c88ef31d"));
         assert_eq!(super::tablet_id("phone id=1 [phone,primary]\n"), None);
     }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// "noch 6 Tage", "noch 5 Std.", "noch 20 Min." (no time zone needed).
+fn remaining(secs: u64) -> String {
+    match secs {
+        s if s >= 2 * 86_400 => format!("noch {} Tage", s / 86_400),
+        s if s >= 86_400 => "noch 1 Tag".into(),
+        s if s >= 3600 => format!("noch {} Std.", s / 3600),
+        s => format!("noch {} Min.", (s / 60).max(1)),
+    }
+}
+
+/// A 4-digit PIN for an invite (random per call: RandomState keys come from the OS).
+fn new_pin() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(unix_now());
+    format!("{}", 1000 + h.finish() % 9000)
 }

@@ -30,6 +30,8 @@ pub enum Auth {
     Pair { proof: [u8; 32] },
     /// A guest with a signed invite ([`SignedInvite`] bytes).
     Guest { invite: Vec<u8> },
+    /// The same with the invite's PIN (added later: only sent when a PIN is given).
+    GuestPin { invite: Vec<u8>, pin: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -72,6 +74,8 @@ pub enum Msg {
     LatexRequest { id: u64, png: Vec<u8> },
     /// The answer: LaTeX and which engine read it, or why it failed.
     LatexResult { id: u64, latex: String, engine: String, error: Option<String> },
+    /// Owner to a new guest: "wait, the owner lets you in" (Welcome or Reject follows).
+    Waiting { name: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

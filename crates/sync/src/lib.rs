@@ -26,7 +26,8 @@ pub mod proto;
 mod engine;
 mod state;
 
-pub use engine::{DeviceInfo, Engine, EngineOptions, GuestInfo, InviteInfo, JoinedInfo, Status};
+pub use engine::{DeviceInfo, Engine, EngineOptions, GuestInfo, InviteInfo, InviteOptions, JoinedInfo, Status};
+pub use state::Banned;
 
 /// Android: lets iroh read the active network's DNS servers over JNI. Without it iroh falls
 /// back to public nameservers, which restricted networks (libraries, eduroam) often block, so
@@ -94,5 +95,10 @@ pub enum Event {
     RoleChanged { notebook: String, write: bool },
     /// Guest side: the owner revoked (or let expire) our invite.
     AccessRevoked { notebook: String },
+    /// Owner side: a new guest waits to be let in (`on`), or no longer waits (let in,
+    /// turned away or gone). Answer with `Engine::admit`.
+    GuestWaiting { invite: String, notebook: String, name: String, device: String, on: bool },
+    /// Guest side, while joining: the owner has to let us in first.
+    JoinWaiting { owner: String },
     SyncError { message: String },
 }
