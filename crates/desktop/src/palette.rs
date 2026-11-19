@@ -26,6 +26,9 @@ pub enum Command {
     Theme(&'static str),
     Settings,
     Help,
+    History,
+    Share,
+    Live,
 }
 
 #[derive(Debug, Clone)]
@@ -58,7 +61,10 @@ pub fn items(app: &App) -> Vec<Item> {
             v.push(item("Textfeld", "Strg T · oder Doppelklick auf die Seite", Command::NewTextBox));
             v.push(item("PDF einfügen", "Strg O · nach der aktuellen Seite", Command::InsertPdf));
             v.push(item("PDF exportieren", "Strg E", Command::Export));
-            v.push(item("An das Tablet senden", "über n0bridge", Command::SendToTablet));
+            v.push(item("An das Tablet senden", "über n0bridge (.n0te)", Command::SendToTablet));
+            v.push(item("Live mit dem Tablet", "es öffnet das Notizbuch, Folgen, Laserpointer", Command::Live));
+            v.push(item("Teilen / Gäste einladen", "nur lesen oder lesen & schreiben", Command::Share));
+            v.push(item("Verlauf: früheren Stand wiederherstellen", "Strg H", Command::History));
             v.push(item("Gliederung ein/aus", "Strg B", Command::ToggleSidebar));
             v.push(item("Zoom 100 %", "Strg 0", Command::Zoom(1.0)));
             v.push(item("Zoom 200 %", "", Command::Zoom(2.0)));

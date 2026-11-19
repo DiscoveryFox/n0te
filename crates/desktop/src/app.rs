@@ -91,6 +91,9 @@ pub enum Message {
     PairToTablet,
     PairSent(Result<String, String>),
     ShowShare(bool),
+    /// Version history of the open notebook: (unix time, label) per checkpoint.
+    ShowHistory(bool),
+    Restore(u64),
     Invite(bool, u64),
     Revoke(String),
     CopyText(String),
@@ -212,6 +215,8 @@ pub struct App {
     /// The newest invite link as a QR code (the view borrows it).
     pub share_qr: Option<iced::widget::qr_code::Data>,
     pub joining: Option<String>,
+    /// History panel open: checkpoints (unix time, "date  size").
+    pub history: Option<Vec<(u64, String)>>,
     /// Change stamp of the open notebook (saves by other processes on this machine).
     stamp: u64,
     /// Without a service connection (tests): don't try to connect.
@@ -296,6 +301,7 @@ impl App {
             share: None,
             share_qr: None,
             joining: None,
+            history: None,
             stamp: 0,
             offline: true,
             entries: Vec::new(),
@@ -394,6 +400,7 @@ impl App {
                 self.close_text_page();
                 self.live_session = None;
                 self.share = None;
+                self.history = None;
                 self.screen = Screen::Library;
                 self.refresh();
             }
@@ -656,6 +663,43 @@ impl App {
                     None
                 };
                 self.share_qr = self.share.as_ref().and_then(|v| v.iter().rev().find(|i| !i.revoked)).and_then(|i| iced::widget::qr_code::Data::new(i.link.as_bytes()).ok());
+            }
+            Message::ShowHistory(on) => {
+                self.history = if on {
+                    let nb = self.notebook_id().unwrap_or_default();
+                    match live::request(&["history", &nb]) {
+                        Ok(out) => Some(
+                            out.lines()
+                                .filter_map(|l| {
+                                    let mut it = l.splitn(2, ' ');
+                                    let at = it.next()?.parse::<u64>().ok()?;
+                                    Some((at, it.next().unwrap_or_default().trim().to_string()))
+                                })
+                                .collect(),
+                        ),
+                        Err(e) => {
+                            self.say(format!("Verlauf: {e}"));
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+            }
+            Message::Restore(at) => {
+                let nb = self.notebook_id().unwrap_or_default();
+                match live::request(&["restore", &nb, &at.to_string()]) {
+                    Ok(out) => {
+                        self.history = None;
+                        let id = out.rsplit(' ').next().unwrap_or_default().to_string();
+                        self.refresh();
+                        if self.entries.iter().any(|e| e.id == id) {
+                            let _ = self.open(&id);
+                        }
+                        self.say("Früherer Stand als neues Notizbuch wiederhergestellt (das aktuelle bleibt unverändert)");
+                    }
+                    Err(e) => self.say(format!("Wiederherstellen: {e}")),
+                }
             }
             Message::Invite(rw, days) => {
                 let Some(nb) = self.notebook_id() else { return Task::none() };
@@ -947,6 +991,9 @@ impl App {
             Command::Theme(id) => self.update(Message::SetTheme(id)),
             Command::Settings => self.update(Message::ShowSettings(true)),
             Command::Help => self.update(Message::ShowHelp(true)),
+            Command::History => self.update(Message::ShowHistory(true)),
+            Command::Share => self.update(Message::ShowShare(true)),
+            Command::Live => self.update(Message::StartLive),
         }
     }
 
@@ -1392,6 +1439,7 @@ impl App {
                 Key::Character("n") => self.update(Message::NewTextPage),
                 Key::Character("m") => self.update(Message::ToggleNotes),
                 Key::Character("e") => self.update(Message::ShowExport(true)),
+                Key::Character("h") => self.update(Message::ShowHistory(true)),
                 Key::Character("t") => {
                     // A text box in the middle of the view, on the page there.
                     let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 3.0);
@@ -1437,6 +1485,36 @@ impl App {
             Some(o) => stack![base, container(Space::new()).width(Length::Fill).height(Length::Fill).style(theme::scrim), o].into(),
             None => base,
         }
+    }
+
+    /// Version history: checkpoints of this notebook; restoring makes a copy.
+    fn history_panel<'a>(&'a self, list: &'a [(u64, String)]) -> Element<'a, Message> {
+        let mut col = column![
+            row![
+                text("VERLAUF — FRÜHERE STÄNDE (DER SYNC-DIENST SICHERT ALLE 5 MINUTEN)").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+                Space::new().width(Length::Fill),
+                button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowHistory(false)).style(theme::ghost),
+            ]
+            .align_y(Alignment::Center),
+            text("Ältere Stände werden ausgedünnt: alles der letzten Stunde, stündlich für einen Tag, täglich für 30 Tage, danach wöchentlich.").size(12).color(theme::p().muted),
+        ]
+        .spacing(8);
+        if list.is_empty() {
+            col = col.push(text("Noch keine Stände gesichert.").size(13).color(theme::p().muted));
+        }
+        let mut rows = column![].spacing(2);
+        for (at, label) in list.iter().rev() {
+            rows = rows.push(
+                row![
+                    text(label.clone()).font(theme::MONO).size(12),
+                    Space::new().width(Length::Fill),
+                    button(text("ALS KOPIE WIEDERHERSTELLEN").font(theme::MONO_BOLD).size(10)).padding([3, 8]).on_press(Message::Restore(*at)).style(theme::ghost),
+                ]
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(scrollable(rows).style(theme::scroll_dark).height(Length::Shrink).height(Length::Fixed(320.0)));
+        container(col).padding(14).width(Length::Fill).max_width(760).style(theme::panel).into()
     }
 
     /// Share with guests: invite links (read / read-write), active invites with revoke.
@@ -1497,6 +1575,7 @@ impl App {
             ("Strg O", "PDF einfügen / importieren (oder Datei ins Fenster ziehen)"),
             ("Strg E", "PDF exportieren"),
             ("Strg B", "Gliederung ein/aus"),
+            ("Strg H", "Verlauf: frühere Stände wiederherstellen"),
             ("Strg I", "Vom Tablet übernehmen (.n0te)"),
             ("Strg ,", "Einstellungen"),
             ("F1", "Diese Übersicht"),
@@ -1587,7 +1666,9 @@ impl App {
             body = body.push(sidebar::view(&o.rows, &o.pages, current));
             body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
         }
-        let panel: Option<Element<'a, Message>> = if let Some(invites) = &self.share {
+        let panel: Option<Element<'a, Message>> = if let Some(h) = &self.history {
+            Some(self.history_panel(h))
+        } else if let Some(invites) = &self.share {
             Some(self.share_panel(invites))
         } else if self.show_pdf_import {
             Some(library::pdf_panel(&self.pdfs, "PDF EINFÜGEN — NACH DER AKTUELLEN SEITE"))
