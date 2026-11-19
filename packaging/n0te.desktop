@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=n0te
+GenericName=Notizen
+Comment=Notizbücher vom Tablet am Laptop
+Exec=n0te %f
+Icon=n0te
+Terminal=false
+Categories=Office;Education;
+MimeType=application/x-n0te;
+StartupWMClass=n0te

@@ -322,3 +322,13 @@ pub fn text_page() -> Vec<(&'static str, &'static str)> {
         ("", ""),
     ]
 }
+
+/// Saves the demo notebook into a library (tests, screenshots); returns its id.
+pub fn save_into(lib: &n0te_core::store::Library) -> String {
+    let d = notebook();
+    lib.save_notebook(&d.notebook).expect("save notebook");
+    for (id, sheet) in &d.sheets {
+        lib.save_sheet(&d.notebook.id(), id, sheet).expect("save sheet");
+    }
+    d.notebook.id()
+}

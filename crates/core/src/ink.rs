@@ -181,10 +181,15 @@ pub fn pencil_layers(points: &[InkPoint], brush: &Brush) -> Vec<Vec<f32>> {
     if brush.kind != KIND_PENCIL {
         return Vec::new();
     }
-    // Sized so the bands stay inside the outline up to full pressure (the ragged rim survives).
-    let mid = Brush { width: brush.width * 0.7, thinning: 0.5, ..*brush };
-    let core = Brush { width: brush.width * 0.5, thinning: 0.95, ..*brush };
+    let [mid, core] = pencil_layer_brushes(brush);
     vec![outline(points, &mid), outline(points, &core)]
+}
+
+/// The brushes of a pencil's middle band and core (see [`pencil_layers`]); for renderers that
+/// build their own geometry (meshes on the laptop). Sized so the bands stay inside the outline
+/// up to full pressure (the ragged rim survives).
+pub fn pencil_layer_brushes(brush: &Brush) -> [Brush; 2] {
+    [Brush { width: brush.width * 0.7, thinning: 0.5, ..*brush }, Brush { width: brush.width * 0.5, thinning: 0.95, ..*brush }]
 }
 
 /// The same shape as [`outline`], as triangles ready for a GPU: a strip between the left and

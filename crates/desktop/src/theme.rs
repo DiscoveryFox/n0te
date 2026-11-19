@@ -136,6 +136,33 @@ pub fn row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
+/// A notebook card in the library.
+pub fn card(_: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(Background::Color(if hovered { SURFACE_2 } else { SURFACE })),
+        text_color: TEXT,
+        border: border(if hovered { MUTED } else { BORDER }, 1.0, 16.0),
+        ..Default::default()
+    }
+}
+
+/// The primary action (red).
+pub fn accent_button(_: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(Background::Color(if hovered { color!(0xE8333A) } else { ACCENT })),
+        text_color: Color::WHITE,
+        border: border(ACCENT, 1.0, 14.0),
+        ..Default::default()
+    }
+}
+
+/// A framed panel on the surface (imports list).
+pub fn panel(_: &Theme) -> container::Style {
+    container::Style { background: Some(CHROME.into()), text_color: Some(TEXT), border: border(BORDER, 1.0, 14.0), ..Default::default() }
+}
+
 pub fn ghost(_: &Theme, status: button::Status) -> button::Style {
     let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
