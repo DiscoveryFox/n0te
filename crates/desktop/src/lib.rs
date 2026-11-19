@@ -4,9 +4,11 @@
 pub mod app;
 pub mod blocks;
 pub mod demo;
+pub mod latex;
 pub mod library;
 pub mod live;
 pub mod markdown;
+pub mod mdstyle;
 pub mod pages;
 pub mod palette;
 pub mod pdf;

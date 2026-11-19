@@ -92,6 +92,9 @@ fn main() {
             h.type_text("Frage an Prof: Gilt das auch für komplexe Folgen?");
         }
         h.events(&[]);
+        // Formulas render in the background (local TeX): give them a moment.
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        h.events(&[]);
         h.screenshot(out.join("m2-07-text.png"));
         // Notes docked next to the slide.
         h.message(Message::DoneText);
@@ -106,12 +109,25 @@ fn main() {
         h.screenshot(out.join("m2-08-notes.png"));
         // A full text page.
         h.message(Message::NewTextPage);
-        for (i, line) in ["# Mitschrift Vorlesung 8", "Heute: **Mittelwertsatz** und Anwendungen.", "```python", "def f(x): return x**2"].iter().enumerate() {
+        for (i, line) in ["# Mitschrift Vorlesung 8", "Heute: **Mittelwertsatz** und *Anwendungen*.", "```python", "def f(x): return x**2"].iter().enumerate() {
             if i > 0 {
                 h.press(iced::keyboard::key::Named::Enter);
             }
             h.type_text(line);
         }
+        // Out of the code block (Ctrl+Enter), then lists, a checkbox, formulas and a quote.
+        h.message(Message::Blocks(n0te_desktop::blocks::Msg::ExitBlock(h.app.text_page.as_ref().and_then(|t| t.doc.focus).unwrap_or(0))));
+        for (i, line) in ["1. Ableitung bilden", "Nullstellen finden", "", "[ ] Übung 4 rechnen", "", "Es gibt ein $\\xi \\in (a,b)$ mit $f'(\\xi) = \\frac{f(b)-f(a)}{b-a}$.", "$$"].iter().enumerate() {
+            if i > 0 {
+                h.press(iced::keyboard::key::Named::Enter);
+            }
+            h.type_text(line);
+        }
+        h.type_text("\\int_a^b f'(x)\\,dx = f(b) - f(a)");
+        h.message(Message::Blocks(n0te_desktop::blocks::Msg::ExitBlock(h.app.text_page.as_ref().and_then(|t| t.doc.focus).unwrap_or(0))));
+        h.type_text("> Merke: stetig auf [a,b], differenzierbar auf (a,b).");
+        h.events(&[]);
+        std::thread::sleep(std::time::Duration::from_millis(3000));
         h.events(&[]);
         h.screenshot(out.join("m2-09-textpage.png"));
     }

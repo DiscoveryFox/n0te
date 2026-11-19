@@ -62,6 +62,8 @@ pub enum Message {
     DismissStatus,
     /// A PDF tile arrived (redraw).
     TileReady,
+    /// A LaTeX formula finished rendering (redraw).
+    FormulaReady,
     FileDropped(PathBuf),
     ShowPdfImport(bool),
     ImportPdf(PathBuf),
@@ -341,6 +343,7 @@ impl App {
         Subscription::batch([
             keyboard::listen().map(Message::Key),
             Pdf::subscription().map(|_| Message::TileReady),
+            crate::latex::subscription().map(|_| Message::FormulaReady),
             Subscription::run(ticks).map(|_| Message::Tick),
             live::subscription().map(Message::Live),
             iced::event::listen_with(|e, _, _| match e {
@@ -540,6 +543,7 @@ impl App {
             }
             Message::NewText(sheet, x, y) => return self.new_text(&sheet, x, y),
             Message::EditText(sheet, id) => return self.edit_text(&sheet, &id),
+            Message::FormulaReady => {}
             Message::EditAction(a) => {
                 if let Some(e) = &mut self.editing {
                     let edit = a.is_edit();
@@ -1188,7 +1192,37 @@ impl App {
             button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(10)).padding([2, 8]).on_press(Message::CloseTextPage).style(theme::text_tool),
         ]
         .align_y(Alignment::Center);
-        let paper = container(column![header, Space::new().height(14), t.doc.view().map(Message::Blocks)])
+        // Word-like formatting for the block being edited.
+        let kind = t.doc.focus.and_then(|id| t.doc.index(id)).map(|i| t.doc.blocks[i].kind.clone());
+        let tb = |label: &'static str, msg: crate::blocks::Msg, on: bool, f: iced::Font| {
+            button(text(label).font(f).size(13).color(if on { theme::p().accent } else { theme::INK }))
+                .padding([3, 8])
+                .on_press(Message::Blocks(msg))
+                .style(theme::text_tool)
+        };
+        use crate::blocks::{Kind as K, Msg as B};
+        let italic = iced::Font { style: iced::font::Style::Italic, ..theme::SANS };
+        let tools = row![
+            tb("¶", B::SetKind(K::Paragraph), kind == Some(K::Paragraph), theme::SANS),
+            tb("H1", B::SetKind(K::Heading(1)), kind == Some(K::Heading(1)), theme::SANS_BOLD),
+            tb("H2", B::SetKind(K::Heading(2)), kind == Some(K::Heading(2)), theme::SANS_BOLD),
+            tb("H3", B::SetKind(K::Heading(3)), kind == Some(K::Heading(3)), theme::SANS_BOLD),
+            Space::new().width(10),
+            tb("B", B::Wrap("**"), false, theme::SANS_BOLD),
+            tb("I", B::Wrap("*"), false, italic),
+            tb("</>", B::Wrap("`"), false, theme::MONO),
+            tb("∑", B::Wrap("$"), false, theme::SANS),
+            Space::new().width(10),
+            tb("•", B::SetKind(K::Bullet), kind == Some(K::Bullet), theme::SANS),
+            tb("1.", B::SetKind(K::Numbered), kind == Some(K::Numbered), theme::SANS),
+            tb("☐", B::SetKind(K::Todo(false)), matches!(kind, Some(K::Todo(_))), theme::SANS),
+            tb("❝", B::SetKind(K::Quote), kind == Some(K::Quote), theme::SANS),
+            tb("$$", B::SetKind(K::Formula), kind == Some(K::Formula), theme::MONO),
+        ]
+        .spacing(2)
+        .align_y(Alignment::Center)
+        .wrap();
+        let paper = container(column![header, Space::new().height(8), tools, Space::new().height(12), t.doc.view().map(Message::Blocks)])
             .padding(Padding { top: 28.0, right: if t.docked { 28.0 } else { 64.0 }, bottom: 64.0, left: 28.0 })
             .max_width(if t.docked { 520.0 } else { 820.0 })
             .width(Length::Fill)
@@ -1323,7 +1357,8 @@ impl App {
                 .font(theme::SANS)
                 .padding(4)
                 .placeholder("Text, Markdown: # Titel, - Punkt, **fett**, $x^2$")
-                .style(theme::editor_on_paper_framed);
+                .style(theme::editor_on_paper_framed)
+                .highlight_with::<crate::mdstyle::MdInline>((), crate::mdstyle::format);
             out.push(pin(column![tools, container(editor).width(Length::Fixed(e.w * cam.zoom))].spacing(4)).x(x - 4.0).y(y - 32.0).into());
         }
         out
@@ -1433,6 +1468,19 @@ impl App {
                 self.show_settings = false;
             }
             return Task::none();
+        }
+        // Writing: Ctrl+B / Ctrl+I format like in a word processor (not the outline toggle).
+        if m.command() && !m.shift() && let Key::Character(c @ ("b" | "i")) = key.as_ref() {
+            let mark = if c == "b" { "**" } else { "*" };
+            if let Some(e) = &mut self.editing {
+                crate::blocks::wrap_in(&mut e.content, mark);
+                e.dirty = true;
+                e.last_change = Instant::now();
+                return iced::widget::operation::focus(editor_id());
+            }
+            if self.text_page.is_some() {
+                return self.update(Message::Blocks(crate::blocks::Msg::Wrap(mark)));
+            }
         }
         match (m.command(), key.as_ref()) {
             (true, Key::Character("k")) => return self.update(Message::OpenPalette),

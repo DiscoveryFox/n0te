@@ -15,8 +15,8 @@ use std::time::{Duration, Instant};
 use iced::keyboard::{Key, key::Named};
 use iced::widget::text_editor;
 use iced::widget::text_editor::{Action, Binding, Content, Cursor, Edit, KeyPress, Motion, Position};
-use iced::widget::{Space, column, container, row, text};
-use iced::{Element, Length, Padding, Task, widget};
+use iced::widget::{Space, column, container, mouse_area, row, text};
+use iced::{Alignment, Element, Font, Length, Padding, Task, font, widget};
 
 use crate::theme;
 
@@ -25,11 +25,33 @@ pub enum Kind {
     Paragraph,
     Heading(u8),
     Bullet,
+    Numbered,
+    /// A checklist item (ticked or not).
+    Todo(bool),
+    Quote,
     Code { lang: String },
     Formula,
 }
 
 impl Kind {
+    /// List-like blocks: Enter continues them, Enter on an empty one ends the list.
+    pub fn is_list(&self) -> bool {
+        matches!(self, Kind::Bullet | Kind::Numbered | Kind::Todo(_) | Kind::Quote)
+    }
+    /// Consecutive blocks of the same class are one Markdown list.
+    fn list_class(&self) -> u8 {
+        match self {
+            Kind::Bullet => 1,
+            Kind::Numbered => 2,
+            Kind::Todo(_) => 3,
+            Kind::Quote => 4,
+            _ => 0,
+        }
+    }
+    /// Text with inline Markdown (formatted while typing; formulas drawn when not edited).
+    fn is_text(&self) -> bool {
+        !matches!(self, Kind::Code { .. } | Kind::Formula)
+    }
     /// Code and formula blocks keep Enter as a line break.
     pub fn is_multiline(&self) -> bool {
         matches!(self, Kind::Code { .. } | Kind::Formula)
@@ -40,6 +62,10 @@ impl Kind {
             "##" => Kind::Heading(2),
             "###" => Kind::Heading(3),
             "-" => Kind::Bullet,
+            "1." => Kind::Numbered,
+            "[ ]" => Kind::Todo(false),
+            "[x]" => Kind::Todo(true),
+            ">" => Kind::Quote,
             "$$" => Kind::Formula,
             p if p.starts_with("```") => Kind::Code { lang: p[3..].to_string() },
             _ => Kind::Paragraph,
@@ -77,6 +103,13 @@ pub enum Msg {
     Right(u64),
     Undo,
     Redo,
+    /// The toolbar: paragraph kind of the block being edited (again: back to a paragraph).
+    SetKind(Kind),
+    /// The toolbar / Ctrl+B, Ctrl+I: bold, italic, code, formula around the selection.
+    Wrap(&'static str),
+    ToggleTodo(u64),
+    /// A click on a block shown rendered (with formulas): edit it.
+    FocusEnd(u64),
 }
 
 #[derive(Clone)]
@@ -129,7 +162,7 @@ impl Doc {
         let mut i = 0;
         let special = |l: &str| {
             let t = l.trim_start();
-            t.starts_with("# ") || t.starts_with("## ") || t.starts_with("### ") || t.starts_with("- ") || t.starts_with("* ") || t.starts_with("```") || t.trim() == "$$"
+            t.starts_with("# ") || t.starts_with("## ") || t.starts_with("### ") || t.starts_with("- ") || t.starts_with("* ") || t.starts_with("> ") || numbered(t).is_some() || t.starts_with("```") || t.trim() == "$$"
         };
         while i < lines.len() {
             let line = lines[i];
@@ -166,8 +199,24 @@ impl Doc {
                 i += 1;
                 continue;
             }
+            let todo = [("- [ ] ", "[ ]"), ("* [ ] ", "[ ]"), ("- [x] ", "[x]"), ("- [X] ", "[x]"), ("* [x] ", "[x]")].into_iter().find_map(|(p, k)| t.strip_prefix(p).map(|rest| (k, rest)));
+            if let Some((k, rest)) = todo {
+                items.push((k.into(), rest.to_string()));
+                i += 1;
+                continue;
+            }
             if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
                 items.push(("-".into(), rest.to_string()));
+                i += 1;
+                continue;
+            }
+            if let Some(rest) = numbered(t) {
+                items.push(("1.".into(), rest.to_string()));
+                i += 1;
+                continue;
+            }
+            if let Some(rest) = t.strip_prefix("> ") {
+                items.push((">".into(), rest.to_string()));
                 i += 1;
                 continue;
             }
@@ -187,11 +236,13 @@ impl Doc {
     pub fn to_markdown(&self) -> String {
         let mut out = String::new();
         let mut prev: Option<&Kind> = None;
+        let mut n = 0;
         for b in &self.blocks {
             let text = b.text();
             if let Some(p) = prev {
-                out.push_str(if *p == Kind::Bullet && b.kind == Kind::Bullet { "\n" } else { "\n\n" });
+                out.push_str(if p.is_list() && p.list_class() == b.kind.list_class() { "\n" } else { "\n\n" });
             }
+            n = if b.kind == Kind::Numbered { if prev == Some(&Kind::Numbered) { n + 1 } else { 1 } } else { 0 };
             match &b.kind {
                 Kind::Paragraph => out.push_str(&text),
                 Kind::Heading(n) => {
@@ -203,6 +254,9 @@ impl Doc {
                     out.push_str("- ");
                     out.push_str(&text);
                 }
+                Kind::Numbered => out.push_str(&format!("{n}. {text}")),
+                Kind::Todo(done) => out.push_str(&format!("- [{}] {text}", if *done { "x" } else { " " })),
+                Kind::Quote => out.push_str(&text.split('\n').map(|l| format!("> {l}")).collect::<Vec<_>>().join("\n")),
                 Kind::Code { lang } => out.push_str(&format!("```{lang}\n{text}\n```")),
                 Kind::Formula => out.push_str(&format!("$$\n{text}\n$$")),
             }
@@ -296,7 +350,46 @@ impl Doc {
                 }
                 None => Task::none(),
             },
+            Msg::SetKind(kind) => self.set_kind(kind),
+            Msg::Wrap(m) => self.wrap(m),
+            Msg::ToggleTodo(id) => {
+                if let Some(i) = self.index(id)
+                    && let Kind::Todo(done) = self.blocks[i].kind
+                {
+                    self.checkpoint(id, EditClass::Other, true);
+                    self.blocks[i].kind = Kind::Todo(!done);
+                }
+                Task::none()
+            }
+            Msg::FocusEnd(id) => {
+                let Some(i) = self.index(id) else { return Task::none() };
+                let end = end_position(&self.blocks[i].text());
+                self.focus_at(id, Cursor { position: end, selection: None })
+            }
         }
+    }
+
+    /// The paragraph kind of the block being edited; the same kind again: back to a paragraph.
+    fn set_kind(&mut self, kind: Kind) -> Task<Msg> {
+        let Some(id) = self.focus.or_else(|| self.blocks.last().map(|b| b.id)) else { return Task::none() };
+        let Some(i) = self.index(id) else { return Task::none() };
+        self.checkpoint(id, EditClass::Other, true);
+        let cur = self.blocks[i].content.cursor();
+        let same = self.blocks[i].kind == kind || matches!((&self.blocks[i].kind, &kind), (Kind::Todo(_), Kind::Todo(_)));
+        let kind = if same && kind != Kind::Paragraph { Kind::Paragraph } else { kind };
+        let text = self.blocks[i].text();
+        self.convert(i, kind, &text, cur.position)
+    }
+
+    /// Bold / italic / code / formula like in a word processor: around the selection (again:
+    /// off); at the cursor a pair to type into (again right away: gone again).
+    fn wrap(&mut self, m: &'static str) -> Task<Msg> {
+        let Some(id) = self.focus else { return Task::none() };
+        let Some(i) = self.index(id) else { return Task::none() };
+        self.checkpoint(id, EditClass::Other, true);
+        wrap_in(&mut self.blocks[i].content, m);
+        let cur = self.blocks[i].content.cursor();
+        self.focus_at(id, cur)
     }
 
     fn action(&mut self, id: u64, action: Action) -> Task<Msg> {
@@ -318,7 +411,8 @@ impl Doc {
     /// "# ", "## ", "### ", "- ", "* " and "$$" at the start of a paragraph convert it.
     fn markdown_shortcut(&mut self, i: usize) -> Task<Msg> {
         let b = &self.blocks[i];
-        if b.kind != Kind::Paragraph {
+        let para = b.kind == Kind::Paragraph;
+        if !para && b.kind != Kind::Bullet {
             return Task::none();
         }
         let cur = b.content.cursor();
@@ -327,12 +421,17 @@ impl Doc {
         }
         let first = b.content.line(0).map(|l| l.text.to_string()).unwrap_or_default();
         let head = &first[..cur.position.column.min(first.len())];
-        let kind = match head {
-            "# " => Kind::Heading(1),
-            "## " => Kind::Heading(2),
-            "### " => Kind::Heading(3),
-            "- " | "* " => Kind::Bullet,
-            "$$" => Kind::Formula,
+        let kind = match (head, para) {
+            ("# ", true) => Kind::Heading(1),
+            ("## ", true) => Kind::Heading(2),
+            ("### ", true) => Kind::Heading(3),
+            ("- " | "* ", true) => Kind::Bullet,
+            ("1. ", true) => Kind::Numbered,
+            ("> ", true) => Kind::Quote,
+            ("$$", true) => Kind::Formula,
+            // In a bullet: "[ ] " makes it a checklist item (typing "- [ ] " ends up here).
+            ("[ ] " | "[] ", _) => Kind::Todo(false),
+            ("[x] ", _) => Kind::Todo(true),
             _ => return Task::none(),
         };
         let rest = self.blocks[i].text()[head.len()..].to_string();
@@ -356,15 +455,16 @@ impl Doc {
             let lang = text[3..].to_string();
             return self.convert(i, Kind::Code { lang }, "", Position { line: 0, column: 0 });
         }
-        // Enter on an empty bullet leaves the list.
-        if b.kind == Kind::Bullet && text.is_empty() {
+        // Enter on an empty list item leaves the list.
+        if b.kind.is_list() && text.is_empty() {
             return self.convert(i, Kind::Paragraph, "", Position { line: 0, column: 0 });
         }
         let off = byte_offset(&b.content, b.content.cursor().position);
         let (head, tail) = text.split_at(off);
         let (head, tail) = (head.to_string(), tail.to_string());
         let next_kind = match &b.kind {
-            Kind::Bullet => Kind::Bullet,
+            Kind::Todo(_) => Kind::Todo(false),
+            k if k.is_list() => k.clone(),
             Kind::Heading(_) if !tail.is_empty() => b.kind.clone(),
             _ => Kind::Paragraph,
         };
@@ -476,11 +576,21 @@ impl Doc {
     }
 
     pub fn view(&self) -> Element<'_, Msg> {
-        let blocks = self.blocks.iter().map(|b| self.block_view(b));
+        let mut n = 0;
+        let mut prev_numbered = false;
+        let blocks: Vec<Element<'_, Msg>> = self
+            .blocks
+            .iter()
+            .map(|b| {
+                n = if b.kind == Kind::Numbered { if prev_numbered { n + 1 } else { 1 } } else { 0 };
+                prev_numbered = b.kind == Kind::Numbered;
+                self.block_view(b, n)
+            })
+            .collect();
         column(blocks).spacing(4).width(Length::Fill).into()
     }
 
-    fn block_view<'a>(&'a self, b: &'a Block) -> Element<'a, Msg> {
+    fn block_view<'a>(&'a self, b: &'a Block, number: usize) -> Element<'a, Msg> {
         let id = b.id;
         let kind = b.kind.clone();
         let multiline = kind.is_multiline();
@@ -490,14 +600,18 @@ impl Doc {
             Kind::Heading(2) => (theme::SANS_BOLD, 22.0, 1.3),
             Kind::Heading(_) => (theme::SANS_MEDIUM, 18.0, 1.35),
             Kind::Code { .. } | Kind::Formula => (theme::MONO, 13.5, 1.5),
+            Kind::Quote => (Font { style: font::Style::Italic, ..theme::SANS }, theme::BODY, 1.5),
             _ => (theme::SANS, theme::BODY, 1.5),
         };
+        let focused = self.focus == Some(id);
         let only_empty = self.blocks.len() == 1 && b.content.is_empty();
         let focused_empty = self.focus == Some(id) && b.content.is_empty();
         let placeholder = match &b.kind {
             Kind::Paragraph if only_empty || focused_empty => "Schreiben … ( # Überschrift   - Liste   ``` Code   $$ Formel )",
             Kind::Heading(_) => "Überschrift",
-            Kind::Bullet => "Listenpunkt",
+            Kind::Bullet | Kind::Numbered => "Listenpunkt",
+            Kind::Todo(_) => "Aufgabe",
+            Kind::Quote => "Zitat",
             Kind::Formula => "LaTeX, z. B. \\int_a^b f(x)\\,dx",
             Kind::Code { .. } => "Code",
             _ => "",
@@ -512,9 +626,14 @@ impl Doc {
             .line_height(line)
             .padding(Padding::from([2, 0]))
             .style(theme::editor_on_paper);
+        // Inline marks (**, *, `, $): shown formatted without the marks unless being edited.
+        let has_marks = b.kind.is_text() && !crate::mdstyle::pairs(&b.text()).is_empty();
         let editor: Element<'a, Msg> = match &b.kind {
             Kind::Code { lang } => editor.highlight(if lang.is_empty() { "txt" } else { lang }, iced::highlighter::Theme::InspiredGitHub).into(),
-            _ => editor.into(),
+            Kind::Formula => editor.into(),
+            // Formatted text, not being edited: drawn like the finished page (click edits it).
+            _ if has_marks && !focused => rendered_text(b, font, size),
+            _ => editor.highlight_with::<crate::mdstyle::MdInline>((), crate::mdstyle::format).into(),
         };
         // Every block has the same shape (gutter + body) so the widget tree stays stable.
         let gutter: Element<'a, Msg> = match &b.kind {
@@ -522,6 +641,16 @@ impl Doc {
                 .padding(Padding { top: 11.0, left: 8.0, ..Padding::ZERO })
                 .into(),
             Kind::Heading(n) => text(format!("H{n}")).font(theme::MONO).size(10).color(theme::PAPER_RULE).into(),
+            Kind::Numbered => container(text(format!("{number}.")).font(theme::MONO_BOLD).size(12).color(theme::p().accent)).padding(Padding { top: 4.0, ..Padding::ZERO }).into(),
+            Kind::Todo(done) => iced::widget::button(text(if *done { "☑" } else { "☐" }).size(17).color(theme::p().accent))
+                .padding(Padding { top: 1.0, left: 2.0, ..Padding::ZERO })
+                .on_press(Msg::ToggleTodo(id))
+                .style(iced::widget::button::text)
+                .into(),
+            Kind::Quote => container(Space::new().width(3).height(22))
+                .padding(Padding { top: 3.0, left: 10.0, ..Padding::ZERO })
+                .style(|_| container::Style { background: Some(theme::PAPER_RULE.into()), ..Default::default() })
+                .into(),
             _ => Space::new().into(),
         };
         let body: Element<'a, Msg> = match &b.kind {
@@ -532,13 +661,21 @@ impl Doc {
             .padding(Padding { top: 6.0, right: 12.0, bottom: 10.0, left: 14.0 })
             .style(theme::code_box)
             .into(),
+            // Not being edited: the formula itself (click edits it).
+            Kind::Formula if !focused && !b.content.is_empty() => mouse_area(
+                container(formula_view(&b.text(), true, 17.0)).center_x(Length::Fill).padding(Padding { top: 10.0, right: 12.0, bottom: 10.0, left: 12.0 }),
+            )
+            .on_press(Msg::FocusEnd(id))
+            .interaction(iced::mouse::Interaction::Text)
+            .into(),
             Kind::Formula => container(column![
                 row![
                     text("$$").font(theme::MONO_BOLD).size(10).color(theme::p().accent),
                     Space::new().width(Length::Fill),
-                    text("FORMEL · VORSCHAU FOLGT").font(theme::MONO).size(10).color(theme::PAPER_MUTED)
+                    text("FORMEL · LaTeX").font(theme::MONO).size(10).color(theme::PAPER_MUTED)
                 ],
-                editor
+                editor,
+                container(formula_view(&b.text(), true, 17.0)).center_x(Length::Fill).padding(Padding { top: 8.0, ..Padding::ZERO }),
             ])
             .padding(Padding { top: 6.0, right: 12.0, bottom: 10.0, left: 14.0 })
             .style(theme::formula_box)
@@ -599,6 +736,47 @@ fn byte_offset(content: &Content, pos: Position) -> usize {
     off.saturating_sub(1)
 }
 
+/// Bold / italic / code / formula marks `m` like in a word processor: around the selection
+/// (already wrapped: removed); at the cursor a pair to type into, or an empty pair right at
+/// the cursor taken away again.
+pub fn wrap_in(content: &mut Content, m: &str) {
+    let cursor = content.cursor();
+    match content.selection().filter(|s| !s.is_empty()) {
+        Some(sel) => {
+            let inner = sel.strip_prefix(m).and_then(|x| x.strip_suffix(m)).filter(|_| sel.len() >= 2 * m.len());
+            let new = inner.map(str::to_string).unwrap_or_else(|| format!("{m}{sel}{m}"));
+            content.perform(Action::Edit(Edit::Paste(std::sync::Arc::new(new))));
+        }
+        None => {
+            let mut text = content.text();
+            if text.ends_with('\n') {
+                text.pop();
+            }
+            let off = byte_offset(content, cursor.position).min(text.len());
+            if text[..off].ends_with(m) && text[off..].starts_with(m) {
+                for _ in 0..m.len() {
+                    content.perform(Action::Edit(Edit::Backspace));
+                    content.perform(Action::Edit(Edit::Delete));
+                }
+            } else {
+                content.perform(Action::Edit(Edit::Paste(std::sync::Arc::new(format!("{m}{m}")))));
+                for _ in 0..m.len() {
+                    content.perform(Action::Move(Motion::Left));
+                }
+            }
+        }
+    }
+}
+
+/// "12. rest" → "rest".
+fn numbered(t: &str) -> Option<&str> {
+    let digits = t.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || digits > 3 {
+        return None;
+    }
+    t[digits..].strip_prefix(". ")
+}
+
 fn end_position(text: &str) -> Position {
     let line = text.matches('\n').count();
     let column = text.rsplit('\n').next().map(str::len).unwrap_or(0);
@@ -619,6 +797,32 @@ fn clamp_cursor(content: &Content, c: Cursor) -> Cursor {
     Cursor { position: fix(c.position), selection: c.selection.map(fix) }
 }
 
+/// A text block drawn with its formulas (and bold / italic / code): words in a wrapping row,
+/// formulas as images. A click puts the cursor at its end.
+fn rendered_text<'a>(b: &'a Block, font: Font, size: f32) -> Element<'a, Msg> {
+    let mut lines = column![].spacing(4);
+    for line in b.text().split('\n') {
+        lines = lines.push(row(crate::markdown::inline_flow(line, size, font, theme::INK)).spacing(size * 0.28).align_y(Alignment::Center).wrap());
+    }
+    mouse_area(container(lines).padding(Padding::from([2, 0])).width(Length::Fill))
+        .on_press(Msg::FocusEnd(b.id))
+        .interaction(iced::mouse::Interaction::Text)
+        .into()
+}
+
+/// A LaTeX formula (rendered by the local TeX; its source while that runs or if it fails).
+pub fn formula_view<'a, M: 'a>(latex: &str, display: bool, size: f32) -> Element<'a, M> {
+    match crate::latex::formula(latex, display) {
+        crate::latex::Formula::Ready { handle, w, h } => {
+            // TeX's 10 pt glyphs run small next to Space Grotesk at the same size.
+            let k = size / 10.0 * 1.2;
+            iced::widget::svg(handle).width(w * k).height(h * k).into()
+        }
+        crate::latex::Formula::Pending => text(format!("${latex}$")).font(theme::MONO).size(size * 0.85).color(theme::PAPER_MUTED).into(),
+        crate::latex::Formula::Failed(e) => text(format!("${latex}$  ⚠ {e}")).font(theme::MONO).size(size * 0.8).color(theme::p().accent).into(),
+    }
+}
+
 /// A small red square: the bullet glyph (no font dependency).
 fn bullet<'a>() -> Element<'a, Msg> {
     container(Space::new().width(6).height(6))
@@ -629,6 +833,50 @@ fn bullet<'a>() -> Element<'a, Msg> {
 #[cfg(test)]
 mod markdown_tests {
     use super::*;
+
+    #[test]
+    fn lists_checklists_and_quotes_round_trip() {
+        let md = "1. eins\n2. zwei\n\n- [ ] offen\n- [x] erledigt\n\n> Zitat\n\nText mit $x^2$";
+        let doc = Doc::from_markdown(md);
+        let kinds: Vec<Kind> = doc.blocks.iter().map(|b| b.kind.clone()).collect();
+        assert_eq!(kinds, vec![Kind::Numbered, Kind::Numbered, Kind::Todo(false), Kind::Todo(true), Kind::Quote, Kind::Paragraph]);
+        assert_eq!(doc.to_markdown(), md);
+    }
+
+    #[test]
+    fn wrap_works_like_a_word_processor() {
+        let sel = |c: &mut Content, a: usize, b: usize| c.move_to(Cursor { position: Position { line: 0, column: b }, selection: Some(Position { line: 0, column: a }) });
+        let mut c = Content::with_text("hello world");
+        sel(&mut c, 0, 5);
+        wrap_in(&mut c, "**");
+        assert_eq!(c.text().trim_end(), "**hello** world");
+        // The wrapped word selected again: B takes it off.
+        sel(&mut c, 0, 9);
+        wrap_in(&mut c, "**");
+        assert_eq!(c.text().trim_end(), "hello world");
+        // At the cursor: a pair to type into; B again right away: gone.
+        let mut c = Content::with_text("ab");
+        c.move_to(Cursor { position: Position { line: 0, column: 1 }, selection: None });
+        wrap_in(&mut c, "*");
+        assert_eq!(c.text().trim_end(), "a**b");
+        assert_eq!(c.cursor().position.column, 2);
+        wrap_in(&mut c, "*");
+        assert_eq!(c.text().trim_end(), "ab");
+    }
+
+    #[test]
+    fn toolbar_sets_and_toggles_the_kind() {
+        let mut doc = Doc::from_markdown("Absatz");
+        let id = doc.blocks[0].id;
+        doc.focus = Some(id);
+        let _ = doc.update(Msg::SetKind(Kind::Heading(2)));
+        assert_eq!(doc.blocks[0].kind, Kind::Heading(2));
+        let _ = doc.update(Msg::SetKind(Kind::Todo(false)));
+        let _ = doc.update(Msg::ToggleTodo(id));
+        assert_eq!(doc.to_markdown(), "- [x] Absatz");
+        let _ = doc.update(Msg::SetKind(Kind::Todo(false)));
+        assert_eq!(doc.blocks[0].kind, Kind::Paragraph, "the same list kind again: back to a paragraph");
+    }
 
     #[test]
     fn markdown_round_trips_through_blocks() {
