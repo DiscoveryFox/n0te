@@ -87,6 +87,10 @@ pub struct Status {
     pub joined: Vec<JoinedInfo>,
     /// (notebook, unix seconds of the last change received or sent).
     pub last_sync: Vec<(String, u64)>,
+    /// The home relay this device is reachable through (None: only directly / on the LAN).
+    pub relay: Option<String>,
+    /// Direct addresses (LAN / public) known for this device.
+    pub direct_addrs: usize,
 }
 
 /// Who is on the other end of a session.
@@ -352,7 +356,10 @@ impl Engine {
         drop(st);
         let mut last_sync: Vec<(String, u64)> = inner.last_sync.lock().expect("sync").iter().map(|(k, v)| (k.clone(), *v)).collect();
         last_sync.sort();
-        Status { node_id: inner.ep.id().to_string(), devices: inner.device_infos(), guests, joined, last_sync }
+        let addr = inner.ep.addr();
+        let relay = addr.relay_urls().next().map(|u| u.to_string());
+        let direct_addrs = addr.ip_addrs().count();
+        Status { node_id: inner.ep.id().to_string(), devices: inner.device_infos(), guests, joined, last_sync, relay, direct_addrs }
     }
 
     /// Tell the engine a notebook was saved here (it also notices by itself within a second).

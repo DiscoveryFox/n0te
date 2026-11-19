@@ -16,6 +16,7 @@ use n0te_core::notebook::{self as nbm, Background, OutlineRow, SheetSpec, Side};
 
 uniffi::setup_scaffolding!();
 
+mod android;
 mod edit;
 pub mod sync;
 

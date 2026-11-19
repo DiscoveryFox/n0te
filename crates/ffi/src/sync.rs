@@ -100,6 +100,11 @@ pub struct FfiSyncStatus {
     pub guests: Vec<FfiGuest>,
     pub joined: Vec<FfiJoined>,
     pub last_sync: Vec<FfiLastSync>,
+    /// Home relay URL (None: reachable only directly / on the LAN).
+    pub relay: Option<String>,
+    pub direct_addrs: u32,
+    /// Android: iroh reads the system's DNS servers (false: public fallback servers).
+    pub system_dns: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -200,6 +205,9 @@ impl SyncEngine {
                 guests: s.guests.into_iter().map(|g| FfiGuest { invite: g.invite, notebook: g.notebook, name: g.name }).collect(),
                 joined: s.joined.into_iter().map(joined).collect(),
                 last_sync: s.last_sync.into_iter().map(|(notebook, at)| FfiLastSync { notebook, at }).collect(),
+                relay: s.relay,
+                direct_addrs: s.direct_addrs as u32,
+                system_dns: crate::android::context_installed(),
             })
         })
     }

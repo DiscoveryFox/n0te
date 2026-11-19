@@ -15,3 +15,6 @@ n0te-pdf.workspace = true
 n0te-sync.workspace = true
 uniffi.workspace = true
 thiserror.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni-sys = "0.3"

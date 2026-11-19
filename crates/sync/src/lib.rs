@@ -27,6 +27,18 @@ mod engine;
 mod state;
 
 pub use engine::{DeviceInfo, Engine, EngineOptions, GuestInfo, InviteInfo, JoinedInfo, Status};
+
+/// Android: lets iroh read the active network's DNS servers over JNI. Without it iroh falls
+/// back to public nameservers, which restricted networks (libraries, eduroam) often block, so
+/// the relays could not be found and only the LAN would work.
+///
+/// # Safety
+/// `java_vm` must be the process's `JavaVM*`, `context` a JNI global reference to the
+/// application context; both stay valid until the process exits. Call at most once.
+#[cfg(target_os = "android")]
+pub unsafe fn install_android_context(java_vm: *mut std::ffi::c_void, context: *mut std::ffi::c_void) {
+    unsafe { iroh::dns::install_android_jni_context(java_vm, context) }
+}
 pub use proto::{LiveBrush, Role};
 
 #[derive(Debug, thiserror::Error)]

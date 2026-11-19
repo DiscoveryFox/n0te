@@ -307,6 +307,10 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
         "status" => {
             let s = engine.status();
             let mut out = vec![format!("Gerät {}", s.node_id)];
+            out.push(match &s.relay {
+                Some(r) => format!("  Netz: Relay {r} · {} direkte Adressen", s.direct_addrs),
+                None => format!("  Netz: kein Relay (nur direkt/LAN) · {} direkte Adressen", s.direct_addrs),
+            });
             out.extend(s.devices.iter().map(|d| format!("  {} {} ({})", if d.online { "●" } else { "○" }, d.name, short(&d.id))));
             out.extend(s.guests.iter().map(|g| format!("  Gast {} → {}", g.name, g.notebook)));
             out.extend(s.joined.iter().map(|j| format!("  beigetreten: {} von {}{}", j.title, j.owner_name, if j.revoked { " (widerrufen)" } else if j.online { " ●" } else { "" })));
