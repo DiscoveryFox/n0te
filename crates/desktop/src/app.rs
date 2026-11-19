@@ -219,6 +219,8 @@ pub struct App {
     pub share: Option<Vec<live::Invite>>,
     /// The newest invite link as a QR code (the view borrows it).
     pub share_qr: Option<iced::widget::qr_code::Data>,
+    /// The pairing code as a QR code (the tablet scans it; no n0bridge needed).
+    pub pair_qr: Option<iced::widget::qr_code::Data>,
     pub joining: Option<String>,
     /// History panel open: checkpoints (unix time, "date  size").
     pub history: Option<Vec<(u64, String)>>,
@@ -306,6 +308,7 @@ impl App {
             pair_code: None,
             share: None,
             share_qr: None,
+            pair_qr: None,
             joining: None,
             history: None,
             stamp: 0,
@@ -672,7 +675,10 @@ impl App {
                 self.send_presence();
             }
             Message::PairStart => match live::request(&["pair-code"]) {
-                Ok(code) => self.pair_code = Some(code),
+                Ok(code) => {
+                    self.pair_qr = iced::widget::qr_code::Data::new(code.as_bytes()).ok();
+                    self.pair_code = Some(code);
+                }
                 Err(e) => self.say(format!("Koppeln: {e}")),
             },
             Message::PairToTablet => {
@@ -898,6 +904,7 @@ impl App {
                 }
                 if let LiveEvent::Paired { name, .. } = &e {
                     self.pair_code = None;
+                    self.pair_qr = None;
                     self.say(format!("Gekoppelt mit {name}"));
                 }
                 self.devices = live::devices();
@@ -1715,16 +1722,24 @@ impl App {
             None => col = col.push(button(text("TABLET KOPPELN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairStart).style(theme::tab(false))),
             Some(code) => {
                 col = col.push(text("Koppel-Code (15 Minuten gültig, einmal):").size(12).color(theme::p().muted));
+                // The QR code: the tablet scans it (n0te → Einstellungen → QR SCANNEN).
+                if let Some(data) = &self.pair_qr {
+                    col = col.push(
+                        row![
+                            container(iced::widget::qr_code(data).cell_size(4)).padding(10).style(|_| container::Style { background: Some(iced::Color::WHITE.into()), ..Default::default() }),
+                            Space::new().width(14),
+                            text("Am Tablet: n0te → Einstellungen → LAPTOP (SYNC) → QR SCANNEN und diesen Code ansehen. Dafür braucht es kein n0bridge.").size(12).color(theme::p().muted).width(Length::Fixed(260.0)),
+                        ]
+                        .align_y(Alignment::Center),
+                    );
+                }
                 col = col.push(text_input("", code).size(12).font(theme::MONO).padding(8));
-                col = col.push(
-                    row![
-                        button(text("AN TABLET SCHICKEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairToTablet).style(theme::accent_button),
-                        Space::new().width(8),
-                        button(text("KOPIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::CopyText(code.clone())).style(theme::ghost),
-                    ]
-                    .align_y(Alignment::Center),
-                );
-                col = col.push(text("Auf dem Tablet: n0te → Einstellungen → LAPTOP KOPPELN (fügt den Code aus der Zwischenablage ein).").size(12).color(theme::p().muted));
+                let mut buttons = row![button(text("KOPIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::CopyText(code.clone())).style(theme::ghost)].align_y(Alignment::Center);
+                // With n0bridge on both devices the code can go straight to the tablet's clipboard.
+                if n0bridge_installed() {
+                    buttons = buttons.push(Space::new().width(8)).push(button(text("AN TABLET SCHICKEN (n0bridge)").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairToTablet).style(theme::ghost));
+                }
+                col = col.push(buttons);
             }
         }
         col.into()
@@ -1946,6 +1961,11 @@ async fn n0bridge(args: Vec<String>) -> Result<String, String> {
     let out = std::process::Command::new("n0bridge").args(&args).output().map_err(|e| format!("n0bridge nicht gefunden ({e})"))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
+}
+
+/// Whether the n0bridge CLI is installed (then codes can go straight to the tablet).
+fn n0bridge_installed() -> bool {
+    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("n0bridge").is_file()))
 }
 
 /// The paired tablet's n0bridge device id (`n0bridge devices`), since not every n0bridge
