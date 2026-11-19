@@ -393,6 +393,10 @@ impl SheetHandle {
     pub fn transform(&self, ids: Vec<String>, dx: f32, dy: f32, scale: f32, ox: f32, oy: f32) -> R<()> {
         Ok(lock(&self.sheet).transform(&ids, dx, dy, scale, ox, oy)?)
     }
+    /// Turns and stretches strokes about (ax, ay) by the complex factor re + i·im (width kept).
+    pub fn spin(&self, ids: Vec<String>, ax: f32, ay: f32, re: f32, im: f32) -> R<()> {
+        Ok(lock(&self.sheet).spin(&ids, ax, ay, re, im)?)
+    }
     pub fn save(&self) -> R<()> {
         let id = self.notebook.id();
         Ok(self.notebook.lib.inner.save_sheet(&id, &self.sheet_id, &lock(&self.sheet))?)

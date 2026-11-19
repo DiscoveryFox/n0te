@@ -311,6 +311,28 @@ impl Sheet {
         Ok(())
     }
 
+    /// Turns and stretches strokes about the anchor (ax, ay): every point p becomes
+    /// a + (re + i·im)·(p − a) in complex terms (angle and length of (re, im) are the rotation
+    /// and the stretch). The width stays: dragging a line's end changes its length and angle,
+    /// not its thickness.
+    pub fn spin(&self, ids: &[String], ax: f32, ay: f32, re: f32, im: f32) -> Result<()> {
+        if !(re.is_finite() && im.is_finite()) || re * re + im * im < 1e-6 {
+            return Err(Error::Invalid("bad rotation".into()));
+        }
+        for id in ids {
+            if let Some(mut s) = self.stroke(id)? {
+                for p in &mut s.points {
+                    let (dx, dy) = (p.x - ax, p.y - ay);
+                    p.x = ax + re * dx - im * dy;
+                    p.y = ay + im * dx + re * dy;
+                }
+                self.objects.insert(id, LoroValue::Binary(encode_stroke(&s.brush, &s.points).into()))?;
+            }
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
     pub fn stroke(&self, id: &str) -> Result<Option<Stroke>> {
         match self.objects.get(id) {
             Some(ValueOrContainer::Value(LoroValue::Binary(b))) => decode_stroke(id, &b).map(Some),
@@ -562,6 +584,28 @@ mod tests {
         s.remove(&[b.clone(), "nope".into()]).unwrap();
         assert_eq!(s.len(), 1);
         assert!(s.stroke(&b).unwrap().is_none());
+    }
+
+    #[test]
+    fn spin_turns_and_stretches_about_an_end_keeping_the_width() {
+        let s = Sheet::create(8).unwrap();
+        // A line from (10, 10) to (20, 10).
+        let line: Vec<InkPoint> = (0..=10).map(|i| InkPoint { x: 10.0 + i as f32, y: 10.0, pressure: 0.5, t_ms: i * 5 }).collect();
+        let a = s.add_stroke(Brush::default(), &line).unwrap();
+        let w = s.stroke(&a).unwrap().unwrap().brush.width;
+        // Its end dragged from (20, 10) to (10, 30): turned 90° and twice as long, about the start.
+        let (ax, ay) = (10.0f32, 10.0f32);
+        let (ox, oy) = (20.0 - ax, 10.0 - ay);
+        let (nx, ny) = (10.0 - ax, 30.0 - ay);
+        let d = ox * ox + oy * oy;
+        let (re, im) = ((nx * ox + ny * oy) / d, (ny * ox - nx * oy) / d);
+        s.spin(std::slice::from_ref(&a), ax, ay, re, im).unwrap();
+        let st = s.stroke(&a).unwrap().unwrap();
+        let (f, l) = (st.points[0], st.points[st.points.len() - 1]);
+        assert!((f.x - 10.0).abs() < 0.05 && (f.y - 10.0).abs() < 0.05, "start stays: {f:?}");
+        assert!((l.x - 10.0).abs() < 0.05 && (l.y - 30.0).abs() < 0.05, "end follows: {l:?}");
+        assert_eq!(st.brush.width, w, "the width stays");
+        assert!(s.spin(std::slice::from_ref(&a), 0.0, 0.0, 0.0, 0.0).is_err());
     }
 
     #[test]
