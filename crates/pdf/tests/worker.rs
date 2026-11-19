@@ -173,9 +173,9 @@ fn export_through_the_worker() {
     let line: Vec<InkPoint> = (0..=40).map(|i| InkPoint { x: 100.0 + i as f32 * 7.5, y: 300.0, pressure: 0.5, t_ms: i * 8 }).collect();
     let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000, kind: 0 };
     let sheets = vec![
-        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)], paper: None, texts: vec![] },
-        ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)], paper: None, texts: vec![] },
-        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![] },
+        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)], paper: None, texts: vec![], images: vec![] },
+        ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)], paper: None, texts: vec![], images: vec![] },
+        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![], images: vec![] },
     ];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     assert_eq!(out.page_count(), 3);
@@ -185,7 +185,7 @@ fn export_through_the_worker() {
         let img = out.render_page(p, out.page_size(p).unwrap().width as u32).unwrap();
         assert_eq!(pixel(&img, 250, 300), [0, 0, 0, 255], "ink on page {p}");
     }
-    let missing = [ExportSheet { source: SheetSource::Pdf { doc: "7".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![] }];
+    let missing = [ExportSheet { source: SheetSource::Pdf { doc: "7".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![], images: vec![] }];
     assert!(w.export(0, &missing).is_err());
 }
 
@@ -198,6 +198,7 @@ fn export_draws_paper_ruling_under_no_ink() {
         strokes: vec![],
         paper: Some(n0te_pdf::Paper { background: Background::Grid, spacing: 20.0 }),
         texts: vec![],
+        images: vec![],
     }];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     let img = out.render_page(0, 400).unwrap(); // 2 px per point
@@ -217,6 +218,7 @@ fn export_typesets_text_boxes_that_pdf_readers_can_read() {
         strokes: vec![],
         paper: None,
         texts: vec![n0te_pdf::PdfText { x: 60.0, y: 80.0, w: 300.0, size: 14.0, text: text.into() }],
+        images: vec![],
     }];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     let read = out.page_text(0).unwrap().text();
@@ -274,4 +276,27 @@ fn notebook_import_and_export_round_trip() {
     assert_eq!(pixel(&img, 20, 20), [30, 90, 200, 255], "the blue rectangle");
     drop((w, w2));
     std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A 16 × 8 px red JPEG.
+const RED_JPEG: &[u8] = &[255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67, 0, 3, 2, 2, 3, 2, 2, 3, 3, 3, 3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7, 7, 6, 8, 12, 10, 12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13, 14, 17, 14, 11, 11, 16, 22, 16, 17, 19, 20, 21, 21, 21, 12, 15, 23, 24, 22, 20, 24, 18, 20, 21, 20, 255, 219, 0, 67, 1, 3, 4, 4, 5, 4, 5, 9, 5, 5, 9, 20, 13, 11, 13, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 255, 192, 0, 17, 8, 0, 8, 0, 16, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0, 0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129, 145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23, 24, 25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 196, 0, 31, 1, 0, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 17, 0, 2, 1, 2, 4, 4, 3, 4, 7, 5, 4, 4, 0, 1, 2, 119, 0, 1, 2, 3, 17, 4, 5, 33, 49, 6, 18, 65, 81, 7, 97, 113, 19, 34, 50, 129, 8, 20, 66, 145, 161, 177, 193, 9, 35, 51, 82, 240, 21, 98, 114, 209, 10, 22, 36, 52, 225, 37, 241, 23, 24, 25, 26, 38, 39, 40, 41, 42, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74, 83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118, 119, 120, 121, 122, 130, 131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151, 152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183, 184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215, 216, 217, 218, 226, 227, 228, 229, 230, 231, 232, 233, 234, 242, 243, 244, 245, 246, 247, 248, 249, 250, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 241, 42, 40, 162, 191, 42, 63, 191, 79, 255, 217];
+
+#[test]
+fn export_embeds_images_upright_where_they_are_placed() {
+    assert_eq!(n0te_pdf::jpeg_info(RED_JPEG), Some((16, 8, 3)));
+    let e = engine();
+    let (w, _rx, _) = worker(e, vec![make_pdf(&e, 1)], 4);
+    let sheets = vec![ExportSheet {
+        source: SheetSource::Blank { width: 200.0, height: 200.0 },
+        strokes: vec![],
+        paper: None,
+        texts: vec![],
+        images: vec![n0te_pdf::PdfImage { jpeg: RED_JPEG.to_vec(), x: 20.0, y: 30.0, w: 100.0, h: 50.0 }],
+    }];
+    let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
+    let img = out.render_page(0, 200).unwrap(); // 1 px per point
+    let inside = pixel(&img, 70, 55);
+    assert!(inside[0] > 180 && inside[1] < 80 && inside[2] < 80, "image drawn at (20, 30) 100 × 50: {inside:?}");
+    assert_eq!(pixel(&img, 70, 90), [255, 255, 255, 255], "below it the page stays white");
+    assert_eq!(pixel(&img, 10, 55), [255, 255, 255, 255], "left of it too");
 }

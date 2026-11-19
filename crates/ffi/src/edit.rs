@@ -50,6 +50,17 @@ impl SheetHandle {
             .map(|t| crate::FfiTextBox { id: t.id, x: t.x, y: t.y, w: t.w, size: t.size, text: t.text })
             .collect()
     }
+    /// Places a stored blob as an image; returns its object id.
+    pub fn add_image(&self, blob: String, x: f32, y: f32, w: f32, h: f32) -> R<String> {
+        Ok(lock(&self.sheet).add_image(&blob, x, y, w, h)?)
+    }
+    pub fn images(&self) -> Vec<crate::FfiImage> {
+        lock(&self.sheet).images().into_iter().map(|i| crate::FfiImage { id: i.id, blob: i.blob, x: i.x, y: i.y, w: i.w, h: i.h }).collect()
+    }
+    pub fn place_image(&self, id: String, x: f32, y: f32, w: f32, h: f32) -> R<()> {
+        Ok(lock(&self.sheet).place_image(&id, x, y, w, h)?)
+    }
+
     pub fn add_text_box(&self, x: f32, y: f32, w: f32, size: f32, text: String) -> R<String> {
         Ok(lock(&self.sheet).add_text_box(x, y, w, size, &text)?)
     }

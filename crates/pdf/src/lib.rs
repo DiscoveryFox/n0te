@@ -50,7 +50,7 @@ pub use pdfium_render;
 use pdfium_render::prelude::{PdfDocument, PdfPage, PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryConfig};
 
 pub use export::{ExportPage, PageSource, Stroke};
-pub use ink_writer::{INK_LAYER_NAME, Paper, add_ink, add_ink_and_paper, add_ink_paper_text, hide_ink};
+pub use ink_writer::{INK_LAYER_NAME, Paper, PdfImage, add_ink, add_ink_and_paper, add_ink_paper_text, add_ink_paper_text_images, hide_ink, jpeg_info};
 pub use text_layout::PdfText;
 pub use render::{Rgba, Tile, page_pixels, tiles};
 pub use text::{PageText, TextChar};

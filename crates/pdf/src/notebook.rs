@@ -77,6 +77,17 @@ pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: im
 
 /// [`export_sheets`] with each sheet's text boxes too (`content` returns strokes and boxes).
 pub fn export_sheets_with_text(nb: &Notebook, selected: Option<&[String]>, mut content: impl FnMut(&str) -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>)>) -> Result<Vec<ExportSheet>> {
+    export_sheets_with_images(nb, selected, |id| content(id).map(|(s, t)| (s, t, Vec::new())), |_| None)
+}
+
+/// [`export_sheets_with_text`] with each sheet's images too: `content` also returns the images,
+/// `blob` their bytes (JPEG is embedded; images whose bytes are missing are left out).
+pub fn export_sheets_with_images(
+    nb: &Notebook,
+    selected: Option<&[String]>,
+    mut content: impl FnMut(&str) -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>, Vec<sheet::ImageObj>)>,
+    blob: impl Fn(&str) -> Option<Vec<u8>>,
+) -> Result<Vec<ExportSheet>> {
     let mut specs: HashMap<String, SheetSpec> = HashMap::new();
     for row in nb.outline(true) {
         if let OutlineRow::Sheet { sheet_id, spec, left, right, .. } = row {
@@ -100,7 +111,9 @@ pub fn export_sheets_with_text(nb: &Notebook, selected: Option<&[String]>, mut c
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         let spec = &specs[&id];
-        let (strokes, boxes) = content(&id)?;
+        let (strokes, boxes, imgs) = content(&id)?;
+        let images: Vec<crate::ink_writer::PdfImage> =
+            imgs.into_iter().filter_map(|i| blob(&i.blob).map(|jpeg| crate::ink_writer::PdfImage { jpeg, x: i.x, y: i.y, w: i.w, h: i.h })).collect();
         let mut ink: Vec<(Vec<InkPoint>, Brush)> = strokes.into_iter().map(|s| (s.points, s.brush)).collect();
         let texts: Vec<crate::text_layout::PdfText> = boxes.into_iter().filter(|t| !t.text.trim().is_empty()).map(|t| crate::text_layout::PdfText { x: t.x, y: t.y, w: t.w, size: t.size, text: t.text }).collect();
         let source = match &spec.pdf {
@@ -112,7 +125,7 @@ pub fn export_sheets_with_text(nb: &Notebook, selected: Option<&[String]>, mut c
             },
         };
         let paper = (spec.pdf.is_none() && !spec.is_board()).then_some(crate::ink_writer::Paper { background: spec.background, spacing: spec.spacing });
-        out.push(ExportSheet { source, strokes: ink, paper, texts });
+        out.push(ExportSheet { source, strokes: ink, paper, texts, images });
     }
     Ok(out)
 }

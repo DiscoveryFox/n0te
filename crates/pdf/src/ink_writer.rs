@@ -106,13 +106,58 @@ pub fn add_ink_and_paper(pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option
 
 /// [`add_ink_and_paper`] plus text boxes per page (`texts[i]`), typeset with the standard PDF
 /// fonts inside the ink layer, under the strokes.
-pub fn add_ink_paper_text(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]]) -> Result<Vec<u8>> {
+pub fn add_ink_paper_text(pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]]) -> Result<Vec<u8>> {
+    add_ink_paper_text_images(pdf, pages, papers, texts, &[])
+}
+
+/// An image on an exported page: JPEG bytes (embedded as they are) placed at (x, y), w × h
+/// points in displayed-page coordinates. Other formats are skipped.
+#[derive(Debug, Clone)]
+pub struct PdfImage {
+    pub jpeg: Vec<u8>,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
+/// Width, height and colour components of a baseline or progressive JPEG.
+pub fn jpeg_info(data: &[u8]) -> Option<(u32, u32, u8)> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2;
+    while i + 9 < data.len() {
+        if data[i] != 0xFF {
+            i += 1;
+            continue;
+        }
+        let marker = data[i + 1];
+        let len = u16::from_be_bytes([data[i + 2], data[i + 3]]) as usize;
+        if matches!(marker, 0xC0 | 0xC1 | 0xC2) {
+            let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
+            let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
+            return (w > 0 && h > 0).then_some((w, h, data[i + 9]));
+        }
+        if marker == 0xD8 || marker == 0x01 || (0xD0..=0xD7).contains(&marker) {
+            i += 2;
+        } else {
+            i += 2 + len;
+        }
+    }
+    None
+}
+
+/// [`add_ink_paper_text`] plus images per page (`images[i]`), drawn over the paper and under
+/// text and ink (outside the ink layer: they are part of the page).
+pub fn add_ink_paper_text_images(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]], images: &[&[PdfImage]]) -> Result<Vec<u8>> {
     let has_paper = papers.iter().any(|p| p.is_some_and(|p| p.background != n0te_core::notebook::Background::Blank));
     let has_text = texts.iter().any(|t| !t.is_empty());
-    if pages.iter().all(|s| s.is_empty()) && !has_paper && !has_text {
+    let has_images = images.iter().any(|i| i.iter().any(|im| jpeg_info(&im.jpeg).is_some()));
+    if pages.iter().all(|s| s.is_empty()) && !has_paper && !has_text && !has_images {
         return Ok(pdf);
     }
-    let update = build_update(&pdf, pages, papers, texts)?;
+    let update = build_update(&pdf, pages, papers, texts, images)?;
     pdf.extend_from_slice(&update);
     Ok(pdf)
 }
@@ -140,9 +185,19 @@ struct Plan<'s> {
     oc_name: String,
     /// Resource name per alpha value this page switches to.
     gs_names: Vec<(u8, String)>,
+    /// Images: resource name and placement.
+    images: Vec<(String, PdfImagePlace)>,
 }
 
-fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]]) -> Result<Vec<u8>> {
+#[derive(Clone, Copy)]
+struct PdfImagePlace {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]], images: &[&[PdfImage]]) -> Result<Vec<u8>> {
     let file = File::parse(pdf)?;
     let (root_num, root_gen) = match file.trailer.get("Root") {
         Some(Obj::Ref(n, g)) => (*n, *g),
@@ -164,14 +219,19 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
     // The three standard fonts, written once if any page has text.
     let font_objects: Option<[u32; 3]> = texts.iter().any(|t| !t.is_empty()).then(|| [alloc(), alloc(), alloc()]);
 
+    // Image objects to write: number, JPEG bytes, pixel size and components.
+    let mut image_objects: Vec<(u32, &[u8], u32, u32, u8)> = Vec::new();
+
     // Plan every inked page: new resources, contents and the names its ink stream uses.
     let mut plans = Vec::new();
     let mut page_dicts = Vec::new();
     for (i, (node, &strokes)) in tree.into_iter().zip(pages).enumerate() {
         let paper = papers.get(i).copied().flatten().filter(|p| p.background != n0te_core::notebook::Background::Blank && p.spacing >= 2.0);
         let page_texts: &[crate::text_layout::PdfText] = texts.get(i).copied().unwrap_or(&[]);
+        let page_images: Vec<(&PdfImage, (u32, u32, u8))> =
+            images.get(i).copied().unwrap_or(&[]).iter().filter_map(|im| jpeg_info(&im.jpeg).filter(|j| j.2 == 1 || j.2 == 3).map(|j| (im, j))).collect();
         let mut alphas: Vec<u8> = strokes.iter().filter(|s| visible(s)).map(|s| (s.brush.color >> 24) as u8).collect();
-        if alphas.is_empty() && paper.is_none() && page_texts.is_empty() {
+        if alphas.is_empty() && paper.is_none() && page_texts.is_empty() && page_images.is_empty() {
             continue;
         }
         alphas.sort_unstable();
@@ -214,6 +274,19 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
             fonts = Some(names);
         }
 
+        let mut image_names = Vec::new();
+        if !page_images.is_empty() {
+            let mut xo = sub_dict(&file, &res, "XObject")?;
+            for (k, (im, (pw, ph, comps))) in page_images.iter().enumerate() {
+                let num = alloc();
+                let name = unique_name(&xo, &format!("N0teImg{k}"));
+                xo.set(&name, Obj::Ref(num, 0));
+                image_objects.push((num, &im.jpeg, *pw, *ph, *comps));
+                image_names.push((name, PdfImagePlace { x: im.x, y: im.y, w: im.w, h: im.h }));
+            }
+            res.set("XObject", Obj::Dict(xo));
+        }
+
         let ink_obj = alloc();
         let existing = contents(&file, node.dict.get("Contents"))?;
         let mut new_contents = Vec::with_capacity(existing.len() + 3);
@@ -234,7 +307,7 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
         dict.set("Contents", Obj::Array(new_contents));
         dict.set("Resources", Obj::Dict(res));
         page_dicts.push((node.num, node.generation, dict, ink_obj));
-        plans.push(Plan { strokes, texts: page_texts, fonts, paper: paper.map(|p| (p, pw, ph)), matrix, oc_name, gs_names });
+        plans.push(Plan { strokes, texts: page_texts, fonts, paper: paper.map(|p| (p, pw, ph)), matrix, oc_name, gs_names, images: image_names });
     }
 
     if plans.is_empty() {
@@ -265,6 +338,9 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
             ]);
             out.object(num, 0, &Obj::Dict(f));
         }
+    }
+    for &(num, data, w, h, comps) in &image_objects {
+        out.image(num, data, w, h, comps);
     }
     for (&alpha, &num) in &gs_objects {
         let a = Obj::num(alpha as f64 / 255.0);
@@ -586,6 +662,26 @@ fn ink_stream(plan: &Plan) -> Vec<u8> {
     z.finish().expect("writing to a Vec cannot fail")
 }
 
+/// The page's images, in page coordinates after `cm` (top-left origin, y down): the unit square
+/// is mapped flipped, so the picture stands upright.
+fn image_content(out: &mut Vec<u8>, plan: &Plan) {
+    for (name, p) in &plan.images {
+        out.extend_from_slice(b"q\n");
+        for v in plan.matrix {
+            write_num(out, v, 4);
+            out.push(b' ');
+        }
+        out.extend_from_slice(b"cm\n");
+        for v in [p.w as f64, 0.0, 0.0, -(p.h as f64), p.x as f64, (p.y + p.h) as f64] {
+            write_num(out, v, 3);
+            out.push(b' ');
+        }
+        out.extend_from_slice(b"cm\n/");
+        out.extend_from_slice(name.as_bytes());
+        out.extend_from_slice(b" Do\nQ\n");
+    }
+}
+
 /// The paper ruling (outside the ink layer), in page coordinates after `cm`. Colours match the
 /// app: light blue-grey lines, grey dots, a light red Cornell frame.
 fn paper_content(out: &mut Vec<u8>, plan: &Plan) {
@@ -646,6 +742,7 @@ fn paper_content(out: &mut Vec<u8>, plan: &Plan) {
 fn ink_content(plan: &Plan) -> Vec<u8> {
     let mut out = Vec::with_capacity(plan.strokes.iter().map(|s| s.points.len() * 30 + 64).sum::<usize>() + 128);
     paper_content(&mut out, plan);
+    image_content(&mut out, plan);
     if !plan.strokes.iter().any(visible) && plan.texts.is_empty() {
         return out;
     }
@@ -741,6 +838,21 @@ impl Out {
         self.begin(num, generation);
         o.write(&mut self.buf);
         self.buf.extend_from_slice(b"\nendobj\n");
+    }
+
+    /// A JPEG as an image XObject (DCTDecode: the bytes go in unchanged).
+    fn image(&mut self, num: u32, jpeg: &[u8], w: u32, h: u32, comps: u8) {
+        self.begin(num, 0);
+        self.buf.extend_from_slice(b"<</Type/XObject/Subtype/Image/Width ");
+        write_uint(&mut self.buf, w as u64);
+        self.buf.extend_from_slice(b"/Height ");
+        write_uint(&mut self.buf, h as u64);
+        self.buf.extend_from_slice(if comps == 1 { b"/ColorSpace/DeviceGray".as_slice() } else { b"/ColorSpace/DeviceRGB".as_slice() });
+        self.buf.extend_from_slice(b"/BitsPerComponent 8/Filter/DCTDecode/Length ");
+        write_uint(&mut self.buf, jpeg.len() as u64);
+        self.buf.extend_from_slice(b">>stream\n");
+        self.buf.extend_from_slice(jpeg);
+        self.buf.extend_from_slice(b"\nendstream\nendobj\n");
     }
 
     fn stream(&mut self, num: u32, data: &[u8], flate: bool) {
@@ -888,7 +1000,7 @@ mod tests {
         let (p1, b1) = dot(5.0, 5.0, 0x80FF0000);
         let (p2, b2) = dot(7.0, 7.0, 0xFF000000);
         let strokes = [Stroke { points: &p2, brush: b2 }, Stroke { points: &p1, brush: b1 }, Stroke { points: &p2, brush: b2 }];
-        let plan = Plan { strokes: &strokes, texts: &[], fonts: None, paper: None, matrix: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0], oc_name: "N0teInk".into(), gs_names: vec![(128, "A".into()), (255, "B".into())] };
+        let plan = Plan { strokes: &strokes, texts: &[], fonts: None, paper: None, matrix: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0], oc_name: "N0teInk".into(), gs_names: vec![(128, "A".into()), (255, "B".into())], images: vec![] };
         let s = String::from_utf8(ink_content(&plan)).unwrap();
         assert!(s.starts_with("/OC /N0teInk BDC\nq\n1 0 0 -1 0 842 cm\n0 0 0 rg\n"), "{s}");
         assert!(s.ends_with("f\nQ\nEMC\n"));

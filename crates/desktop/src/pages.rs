@@ -48,10 +48,17 @@ pub struct SheetContent {
     pub texts: Vec<TextBox>,
     /// A text page's Markdown body.
     pub body: String,
+    /// Images with their file (a blob path; drawn once the file is there).
+    pub images: Vec<(n0te_core::sheet::ImageObj, std::path::PathBuf)>,
 }
 
 /// Reads a sheet's content (from the library).
 pub type Loader = Box<dyn Fn(&str) -> SheetContent>;
+
+thread_local! {
+    /// Image handles per file (iced decodes and caches by handle).
+    static IMAGES: RefCell<HashMap<std::path::PathBuf, iced::advanced::image::Handle>> = RefCell::new(HashMap::new());
+}
 
 pub struct Page {
     pub placed: Placed,
@@ -485,6 +492,31 @@ impl Pages {
         }
     }
 
+    /// Draws a page's images (over the paper and PDF, under the ink). Decoded once per file.
+    fn draw_images(&self, r: &mut iced::Renderer, page: &Page, at: Point, cam: &Camera, clip: Rectangle) {
+        use iced::advanced::image::{FilterMethod, Image, Renderer as _};
+        let content = page.content(&self.load);
+        for (img, path) in &content.images {
+            if !path.exists() {
+                continue;
+            }
+            // From the bytes: blobs have no file extension, which the decoder would go by.
+            let Some(handle) = IMAGES.with(|m| {
+                let mut m = m.borrow_mut();
+                if let Some(h) = m.get(path) {
+                    return Some(h.clone());
+                }
+                let h = iced::advanced::image::Handle::from_bytes(std::fs::read(path).ok()?);
+                m.insert(path.clone(), h.clone());
+                Some(h)
+            }) else {
+                continue;
+            };
+            let bounds = Rectangle::new(Point::new(at.x + img.x * cam.zoom, at.y + img.y * cam.zoom), Size::new(img.w * cam.zoom, img.h * cam.zoom));
+            r.draw_image(Image::new(handle).filter_method(FilterMethod::Linear), bounds, clip);
+        }
+    }
+
     /// A new layout (fold, unfold): pages that only moved keep their strokes and caches.
     pub fn relayout(&mut self, layout: nl::Layout) {
         let mut old: HashMap<String, Page> = self.pages.drain(..).map(|p| (p.placed.sheet_id.clone(), p)).collect();
@@ -822,6 +854,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
                 });
                 pages.draw_pdf(r, page, at, &cam, &view, bounds);
+                pages.draw_images(r, page, at, &cam, bounds);
             }
         });
         renderer.with_layer(bounds, |r| {

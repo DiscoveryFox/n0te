@@ -205,13 +205,14 @@ pub fn pdf_page_pixels(width: f32, height: f32, scale: f32) -> Vec<u32> {
 impl NotebookHandle {
     /// Strokes and text boxes of a sheet for export: from an open handle (unsaved edits
     /// included), else stored.
-    fn content_for_export(&self, nb_id: &str, sheet_id: &str, width: f32) -> n0te_pdf::Result<(Vec<n0te_core::sheet::Stroke>, Vec<n0te_core::sheet::TextBox>)> {
+    #[allow(clippy::type_complexity)]
+    fn content_for_export(&self, nb_id: &str, sheet_id: &str, width: f32) -> n0te_pdf::Result<(Vec<n0te_core::sheet::Stroke>, Vec<n0te_core::sheet::TextBox>, Vec<n0te_core::sheet::ImageObj>)> {
         if let Some(open) = self.open_sheet_handle(sheet_id) {
             let s = lock(&open.sheet);
-            return Ok((s.strokes(), s.text_boxes_with_body(width)));
+            return Ok((s.strokes(), s.text_boxes_with_body(width), s.images()));
         }
         let s = self.lib.inner.load_sheet(nb_id, sheet_id)?;
-        Ok((s.strokes(), s.text_boxes_with_body(width)))
+        Ok((s.strokes(), s.text_boxes_with_body(width), s.images()))
     }
 
     fn export_bytes(&self, pdf: &PdfService, sheet_ids: Option<Vec<String>>) -> R<(Vec<u8>, u32)> {
@@ -219,9 +220,12 @@ impl NotebookHandle {
             let nb = lock(&self.nb);
             let id = nb.id();
             let specs = nb.sheet_specs();
-            n0te_pdf::notebook::export_sheets_with_text(&nb, sheet_ids.as_deref(), |sheet| {
-                self.content_for_export(&id, sheet, specs.get(sheet).map(|s| s.width).unwrap_or(595.0))
-            })?
+            n0te_pdf::notebook::export_sheets_with_images(
+                &nb,
+                sheet_ids.as_deref(),
+                |sheet| self.content_for_export(&id, sheet, specs.get(sheet).map(|s| s.width).unwrap_or(595.0)),
+                |blob| self.lib.inner.blob(blob).ok(),
+            )?
         };
         if pages.is_empty() {
             return Err(N0teError::Failed { msg: "nothing to export".into() });

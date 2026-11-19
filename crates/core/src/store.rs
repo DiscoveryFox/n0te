@@ -295,6 +295,7 @@ impl Library {
         }
         let nb = Notebook::load(self.peer, &index)?;
         let mut blobs: Vec<String> = nb.pdf_blobs();
+        blobs.extend(self.image_blobs(&nb.id()));
         blobs.sort();
         blobs.dedup();
         for b in blobs {
@@ -357,6 +358,15 @@ impl Library {
         let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         fs::rename(&dir, trash.join(format!("{id}-{stamp}")))?;
         Ok(())
+    }
+
+    /// The blobs of every image on the notebook's sheets (sync wants them, bundles carry them).
+    pub fn image_blobs(&self, notebook: &str) -> Vec<String> {
+        let Ok(nb) = self.load_notebook(notebook) else { return Vec::new() };
+        let mut out: Vec<String> = nb.sheet_order().iter().filter_map(|s| self.load_sheet(notebook, s).ok()).flat_map(|s| s.images().into_iter().map(|i| i.blob)).collect();
+        out.sort();
+        out.dedup();
+        out
     }
 
     /// Stores a blob (if new) and returns its BLAKE3 hex id ([`blob_id`]).

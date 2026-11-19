@@ -22,6 +22,18 @@ pub struct Stroke {
 /// Typed text on a page: top-left (x, y) and width in page points, height follows the text.
 /// Stored as a map in the objects map (`kind: "text"`, collaborative `text`), so two devices
 /// typing in the same box merge character by character. Apps that predate text boxes skip it.
+/// An image on a page: a blob (JPEG or PNG bytes in the library's blob store, synced like PDFs)
+/// placed with its top-left at (x, y) and w × h page points. Apps that predate images skip it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageObj {
+    pub id: String,
+    pub blob: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBox {
     pub id: String,
@@ -197,6 +209,61 @@ impl Sheet {
         Ok(id)
     }
 
+    /// Places an image (a stored blob) on the page; returns its object id.
+    pub fn add_image(&self, blob: &str, x: f32, y: f32, w: f32, h: f32) -> Result<String> {
+        if !(w > 0.0 && h > 0.0 && w.is_finite() && h.is_finite()) {
+            return Err(Error::Invalid("image size must be positive".into()));
+        }
+        let id = ids::new_id(self.doc.peer_id());
+        let m = self.objects.insert_container(&id, LoroMap::new())?;
+        m.insert("kind", "image")?;
+        m.insert("blob", blob)?;
+        // Stacking: the newest image lies on top (milliseconds since 1970).
+        let z = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        m.insert("z", z)?;
+        for (k, v) in [("x", x), ("y", y), ("w", w), ("h", h)] {
+            m.insert(k, v as f64)?;
+        }
+        self.doc.commit();
+        Ok(id)
+    }
+
+    /// The page's images, bottom to top (the newest last).
+    pub fn images(&self) -> Vec<ImageObj> {
+        let mut out = Vec::new();
+        let mut z: Vec<f64> = Vec::new();
+        self.objects.for_each(|k, v| {
+            if let ValueOrContainer::Container(Container::Map(m)) = v
+                && map_str(&m, "kind").as_deref() == Some("image")
+                && let Some(blob) = map_str(&m, "blob")
+            {
+                let f = |key: &str| map_f64(&m, key).unwrap_or(0.0) as f32;
+                out.push(ImageObj { id: k.to_string(), blob, x: f("x"), y: f("y"), w: f("w"), h: f("h") });
+                z.push(map_f64(&m, "z").unwrap_or(0.0));
+            }
+        });
+        let mut order: Vec<usize> = (0..out.len()).collect();
+        order.sort_by(|&a, &b| z[a].total_cmp(&z[b]).then(out[a].id.cmp(&out[b].id)));
+        order.into_iter().map(|i| out[i].clone()).collect()
+    }
+
+    /// Moves or resizes an image.
+    pub fn place_image(&self, id: &str, x: f32, y: f32, w: f32, h: f32) -> Result<()> {
+        let Some(m) = self.image_map(id) else { return Err(Error::NotFound(format!("image {id}"))) };
+        for (k, v) in [("x", x), ("y", y), ("w", w.max(1.0)), ("h", h.max(1.0))] {
+            m.insert(k, v as f64)?;
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
+    fn image_map(&self, id: &str) -> Option<LoroMap> {
+        match self.objects.get(id) {
+            Some(ValueOrContainer::Container(Container::Map(m))) if map_str(&m, "kind").as_deref() == Some("image") => Some(m),
+            _ => None,
+        }
+    }
+
     fn text_map(&self, id: &str) -> Option<LoroMap> {
         match self.objects.get(id) {
             Some(ValueOrContainer::Container(Container::Map(m))) if map_str(&m, "kind").as_deref() == Some("text") => Some(m),
@@ -298,6 +365,15 @@ impl Sheet {
             return Err(Error::Invalid("scale must be positive".into()));
         }
         for id in ids {
+            if let Some(m) = self.image_map(id) {
+                // Images move and scale with the selection.
+                let f = |key: &str| map_f64(&m, key).unwrap_or(0.0) as f32;
+                m.insert("x", (ox + (f("x") - ox) * scale + dx) as f64)?;
+                m.insert("y", (oy + (f("y") - oy) * scale + dy) as f64)?;
+                m.insert("w", (f("w") * scale) as f64)?;
+                m.insert("h", (f("h") * scale) as f64)?;
+                continue;
+            }
             if let Some(mut s) = self.stroke(id)? {
                 for p in &mut s.points {
                     p.x = ox + (p.x - ox) * scale + dx;
@@ -584,6 +660,32 @@ mod tests {
         s.remove(&[b.clone(), "nope".into()]).unwrap();
         assert_eq!(s.len(), 1);
         assert!(s.stroke(&b).unwrap().is_none());
+    }
+
+    #[test]
+    fn images_are_placed_moved_with_the_selection_and_removed() {
+        let s = Sheet::create(5).unwrap();
+        let id = s.add_image("ab12", 10.0, 20.0, 100.0, 50.0).unwrap();
+        s.add_text_box(0.0, 0.0, 100.0, 12.0, "hi").unwrap();
+        assert_eq!(s.images(), vec![ImageObj { id: id.clone(), blob: "ab12".into(), x: 10.0, y: 20.0, w: 100.0, h: 50.0 }]);
+        // A later image lies on top (last).
+        std::thread::sleep(std::time::Duration::from_millis(3));
+        let top = s.add_image("cd34", 0.0, 0.0, 10.0, 10.0).unwrap();
+        assert_eq!(s.images().last().map(|i| i.id.clone()), Some(top.clone()));
+        s.remove(&[top]).unwrap();
+        assert_eq!(s.text_boxes().len(), 1, "images are not text boxes");
+        assert!(s.strokes().is_empty(), "nor strokes");
+        s.transform(std::slice::from_ref(&id), 5.0, 0.0, 2.0, 10.0, 20.0).unwrap();
+        let i = &s.images()[0];
+        assert_eq!((i.x, i.y, i.w, i.h), (15.0, 20.0, 200.0, 100.0));
+        s.place_image(&id, 0.0, 0.0, 30.0, 40.0).unwrap();
+        assert_eq!((s.images()[0].w, s.images()[0].h), (30.0, 40.0));
+        // Survives a round trip (sync) and goes with remove.
+        let b = Sheet::load(6, &s.snapshot().unwrap()).unwrap();
+        assert_eq!(b.images().len(), 1);
+        s.remove(&[id]).unwrap();
+        assert!(s.images().is_empty());
+        assert!(s.add_image("x", 0.0, 0.0, 0.0, 10.0).is_err());
     }
 
     #[test]

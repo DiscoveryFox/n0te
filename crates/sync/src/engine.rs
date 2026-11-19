@@ -1206,8 +1206,14 @@ impl Inner {
                 };
                 (self.emit)(Event::RemoteChanged { notebook: nb.clone(), index, sheets });
                 self.mark_dirty(&nb);
-                if index {
-                    self.want_missing_blobs(s, &nb);
+                match &doc {
+                    DocKey::Index => self.want_missing_blobs(s, &nb),
+                    // A sheet that changed may carry new images.
+                    DocKey::Sheet(sid) => {
+                        if let Ok(sheet) = self.lib.load_sheet(&nb, sid) {
+                            self.want_blobs(s, sheet.images().into_iter().map(|i| i.blob));
+                        }
+                    }
                 }
             }
             Ok(false) => {}
@@ -1217,7 +1223,14 @@ impl Inner {
 
     fn want_missing_blobs(&self, s: &Arc<Session>, nb: &str) {
         let Ok(notebook) = self.lib.load_notebook(nb) else { return };
-        for id in notebook.pdf_blobs() {
+        let mut ids = notebook.pdf_blobs();
+        ids.extend(self.lib.image_blobs(nb));
+        self.want_blobs(s, ids.into_iter());
+    }
+
+    /// Asks the peer for every blob of `ids` not here yet (PDFs, images).
+    fn want_blobs(&self, s: &Arc<Session>, ids: impl Iterator<Item = String>) {
+        for id in ids {
             let have = self.lib.blob_path(&id).map(|p| p.exists()).unwrap_or(true);
             if !have && s.wanted.lock().expect("wanted").insert(id.clone()) {
                 s.send(Msg::WantBlob { id });
@@ -1228,7 +1241,7 @@ impl Inner {
     fn on_want_blob(&self, s: &Arc<Session>, id: String) {
         // Guests only get blobs of their notebook.
         if let Some(nb) = s.kind.scope() {
-            let ok = self.lib.load_notebook(nb).map(|n| n.pdf_blobs().contains(&id)).unwrap_or(false);
+            let ok = self.lib.load_notebook(nb).map(|n| n.pdf_blobs().contains(&id)).unwrap_or(false) || self.lib.image_blobs(nb).contains(&id);
             if !ok {
                 s.send(Msg::NoBlob { id });
                 return;

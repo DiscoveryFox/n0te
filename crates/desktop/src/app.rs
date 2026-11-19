@@ -402,7 +402,16 @@ impl App {
         let nid = id.to_string();
         let pages = Pages::new(
             layout,
-            Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| SheetContent { strokes: s.strokes(), texts: s.text_boxes(), body: s.page_text() }).unwrap_or_default()),
+            Box::new(move |sheet| {
+                lib.load_sheet(&nid, sheet)
+                    .map(|s| SheetContent {
+                        strokes: s.strokes(),
+                        texts: s.text_boxes(),
+                        body: s.page_text(),
+                        images: s.images().into_iter().filter_map(|i| lib.blob_path(&i.blob).ok().map(|p| (i, p))).collect(),
+                    })
+                    .unwrap_or_default()
+            }),
             self.pdf.clone(),
         );
         pages.show_remote_frame.set(self.settings.remote_frame);

@@ -322,7 +322,8 @@ impl PdfWorker {
         let refs: Vec<&[Stroke]> = strokes.iter().map(Vec::as_slice).collect();
         let papers: Vec<Option<crate::ink_writer::Paper>> = sheets.iter().map(|s| s.paper).collect();
         let texts: Vec<&[crate::text_layout::PdfText]> = sheets.iter().map(|s| s.texts.as_slice()).collect();
-        crate::ink_writer::add_ink_paper_text(bytes, &refs, &papers, &texts)
+        let images: Vec<&[crate::ink_writer::PdfImage]> = sheets.iter().map(|s| s.images.as_slice()).collect();
+        crate::ink_writer::add_ink_paper_text_images(bytes, &refs, &papers, &texts, &images)
     }
 }
 
@@ -354,6 +355,8 @@ pub struct ExportSheet {
     pub texts: Vec<crate::text_layout::PdfText>,
     /// Ruling drawn under the ink (fixed-size n0te sheets; None for PDF pages and boards).
     pub paper: Option<crate::ink_writer::Paper>,
+    /// Images on the page (JPEG), over the paper and under text and ink.
+    pub images: Vec<crate::ink_writer::PdfImage>,
 }
 
 fn run(shared: &Shared, mut docs: Docs, sink: Box<Sink>) {

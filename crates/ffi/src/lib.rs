@@ -83,6 +83,17 @@ pub struct FfiTextBox {
     pub text: String,
 }
 
+/// An image on a page: a blob placed at (x, y), w × h page points.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiImage {
+    pub id: String,
+    pub blob: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 /// A stroke's brush and samples (packed LE f32 x, y, pressure, t_ms), for copy/paste.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiStrokeData {
@@ -268,6 +279,11 @@ impl NoteLibrary {
 
     pub fn put_blob(&self, data: Vec<u8>) -> R<String> {
         Ok(self.inner.put_blob(&data)?)
+    }
+
+    /// Where a blob lives on disk (it may not be there yet: synced in the background).
+    pub fn blob_path(&self, id: String) -> R<String> {
+        Ok(self.inner.blob_path(&id)?.to_string_lossy().into_owned())
     }
 
     /// Writes the notebook as a `.n0te` bundle to `path` (to carry it to another device).
