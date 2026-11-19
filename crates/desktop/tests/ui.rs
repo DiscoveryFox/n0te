@@ -387,6 +387,26 @@ fn live_events_show_the_tablet_and_changes_from_it() {
 }
 
 #[test]
+fn following_goes_one_way_and_ends_when_the_tablet_reconnects() {
+    use n0te_desktop::live::LiveEvent;
+    let (mut h, _root, _nb) = blank_notebook("follow");
+    let tab = || n0te_desktop::app::LiveSession { device: "tab".into(), name: "Tablet".into(), follow_them: true, they_follow: false };
+    h.app.live_session = Some(tab());
+    // "Tablet folgt mir" ends "Ansicht folgt dem Tablet" (both at once chased each other).
+    h.message(Message::TheyFollow(true));
+    let l = h.app.live_session.clone().unwrap();
+    assert!(l.they_follow && !l.follow_them);
+    // The tablet asks us to follow it: it leads, so it no longer follows us.
+    h.message(Message::Live(LiveEvent::Follow { device: "tab".into(), on: true }));
+    let l = h.app.live_session.clone().unwrap();
+    assert!(l.follow_them && !l.they_follow);
+    // It reconnects (e.g. restarted for an update): no stale follow is left.
+    h.message(Message::Live(LiveEvent::Online { id: "tab".into(), name: "Tablet".into() }));
+    let l = h.app.live_session.clone().unwrap();
+    assert!(!l.follow_them && !l.they_follow);
+}
+
+#[test]
 fn an_open_request_from_the_tablet_opens_the_notebook_live() {
     use n0te_desktop::live::LiveEvent;
     let (mut h, _root, nb) = blank_notebook("openreq");

@@ -630,12 +630,22 @@ impl App {
             }
             Message::FollowThem(on) => {
                 if let Some(l) = &mut self.live_session {
+                    // One direction at a time: following them ends them following us.
+                    if on && l.they_follow {
+                        l.they_follow = false;
+                        if let Some(s) = &self.sync {
+                            s.send(&["follow".into(), l.device.clone(), "0".into()]);
+                        }
+                    }
                     l.follow_them = on;
                 }
             }
             Message::TheyFollow(on) => {
                 if let Some(l) = &mut self.live_session {
                     l.they_follow = on;
+                    if on {
+                        l.follow_them = false;
+                    }
                     if let Some(s) = &self.sync {
                         s.send(&["follow".into(), l.device.clone(), if on { "1".into() } else { "0".into() }]);
                     }
@@ -853,6 +863,14 @@ impl App {
                 }
             }
             LiveEvent::Online { .. } | LiveEvent::Offline { .. } | LiveEvent::Paired { .. } => {
+                // Reconnected or gone: the other app may have restarted, so nobody follows anyone
+                // any more (a stale follow on both sides made the views chase each other).
+                if let LiveEvent::Online { id, .. } | LiveEvent::Offline { id } = &e
+                    && let Some(l) = self.live_session.as_mut().filter(|l| &l.device == id)
+                {
+                    l.follow_them = false;
+                    l.they_follow = false;
+                }
                 if let LiveEvent::Paired { name, .. } = &e {
                     self.pair_code = None;
                     self.say(format!("Gekoppelt mit {name}"));
@@ -909,6 +927,10 @@ impl App {
             LiveEvent::Follow { device, on } => {
                 if let Some(l) = self.live_session.as_mut().filter(|l| l.device == device) {
                     l.follow_them = on;
+                    // They lead now (they stopped following us when they asked).
+                    if on {
+                        l.they_follow = false;
+                    }
                 } else if on {
                     let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
                     self.live_session = Some(LiveSession { device, name, follow_them: true, they_follow: false });
