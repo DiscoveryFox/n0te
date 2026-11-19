@@ -47,6 +47,8 @@ pub enum FfiSyncEvent {
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: Vec<f32>, zoom: f32, laser: Option<Vec<f32>> },
     /// Samples (packed LE f32 x, y, pressure, t_ms) of a stroke being drawn elsewhere.
     LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: FfiBrush, samples: Vec<u8>, done: bool },
+    /// Another device is erasing: strokes it hid, area-eraser dabs as x, y, r triples.
+    LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<f32> },
     OpenRequest { device: String, notebook: String },
     FollowRequest { device: String, on: bool },
     GuestJoined { invite: String, notebook: String, name: String },
@@ -135,6 +137,7 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::DeviceOffline { id } => FfiSyncEvent::DeviceOffline { id },
         Event::Paired { device: d } => FfiSyncEvent::Paired { device: device(d) },
         Event::Presence { device, notebook, sheet, viewport, zoom, laser } => FfiSyncEvent::Presence { device, notebook, sheet, viewport: viewport.to_vec(), zoom, laser: laser.map(|l| l.to_vec()) },
+        Event::LiveErase { device, notebook, sheet, ids, dabs } => FfiSyncEvent::LiveErase { device, notebook, sheet, ids, dabs: dabs.iter().flatten().copied().collect() },
         Event::LiveStroke { device, notebook, sheet, stroke, seq, brush, samples, done } => FfiSyncEvent::LiveStroke {
             device,
             notebook,
@@ -224,6 +227,15 @@ impl SyncEngine {
             let v = [0, 1, 2, 3].map(|i| viewport.get(i).copied().unwrap_or(0.0));
             let l = laser.filter(|l| l.len() >= 2).map(|l| [l[0], l[1]]);
             e.send_presence(&notebook, sheet.as_deref(), v, zoom, l);
+            Ok(())
+        })
+    }
+    /// Erasing as it happens: strokes just hidden (stroke eraser) and new area-eraser dabs as
+    /// x, y, r triples (sheet points). The stored result follows with the next save.
+    pub fn send_live_erase(&self, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<f32>) -> R<()> {
+        self.with(|e| {
+            let d: Vec<[f32; 3]> = dabs.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            e.send_live_erase(&notebook, &sheet, &ids, &d);
             Ok(())
         })
     }

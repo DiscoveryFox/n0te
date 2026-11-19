@@ -72,6 +72,8 @@ pub enum Event {
     Paired { device: DeviceInfo },
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: [f32; 4], zoom: f32, laser: Option<[f32; 2]> },
     LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: LiveBrush, samples: Vec<u8>, done: bool },
+    /// Another device is erasing: strokes it hid, area-eraser dabs (x, y, radius).
+    LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
     /// An own device asks to open a notebook (live session button).
     OpenRequest { device: String, notebook: String },
     /// An own device asks this one to follow (or stop following) its view.

@@ -9,12 +9,14 @@ pub struct Settings {
     pub theme: String,
     pub row_gap: f32,
     pub side_gap: f32,
+    /// Show the other device's view as a red frame (live).
+    pub remote_frame: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         let o = Options::default();
-        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap }
+        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap, remote_frame: true }
     }
 }
 
@@ -36,6 +38,7 @@ impl Settings {
                 "theme" => s.theme = v.to_string(),
                 "row_gap" => s.row_gap = v.parse().unwrap_or(s.row_gap).clamp(4.0, 200.0),
                 "side_gap" => s.side_gap = v.parse().unwrap_or(s.side_gap).clamp(4.0, 200.0),
+                "remote_frame" => s.remote_frame = v != "0",
                 _ => {}
             }
         }
@@ -51,7 +54,7 @@ impl Settings {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, format!("theme={}\nrow_gap={}\nside_gap={}\n", self.theme, self.row_gap, self.side_gap));
+        let _ = std::fs::write(p, format!("theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\n", self.theme, self.row_gap, self.side_gap, if self.remote_frame { 1 } else { 0 }));
     }
 
     pub fn layout(&self) -> Options {

@@ -387,6 +387,52 @@ fn live_events_show_the_tablet_and_changes_from_it() {
 }
 
 #[test]
+fn erasing_on_the_tablet_shows_at_once_and_the_frame_can_be_hidden() {
+    use n0te_desktop::live::LiveEvent;
+    let (mut h, root, nb) = blank_notebook("erase");
+    let sheet = open(&h).pages.pages[0].placed.sheet_id.clone();
+    let brush = n0te_core::ink::Brush { width: 2.0, thinning: 0.5, color: 0xFF111111, kind: 0 };
+    let line = |y: f32| (0..30).map(|i| n0te_core::ink::InkPoint { x: 100.0 + i as f32 * 5.0, y, pressure: 0.5, t_ms: i * 8 }).collect::<Vec<_>>();
+    let (a, b) = {
+        let lib = Library::open(&root).unwrap();
+        let sh = lib.load_sheet(&nb, &sheet).unwrap();
+        let a = sh.add_stroke(brush, &line(200.0)).unwrap();
+        let b = sh.add_stroke(brush, &line(300.0)).unwrap();
+        lib.save_sheet(&nb, &sheet, &sh).unwrap();
+        (a, b)
+    };
+    h.message(Message::Live(LiveEvent::Changed { notebook: nb.clone(), index: false, sheets: vec![sheet.clone()] }));
+    // Stroke eraser on a, area eraser through the middle of b: shown before any save.
+    h.message(Message::Live(LiveEvent::Erase { notebook: nb.clone(), sheet: sheet.clone(), ids: vec![a.clone()], dabs: vec![[175.0, 300.0, 8.0]] }));
+    h.events(&[]);
+    {
+        let o = open(&h);
+        let erasing = o.pages.erasing.borrow();
+        let e = erasing.get(&sheet).expect("erasing shown");
+        let content: Vec<n0te_core::sheet::Stroke> = Library::open(&root).unwrap().load_sheet(&nb, &sheet).unwrap().strokes();
+        let shown = e.apply(&content);
+        assert!(shown.iter().all(|s| s.id != a), "the hidden stroke is gone");
+        assert_eq!(shown.iter().filter(|s| s.id.starts_with(&format!("{b}#"))).count(), 2, "b is cut in two");
+        // A stroke drawn afterwards in the erased spot stays whole.
+        let later = n0te_core::sheet::Stroke { id: "later".into(), brush, bounds: n0te_core::ink::Rect::new(160.0, 295.0, 190.0, 305.0), points: line(300.0) };
+        assert!(e.apply(&[later]).iter().any(|s| s.id == "later"));
+    }
+    // The stored result arrives: the live overlay goes.
+    {
+        let lib = Library::open(&root).unwrap();
+        let sh = lib.load_sheet(&nb, &sheet).unwrap();
+        sh.remove(&[a.clone()]).unwrap();
+        sh.erase_area(&[(175.0, 300.0, 8.0)]).unwrap();
+        lib.save_sheet(&nb, &sheet, &sh).unwrap();
+    }
+    h.message(Message::Live(LiveEvent::Changed { notebook: nb.clone(), index: false, sheets: vec![sheet.clone()] }));
+    assert!(open(&h).pages.erasing.borrow().is_empty(), "stored now: overlay dropped");
+    // The red frame of the other device can be switched off.
+    h.message(Message::RemoteFrame(false));
+    assert!(!open(&h).pages.show_remote_frame.get() && !h.app.settings.remote_frame);
+}
+
+#[test]
 fn following_goes_one_way_and_ends_when_the_tablet_reconnects() {
     use n0te_desktop::live::LiveEvent;
     let (mut h, _root, _nb) = blank_notebook("follow");

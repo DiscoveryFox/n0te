@@ -48,6 +48,7 @@ fn event_json(e: &Event) -> Option<String> {
             "t": "live", "device": device, "notebook": notebook, "sheet": sheet, "stroke": stroke, "seq": seq,
             "brush": { "width": brush.width, "thinning": brush.thinning, "color": brush.color, "kind": brush.kind }, "samples": samples, "done": done
         }),
+        Event::LiveErase { device, notebook, sheet, ids, dabs } => json!({ "t": "erase", "device": device, "notebook": notebook, "sheet": sheet, "ids": ids, "dabs": dabs }),
         Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
         Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
         Event::GuestJoined { invite, notebook, name } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "name": name, "on": true }),
@@ -392,6 +393,13 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             let brush = LiveBrush { width: num(5) as f32, thinning: num(6) as f32, color: num(7) as u32, kind: num(8) as u8 };
             let samples: Vec<u8> = args.get(9).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             engine.send_live_stroke(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, num(3) as u64, num(4) as u32, brush, &samples, args.get(10).is_some_and(|d| d == "1"));
+            String::new()
+        }
+        // erase <notebook> <sheet> <ids json array> <dabs json array of [x, y, r]>
+        "erase" => {
+            let ids: Vec<String> = args.get(3).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            let dabs: Vec<[f32; 3]> = args.get(4).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            engine.send_live_erase(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, &ids, &dabs);
             String::new()
         }
         "open" => {

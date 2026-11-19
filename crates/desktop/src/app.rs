@@ -64,6 +64,8 @@ pub enum Message {
     TileReady,
     /// A LaTeX formula finished rendering (redraw).
     FormulaReady,
+    /// Show the other device's view as a red frame.
+    RemoteFrame(bool),
     FileDropped(PathBuf),
     ShowPdfImport(bool),
     ImportPdf(PathBuf),
@@ -380,6 +382,7 @@ impl App {
             Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| SheetContent { strokes: s.strokes(), texts: s.text_boxes(), body: s.page_text() }).unwrap_or_default()),
             self.pdf.clone(),
         );
+        pages.show_remote_frame.set(self.settings.remote_frame);
         self.finish_text();
         self.close_text_page();
         self.stamp = self.lib.change_stamp(id);
@@ -630,6 +633,15 @@ impl App {
                 self.live_session = None;
                 if let Screen::Notebook(o) = &self.screen {
                     o.pages.remote.borrow_mut().clear();
+                }
+            }
+            Message::RemoteFrame(on) => {
+                self.settings.remote_frame = on;
+                if let Screen::Notebook(o) = &self.screen {
+                    o.pages.show_remote_frame.set(on);
+                }
+                if self.persist_settings {
+                    self.settings.save();
                 }
             }
             Message::FollowThem(on) => {
@@ -911,6 +923,13 @@ impl App {
                     && o.id == notebook
                 {
                     o.pages.live_samples(&device, stroke, &sheet, brush, &samples, done);
+                }
+            }
+            LiveEvent::Erase { notebook, sheet, ids, dabs } => {
+                if let Screen::Notebook(o) = &self.screen
+                    && o.id == notebook
+                {
+                    o.pages.live_erase(&sheet, &ids, &dabs);
                 }
             }
             LiveEvent::Open { device, notebook } => {
@@ -1779,6 +1798,8 @@ impl App {
                     iced::widget::checkbox(l.follow_them).label("Ansicht folgt dem Tablet").on_toggle(Message::FollowThem).size(14).text_size(12),
                     Space::new().width(18),
                     iced::widget::checkbox(l.they_follow).label("Tablet folgt mir").on_toggle(Message::TheyFollow).size(14).text_size(12),
+                    Space::new().width(18),
+                    iced::widget::checkbox(self.settings.remote_frame).label("Rahmen zeigen").on_toggle(Message::RemoteFrame).size(14).text_size(12),
                     Space::new().width(Length::Fill),
                     button(text("BEENDEN").font(theme::MONO_BOLD).size(10)).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
                 ]

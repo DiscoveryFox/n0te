@@ -28,6 +28,8 @@ pub enum LiveEvent {
     /// `viewport` and `laser` are in the coordinates of `sheet` (sheet points).
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: [f32; 4], zoom: f32, laser: Option<[f32; 2]> },
     Stroke { device: String, notebook: String, sheet: String, stroke: u64, brush: (f32, f32, u32, u8), samples: Vec<u8>, done: bool },
+    /// Someone erasing: strokes hidden, area-eraser dabs (x, y, r), in `sheet` points.
+    Erase { notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
     Open { device: String, notebook: String },
     Follow { device: String, on: bool },
     Guest { name: String, notebook: String, on: bool },
@@ -60,6 +62,15 @@ fn parse(line: &str) -> Option<LiveEvent> {
             viewport: f4("viewport").unwrap_or_default(),
             zoom: v["zoom"].as_f64().unwrap_or(1.0) as f32,
             laser: v["laser"].as_array().and_then(|a| Some([a.first()?.as_f64()? as f32, a.get(1)?.as_f64()? as f32])),
+        },
+        "erase" => LiveEvent::Erase {
+            notebook: s("notebook"),
+            sheet: s("sheet"),
+            ids: v["ids"].as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default(),
+            dabs: v["dabs"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|d| { let d = d.as_array()?; Some([d.first()?.as_f64()? as f32, d.get(1)?.as_f64()? as f32, d.get(2)?.as_f64()? as f32]) }).collect())
+                .unwrap_or_default(),
         },
         "live" => LiveEvent::Stroke {
             device: s("device"),

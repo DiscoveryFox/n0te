@@ -10,7 +10,7 @@
 //! of pages not drawn for a while are dropped (LRU).
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -116,7 +116,7 @@ impl Page {
     }
 
     /// The strokes as triangle meshes in page units (one per pencil pass), built on first use.
-    fn ink_mesh(&self, zoom: f32, load: &Loader) -> mesh::Cache {
+    fn ink_mesh(&self, zoom: f32, load: &Loader, erasing: Option<&Erasing>) -> mesh::Cache {
         let step = mesh_step(zoom);
         if let Some((s, cache)) = self.ink.borrow().as_ref()
             && *s == step
@@ -125,7 +125,12 @@ impl Page {
         }
         let content = self.content(load);
         let (w, h) = self.size();
-        let cache = mesh::Cache::new(Arc::from(ink_meshes(&content.strokes, step, Rectangle::new(Point::ORIGIN, Size::new(w, h)))));
+        let clip = Rectangle::new(Point::ORIGIN, Size::new(w, h));
+        let meshes = match erasing {
+            Some(e) => ink_meshes(&e.apply(&content.strokes), step, clip),
+            None => ink_meshes(&content.strokes, step, clip),
+        };
+        let cache = mesh::Cache::new(Arc::from(meshes));
         *self.ink.borrow_mut() = Some((step, cache.clone()));
         cache
     }
@@ -147,6 +152,56 @@ pub fn stored_has(strokes: &[Stroke], l: &LiveInk) -> bool {
         let b = s.bounds;
         s.brush.color == l.brush.color && (b.x0 - x0).abs() <= tol && (b.y0 - y0).abs() <= tol && (b.x1 - x1).abs() <= tol && (b.y1 - y1).abs() <= tol
     })
+}
+
+/// What someone erasing elsewhere has done to a sheet so far (until the stored result is in).
+#[derive(Debug)]
+pub struct Erasing {
+    /// Whole strokes hidden by the stroke eraser.
+    pub hidden: HashSet<String>,
+    /// Strokes under the area eraser (cut by `dabs`).
+    pub cut: HashSet<String>,
+    pub dabs: Vec<(f32, f32, f32)>,
+    pub at: std::time::Instant,
+}
+
+impl Default for Erasing {
+    fn default() -> Self {
+        Erasing { hidden: HashSet::new(), cut: HashSet::new(), dabs: Vec::new(), at: std::time::Instant::now() }
+    }
+}
+
+impl Erasing {
+    /// The strokes as they look with the erasing applied.
+    pub fn apply(&self, strokes: &[Stroke]) -> Vec<Stroke> {
+        let mut out = Vec::with_capacity(strokes.len());
+        for s in strokes {
+            if self.hidden.contains(&s.id) {
+                continue;
+            }
+            if self.cut.contains(&s.id)
+                && let Some(runs) = n0te_core::sheet::cut_stroke(&s.points, s.brush.width, &self.dabs)
+            {
+                for (i, run) in runs.into_iter().enumerate() {
+                    out.push(Stroke { id: format!("{}#{i}", s.id), brush: s.brush, bounds: n0te_core::sheet::bounds_of(&run, s.brush.width), points: run });
+                }
+                continue;
+            }
+            out.push(s.clone());
+        }
+        out
+    }
+
+    /// The stored sheet has none of the strokes this hid or cut any more: it's done.
+    fn settled(&self, strokes: &[Stroke]) -> bool {
+        !strokes.iter().any(|s| self.hidden.contains(&s.id) || self.cut.contains(&s.id))
+    }
+}
+
+/// Whether an eraser dab (x, y, r) can reach into a stroke's bounds.
+fn touches(b: &Rect, d: &[f32; 3], width: f32) -> bool {
+    let m = d[2] + width;
+    d[0] >= b.x0 - m && d[0] <= b.x1 + m && d[1] >= b.y0 - m && d[1] <= b.y1 + m
 }
 
 /// Every how many samples the mesh keeps at a zoom (zoomed out, full resolution only costs).
@@ -287,6 +342,10 @@ pub struct Pages {
     pub remote: RefCell<Vec<RemoteMark>>,
     /// Strokes being drawn on other devices, by (device, stroke).
     pub live: RefCell<HashMap<(String, u64), LiveInk>>,
+    /// Someone erasing right now, per sheet (shown before the stored result arrives).
+    pub erasing: RefCell<HashMap<String, Erasing>>,
+    /// Draw other devices' views as frames (the laser point shows either way).
+    pub show_remote_frame: Cell<bool>,
     pub pages: Vec<Page>,
     pub headers: Vec<Header>,
     pub bounds: Rect,
@@ -306,6 +365,8 @@ impl Pages {
         Pages {
             remote: RefCell::new(Vec::new()),
             live: RefCell::new(HashMap::new()),
+            erasing: RefCell::new(HashMap::new()),
+            show_remote_frame: Cell::new(true),
             pages: layout.sheets.into_iter().map(Page::new).collect(),
             headers: layout.headers,
             bounds: layout.bounds,
@@ -328,7 +389,33 @@ impl Pages {
         // A finished live stroke goes only once the sheet holds it: the save that triggered this
         // reload may predate it (drawn just after), and dropping it then made it blink.
         let content = p.content(&self.load);
+        // Live erasing likewise: until none of the strokes it hid or cut are stored any more.
+        {
+            let mut erasing = self.erasing.borrow_mut();
+            if erasing.get(sheet_id).is_some_and(|e| e.settled(&content.strokes)) {
+                erasing.remove(sheet_id);
+            }
+        }
         self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some() && stored_has(&content.strokes, l)));
+    }
+
+    /// Another device erasing on `sheet_id`: strokes it hid and area-eraser dabs (x, y, r).
+    pub fn live_erase(&self, sheet_id: &str, ids: &[String], dabs: &[[f32; 3]]) {
+        let Some(page) = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id) else { return };
+        let content = page.content(&self.load);
+        let mut all = self.erasing.borrow_mut();
+        all.retain(|_, e| e.at.elapsed().as_secs() < 15);
+        let e = all.entry(sheet_id.to_string()).or_default();
+        e.at = std::time::Instant::now();
+        e.hidden.extend(ids.iter().cloned());
+        for d in dabs {
+            // Only strokes there now get cut; one drawn here afterwards stays whole.
+            for s in content.strokes.iter().filter(|s| touches(&s.bounds, d, s.brush.width)) {
+                e.cut.insert(s.id.clone());
+            }
+            e.dabs.push((d[0], d[1], d[2]));
+        }
+        *page.ink.borrow_mut() = None;
     }
 
     /// New samples (packed LE f32 x, y, pressure, t) of a stroke another device is drawing.
@@ -753,7 +840,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 });
             }
             for page in &visible {
-                let ink = page.ink_mesh(cam.zoom, &pages.load);
+                let ink = page.ink_mesh(cam.zoom, &pages.load, pages.erasing.borrow().get(&page.placed.sheet_id));
                 let rect = page.rect();
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
@@ -799,11 +886,13 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let a = cam.to_screen(bounds, o.x0 + m.rect.x0, o.y0 + m.rect.y0);
                 let b = cam.to_screen(bounds, o.x0 + m.rect.x1, o.y0 + m.rect.y1);
                 let frame = Rectangle::new(a, Size::new((b.x - a.x).max(4.0), (b.y - a.y).max(4.0)));
-                r.fill_quad(
-                    renderer::Quad { bounds: frame, border: iced::Border { color: theme::alpha(theme::p().accent, 0.8), width: 2.0, radius: 4.0.into() }, ..Default::default() },
-                    Color::TRANSPARENT,
-                );
-                label(r, m.name.to_uppercase(), Point::new(frame.x + 4.0, frame.y + 4.0), 200.0, theme::p().accent, 10.0, theme::MONO_BOLD, text::Alignment::Left);
+                if pages.show_remote_frame.get() {
+                    r.fill_quad(
+                        renderer::Quad { bounds: frame, border: iced::Border { color: theme::alpha(theme::p().accent, 0.8), width: 2.0, radius: 4.0.into() }, ..Default::default() },
+                        Color::TRANSPARENT,
+                    );
+                    label(r, m.name.to_uppercase(), Point::new(frame.x + 4.0, frame.y + 4.0), 200.0, theme::p().accent, 10.0, theme::MONO_BOLD, text::Alignment::Left);
+                }
                 if let Some((x, y)) = m.laser {
                     let c = cam.to_screen(bounds, o.x0 + x, o.y0 + y);
                     r.fill_quad(

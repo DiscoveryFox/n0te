@@ -170,32 +170,13 @@ impl Sheet {
         let Some(area) = path_bounds(&xy, rmax) else { return Ok(0) };
         let mut changed = 0;
         for s in self.strokes_in(Some(area)) {
-            let extra = s.brush.width * 0.35;
-            let pts = resample(&s.points, 0.75);
-            let keep: Vec<bool> = pts.iter().map(|p| !under_tip(p.x, p.y, path, extra)).collect();
-            if keep.iter().all(|&k| k) {
-                continue;
-            }
+            let Some(runs) = cut_stroke(&s.points, s.brush.width, path) else { continue };
             changed += 1;
             self.objects.delete(&s.id)?;
-            let mut run: Vec<InkPoint> = Vec::new();
-            let flush = |run: &mut Vec<InkPoint>| -> Result<()> {
-                // Keep pieces that are more than a speck.
-                if run.len() >= 2 || (run.len() == 1 && s.points.len() == 1) {
-                    let id = ids::new_id(self.doc.peer_id());
-                    self.objects.insert(&id, LoroValue::Binary(encode_stroke(&s.brush, run).into()))?;
-                }
-                run.clear();
-                Ok(())
-            };
-            for (p, k) in pts.iter().zip(&keep) {
-                if *k {
-                    run.push(*p);
-                } else {
-                    flush(&mut run)?;
-                }
+            for run in runs {
+                let id = ids::new_id(self.doc.peer_id());
+                self.objects.insert(&id, LoroValue::Binary(encode_stroke(&s.brush, &run).into()))?;
             }
-            flush(&mut run)?;
         }
         self.doc.commit();
         Ok(changed)
@@ -398,6 +379,42 @@ fn map_f64(m: &LoroMap, key: &str) -> Option<f64> {
         Some(ValueOrContainer::Value(LoroValue::I64(i))) => Some(i as f64),
         _ => None,
     }
+}
+
+/// The area eraser on one stroke: the pieces that stay when the parts under the eraser path
+/// (x, y, radius per dab) are cut away, or None if the path doesn't touch the stroke. Specks
+/// are dropped. Shared by [`Sheet::erase_area`] and live previews of someone erasing.
+pub fn cut_stroke(points: &[InkPoint], width: f32, path: &[(f32, f32, f32)]) -> Option<Vec<Vec<InkPoint>>> {
+    let extra = width * 0.35;
+    let pts = resample(points, 0.75);
+    let keep: Vec<bool> = pts.iter().map(|p| !under_tip(p.x, p.y, path, extra)).collect();
+    if keep.iter().all(|&k| k) {
+        return None;
+    }
+    let mut runs = Vec::new();
+    let mut run: Vec<InkPoint> = Vec::new();
+    let mut flush = |run: &mut Vec<InkPoint>| {
+        // Keep pieces that are more than a speck.
+        if run.len() >= 2 || (run.len() == 1 && points.len() == 1) {
+            runs.push(std::mem::take(run));
+        }
+        run.clear();
+    };
+    for (p, k) in pts.iter().zip(&keep) {
+        if *k {
+            run.push(*p);
+        } else {
+            flush(&mut run);
+        }
+    }
+    flush(&mut run);
+    Some(runs)
+}
+
+/// The bounds of a run of points drawn `width` wide (for strokes made on the fly).
+pub fn bounds_of(points: &[InkPoint], width: f32) -> Rect {
+    let xy: Vec<(f32, f32)> = points.iter().map(|p| (p.x, p.y)).collect();
+    path_bounds(&xy, width / 2.0 + 1.0).unwrap_or(Rect::EMPTY)
 }
 
 fn path_bounds(path: &[(f32, f32)], radius: f32) -> Option<Rect> {

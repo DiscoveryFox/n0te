@@ -87,6 +87,10 @@ pub enum Live {
     /// Samples (packed LE f32 x, y, pressure, t_ms) of a stroke being drawn, in sheet points,
     /// appended in `seq` order; `done` = pen lifted.
     Stroke { notebook: String, sheet: String, stroke: u64, seq: u32, brush: LiveBrush, samples: Vec<u8>, done: bool },
+    /// Erasing as it happens (the stored result follows with the next save): whole strokes
+    /// hidden by the stroke eraser, and/or area-eraser dabs (x, y, radius in sheet points).
+    /// Added after v1: older peers can't decode it and ignore it.
+    Erase { notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
 }
 
 pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {

@@ -387,6 +387,18 @@ impl Engine {
         }
     }
 
+    /// Erasing as it happens on `sheet`: strokes just hidden by the stroke eraser and / or new
+    /// area-eraser dabs (x, y, radius). The stored result follows with the next save.
+    pub fn send_live_erase(&self, notebook: &str, sheet: &str, ids: &[String], dabs: &[[f32; 3]]) {
+        // Split so each message stays datagram-sized.
+        for chunk in ids.chunks(40) {
+            self.inner.send_live(notebook, None, Live::Erase { notebook: notebook.into(), sheet: sheet.into(), ids: chunk.to_vec(), dabs: Vec::new() });
+        }
+        for chunk in dabs.chunks(60) {
+            self.inner.send_live(notebook, None, Live::Erase { notebook: notebook.into(), sheet: sheet.into(), ids: Vec::new(), dabs: chunk.to_vec() });
+        }
+    }
+
     /// Asks an own device to open a notebook (live session).
     pub fn request_open(&self, device: &str, notebook: &str) -> Result<()> {
         self.own_session(device)?.send(Msg::Open { notebook: notebook.into() });
@@ -1258,6 +1270,10 @@ impl Inner {
             }
             Live::Stroke { notebook, sheet, stroke, seq, brush, samples, done } if s.kind.covers(&notebook) => {
                 (self.emit)(Event::LiveStroke { device: s.id(), notebook, sheet, stroke, seq, brush, samples, done });
+            }
+            // Erasing changes the notebook: only from those who may write it.
+            Live::Erase { notebook, sheet, ids, dabs } if s.kind.covers(&notebook) && Self::may_receive(&s.kind) => {
+                (self.emit)(Event::LiveErase { device: s.id(), notebook, sheet, ids, dabs });
             }
             _ => {}
         }

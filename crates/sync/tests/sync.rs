@@ -215,6 +215,21 @@ fn live_presence_strokes_and_open_requests() {
         }
     }
     assert!(done && got == samples.len(), "{got} of {} bytes, done={done}", samples.len());
+    // Erasing shows live too: hidden strokes and area-eraser dabs (many ids are split up).
+    let ids: Vec<String> = (0..90).map(|i| format!("stroke{i:03}")).collect();
+    a.send_live_erase(&nb, &sheet, &ids, &[[10.0, 20.0, 3.0], [12.0, 21.0, 3.5]]);
+    let (mut got_ids, mut got_dabs) = (Vec::new(), Vec::new());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while (got_ids.len() < ids.len() || got_dabs.len() < 2) && Instant::now() < deadline {
+        if let Ok(Event::LiveErase { ids, dabs, sheet: sh, .. }) = events.recv_timeout(Duration::from_secs(1)) {
+            assert_eq!(sh, sheet);
+            got_ids.extend(ids);
+            got_dabs.extend(dabs);
+        }
+    }
+    got_ids.sort();
+    assert_eq!(got_ids, ids);
+    assert_eq!(got_dabs, vec![[10.0, 20.0, 3.0], [12.0, 21.0, 3.5]]);
     a.set_follow(&tablet, true).unwrap();
     wait_event(&events, "follow", |e| matches!(e, Event::FollowRequest { on: true, .. }));
 }
