@@ -31,6 +31,8 @@ pub struct Entry {
     pub folder: String,
     pub sheets: usize,
     pub cover: String,
+    /// When the notebook last changed on disk.
+    pub modified: Option<std::time::SystemTime>,
 }
 
 /// A `.n0te` file waiting in Downloads (sent from the tablet through n0bridge).
@@ -70,6 +72,7 @@ pub enum Message {
     ShowPdfImport(bool),
     ImportPdf(PathBuf),
     ShowExport(bool),
+    ExportMode(ExportWhat),
     Export(ExportWhat),
     TogglePick(String),
     OpenPath(PathBuf),
@@ -102,6 +105,7 @@ pub enum Message {
     Revoke(String),
     CopyText(String),
     StartJoin,
+    CancelJoin,
     JoinLink(String),
     Join,
     /// Command palette, help, settings.
@@ -196,6 +200,8 @@ pub struct App {
     pub pdfs: Vec<(PathBuf, SystemTime)>,
     /// Export panel open, with the main sheets picked for "Auswahl".
     pub export: Option<HashSet<String>>,
+    /// The scope chosen in the export dialog.
+    pub export_mode: ExportWhat,
     pub last_export: Option<PathBuf>,
     /// Where exported PDFs go (~/Downloads).
     pub export_dir: PathBuf,
@@ -291,6 +297,7 @@ impl App {
             show_pdf_import: false,
             pdfs: Vec::new(),
             export: None,
+            export_mode: ExportWhat::All,
             last_export: None,
             export_dir: downloads(),
             editing: None,
@@ -368,7 +375,8 @@ impl App {
             .into_iter()
             .filter_map(|id| {
                 let nb = lib.load_notebook(&id).ok()?;
-                Some(Entry { title: nb.title(), folder: nb.folder(), sheets: nb.sheet_count(), cover: nb.cover(), id })
+                let modified = std::fs::metadata(lib.root().join("notebooks").join(&id)).and_then(|m| m.modified()).ok();
+                Some(Entry { title: nb.title(), folder: nb.folder(), sheets: nb.sheet_count(), cover: nb.cover(), modified, id })
             })
             .collect();
         entries.sort_by(|a, b| (a.folder.to_lowercase(), a.title.to_lowercase()).cmp(&(b.folder.to_lowercase(), b.title.to_lowercase())));
@@ -537,7 +545,11 @@ impl App {
                 self.show_pdf_import = false;
                 self.import_pdf(&path);
             }
-            Message::ShowExport(on) => self.export = on.then(HashSet::new),
+            Message::ShowExport(on) => {
+                self.export = on.then(HashSet::new);
+                self.export_mode = ExportWhat::All;
+            }
+            Message::ExportMode(m) => self.export_mode = m,
             Message::TogglePick(node) => {
                 if let Some(p) = &mut self.export
                     && !p.remove(&node)
@@ -773,6 +785,7 @@ impl App {
                 return iced::clipboard::write(t);
             }
             Message::StartJoin => self.joining = Some(String::new()),
+            Message::CancelJoin => self.joining = None,
             Message::JoinLink(l) => self.joining = Some(l),
             Message::Join => {
                 let link = self.joining.take().unwrap_or_default();
@@ -1224,7 +1237,7 @@ impl App {
             Space::new().width(Length::Fill),
             text(if t.dirty { "…" } else { "GESPEICHERT" }).font(theme::MONO).size(10.5).color(theme::PAPER_MUTED),
             Space::new().width(10),
-            button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(10)).padding([2, 8]).on_press(Message::CloseTextPage).style(theme::text_tool),
+            button(theme::btn_small("Schließen")).padding([2, 8]).on_press(Message::CloseTextPage).style(theme::text_tool),
         ]
         .align_y(Alignment::Center);
         // Word-like formatting for the block being edited.
@@ -1596,6 +1609,8 @@ impl App {
             Some(self.help_view())
         } else if self.show_settings {
             Some(self.settings_view())
+        } else if let (Screen::Notebook(o), Some(picked)) = (&self.screen, &self.export) {
+            Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera)))
         } else {
             None
         };
@@ -1609,12 +1624,12 @@ impl App {
     fn history_panel<'a>(&'a self, list: &'a [(u64, String)]) -> Element<'a, Message> {
         let mut col = column![
             row![
-                text("VERLAUF — FRÜHERE STÄNDE (DER SYNC-DIENST SICHERT ALLE 5 MINUTEN)").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+                theme::heading("Verlauf", 20.0),
                 Space::new().width(Length::Fill),
-                button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowHistory(false)).style(theme::ghost),
+                button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowHistory(false)).style(theme::ghost),
             ]
             .align_y(Alignment::Center),
-            text("Ältere Stände werden ausgedünnt: alles der letzten Stunde, stündlich für einen Tag, täglich für 30 Tage, danach wöchentlich.").size(12).color(theme::p().muted),
+            text("Der Sync-Dienst sichert alle 5 Minuten. Ältere Stände werden ausgedünnt: alles der letzten Stunde, stündlich für einen Tag, täglich für 30 Tage, danach wöchentlich.").size(12).color(theme::p().muted),
         ]
         .spacing(8);
         if list.is_empty() {
@@ -1624,29 +1639,29 @@ impl App {
         for (at, label) in list.iter().rev() {
             rows = rows.push(
                 row![
-                    text(label.clone()).font(theme::MONO).size(12),
+                    text(label.clone()).font(theme::meta_font()).size(12.5),
                     Space::new().width(Length::Fill),
-                    button(text("ALS KOPIE WIEDERHERSTELLEN").font(theme::MONO_BOLD).size(10)).padding([3, 8]).on_press(Message::Restore(*at)).style(theme::ghost),
+                    button(theme::btn_small("Als Kopie wiederherstellen")).padding([3, 8]).on_press(Message::Restore(*at)).style(theme::ghost),
                 ]
                 .align_y(Alignment::Center),
             );
         }
         col = col.push(scrollable(rows).style(theme::scroll_dark).height(Length::Shrink).height(Length::Fixed(320.0)));
-        container(col).padding(14).width(Length::Fill).max_width(760).style(theme::panel).into()
+        container(col).padding(20).width(Length::Fill).max_width(760).style(theme::panel).into()
     }
 
     /// Share with guests: invite links (read / read-write), active invites with revoke.
     fn share_panel<'a>(&'a self, invites: &'a [live::Invite]) -> Element<'a, Message> {
         let mut col = column![
-            text("TEILEN — GÄSTE OHNE SERVER (DIREKT VERBUNDEN)").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+            row![theme::heading("Teilen", 20.0), Space::new().width(12), text("Gäste verbinden sich direkt, ohne Server.").size(12).color(theme::p().muted)].align_y(Alignment::Center),
             row![
-                button(text("NUR LESEN · 7 TAGE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Invite(false, 7)).style(theme::tab(false)),
+                button(theme::btn("Nur lesen · 7 Tage")).padding(theme::pad()).on_press(Message::Invite(false, 7)).style(theme::secondary),
                 Space::new().width(8),
-                button(text("LESEN & SCHREIBEN · 7 TAGE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Invite(true, 7)).style(theme::tab(false)),
+                button(theme::btn("Lesen & schreiben · 7 Tage")).padding(theme::pad()).on_press(Message::Invite(true, 7)).style(theme::secondary),
                 Space::new().width(8),
-                button(text("OHNE ABLAUF").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Invite(false, 0)).style(theme::ghost),
+                button(theme::btn("Ohne Ablauf")).padding(theme::pad()).on_press(Message::Invite(false, 0)).style(theme::ghost),
                 Space::new().width(Length::Fill),
-                button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowShare(false)).style(theme::ghost),
+                button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowShare(false)).style(theme::ghost),
             ]
             .align_y(Alignment::Center),
         ]
@@ -1660,15 +1675,15 @@ impl App {
         for i in invites.iter().rev() {
             let state = if i.revoked { "widerrufen".to_string() } else if i.online > 0 { format!("{} verbunden", i.online) } else { "nicht verbunden".to_string() };
             let mut r = row![
-                text(if i.rw { "LESEN & SCHREIBEN" } else { "NUR LESEN" }).font(theme::MONO_BOLD).size(11).width(Length::Fixed(150.0)),
+                text(theme::cased(if i.rw { "Lesen & schreiben" } else { "Nur lesen" })).font(theme::label_font()).size(theme::label_size()).width(Length::Fixed(150.0)),
                 text(state).size(12).color(theme::p().muted).width(Length::Fixed(130.0)),
                 Space::new().width(Length::Fill),
             ]
             .align_y(Alignment::Center)
             .spacing(6);
             if !i.revoked {
-                r = r.push(button(text("LINK KOPIEREN").font(theme::MONO_BOLD).size(10)).padding([3, 8]).on_press(Message::CopyText(i.link.clone())).style(theme::ghost));
-                r = r.push(button(text("WIDERRUFEN").font(theme::MONO_BOLD).size(10)).padding([3, 8]).on_press(Message::Revoke(i.id.clone())).style(theme::ghost));
+                r = r.push(button(theme::btn_small("Link kopieren")).padding([3, 8]).on_press(Message::CopyText(i.link.clone())).style(theme::ghost));
+                r = r.push(button(theme::btn_small("Widerrufen")).padding([3, 8]).on_press(Message::Revoke(i.id.clone())).style(theme::ghost));
             }
             col = col.push(r);
         }
@@ -1676,7 +1691,7 @@ impl App {
         if let Some(data) = &self.share_qr {
             col = col.push(row![scannable_qr(data, 3.0), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
         }
-        container(col).padding(14).width(Length::Fill).max_width(760).style(theme::panel).into()
+        container(col).padding(20).width(Length::Fill).max_width(760).style(theme::panel).into()
     }
 
     fn help_view(&self) -> Element<'_, Message> {
@@ -1698,46 +1713,63 @@ impl App {
             ("Strg ,", "Einstellungen"),
             ("F1", "Diese Übersicht"),
         ];
-        let mut col = column![text("TASTENKÜRZEL").font(theme::MONO).size(theme::LABEL).color(theme::p().muted)].spacing(8);
+        let mut col = column![theme::heading("Tastenkürzel", 22.0)].spacing(9);
         for (k, what) in keys {
             col = col.push(row![text(k).font(theme::MONO_BOLD).size(12).width(Length::Fixed(230.0)), text(what).size(14)].align_y(Alignment::Center));
         }
-        col = col.push(button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowHelp(false)).style(theme::ghost));
+        col = col.push(button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowHelp(false)).style(theme::ghost));
         container(container(col).padding(20).width(Length::Fixed(640.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
     fn devices_view(&self) -> Element<'_, Message> {
-        let mut col = column![].spacing(6);
+        let mut col = column![].spacing(10);
         if self.sync.is_none() {
-            col = col.push(text("Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync").size(13).color(theme::p().accent));
+            col = col.push(text("Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync").size(13).color(theme::p().accent));
             return col.into();
         }
         if self.devices.is_empty() {
             col = col.push(text("Noch kein Gerät gekoppelt.").size(13).color(theme::p().muted));
         }
         for d in &self.devices {
-            col = col.push(row![text(if d.online { "●" } else { "○" }).color(if d.online { theme::p().accent } else { theme::p().muted }).width(Length::Fixed(18.0)), text(d.name.clone()).size(14)]);
+            let online = d.online;
+            col = col.push(
+                row![
+                    container(Space::new().width(8).height(8)).style(move |_| container::Style {
+                        background: Some((if online { theme::p().accent } else { theme::p().muted }).into()),
+                        border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                        ..Default::default()
+                    }),
+                    text(d.name.clone()).size(14).color(theme::p().text),
+                    text(if online { "verbunden" } else { "nicht erreichbar" }).size(12).color(theme::p().muted),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
         }
         match &self.pair_code {
-            None => col = col.push(button(text("TABLET KOPPELN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairStart).style(theme::tab(false))),
+            None => col = col.push(button(theme::btn("Tablet koppeln")).padding(theme::pad()).on_press(Message::PairStart).style(theme::secondary)),
             Some(code) => {
-                col = col.push(text("Koppel-Code (15 Minuten gültig, einmal):").size(12).color(theme::p().muted));
-                // The QR code: the tablet scans it (n0te → Einstellungen → QR SCANNEN).
+                // The QR code: the tablet scans it (n0te → Einstellungen → Laptop → QR scannen).
                 if let Some(data) = &self.pair_qr {
                     col = col.push(
                         row![
                             scannable_qr(data, 4.0),
-                            Space::new().width(14),
-                            text("Am Tablet: n0te → Einstellungen → LAPTOP (SYNC) → QR SCANNEN und diesen Code ansehen. Dafür braucht es kein n0bridge.").size(12).color(theme::p().muted).width(Length::Fixed(260.0)),
+                            Space::new().width(16),
+                            column![
+                                text("Am Tablet scannen").font(theme::title_font()).size(14).color(theme::p().text),
+                                text("n0te → Einstellungen → Laptop → QR scannen. Dafür braucht es kein n0bridge. Der Code gilt 15 Minuten und nur einmal.").size(12).color(theme::p().muted),
+                            ]
+                            .spacing(4)
+                            .width(Length::Fill),
                         ]
                         .align_y(Alignment::Center),
                     );
                 }
-                col = col.push(text_input("", code).size(12).font(theme::MONO).padding(8));
-                let mut buttons = row![button(text("KOPIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::CopyText(code.clone())).style(theme::ghost)].align_y(Alignment::Center);
+                col = col.push(text_input("", code).size(12).font(theme::MONO).padding(8).style(theme::field));
+                let mut buttons = row![button(theme::btn_small("Kopieren")).padding(theme::pad()).on_press(Message::CopyText(code.clone())).style(theme::secondary)].align_y(Alignment::Center);
                 // With n0bridge on both devices the code can go straight to the tablet's clipboard.
                 if n0bridge_installed() {
-                    buttons = buttons.push(Space::new().width(8)).push(button(text("AN TABLET SCHICKEN (n0bridge)").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::PairToTablet).style(theme::ghost));
+                    buttons = buttons.push(Space::new().width(8)).push(button(theme::btn_small("An Tablet schicken (n0bridge)")).padding(theme::pad()).on_press(Message::PairToTablet).style(theme::ghost));
                 }
                 col = col.push(buttons);
             }
@@ -1746,41 +1778,59 @@ impl App {
     }
 
     fn settings_view(&self) -> Element<'_, Message> {
-        let mut themes = row![].spacing(10);
-        for t in theme::PALETTES {
+        // Designs: a card per style with a tiny preview of its look.
+        let mut cards = Vec::new();
+        for t in theme::PALETTES.iter() {
             let on = t.id == theme::p().id;
-            let swatch = row![
-                container(Space::new().width(14).height(28)).style(move |_| container::Style { background: Some(t.chrome.into()), ..Default::default() }),
-                container(Space::new().width(22).height(28)).style(move |_| container::Style { background: Some(t.paper.into()), ..Default::default() }),
-                container(Space::new().width(8).height(28)).style(move |_| container::Style { background: Some(t.accent.into()), ..Default::default() }),
-            ];
-            themes = themes.push(button(column![swatch, text(t.name).size(12)].spacing(4).align_x(Alignment::Center)).padding(6).on_press(Message::SetTheme(t.id)).style(theme::tab(on)));
+            cards.push(
+                button(
+                    column![
+                        style_preview(t),
+                        text(t.name).font(theme::title_font()).size(14).color(theme::p().text),
+                        text(t.style.desc).size(11.5).color(theme::p().muted),
+                    ]
+                    .spacing(5),
+                )
+                .padding(8)
+                .width(Length::Fixed(176.0))
+                .on_press(Message::SetTheme(t.id))
+                .style(theme::option(on))
+                .into(),
+            );
         }
+        let designs = iced::widget::Row::with_children(cards).spacing(10).wrap().vertical_spacing(10);
         let slider = |label: &'static str, v: f32, f: fn(f32) -> Message| {
             row![
-                text(label).size(14).width(Length::Fixed(220.0)),
-                iced::widget::slider(4.0..=160.0, v, f).width(Length::Fixed(260.0)),
-                text(format!("{v:.0} pt")).font(theme::MONO).size(12).width(Length::Fixed(60.0)),
+                text(label).size(14).width(Length::Fixed(170.0)),
+                iced::widget::slider(4.0..=160.0, v, f).style(theme::slider_style).width(Length::Fill),
+                text(format!("{v:.0} pt")).font(theme::MONO).size(12).width(Length::Fixed(56.0)).align_x(iced::alignment::Horizontal::Right),
             ]
             .spacing(12)
             .align_y(Alignment::Center)
         };
-        let col = column![
-            text("EINSTELLUNGEN").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
-            text("Design").size(14),
-            themes,
-            text("Abstände").size(14),
-            slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap),
-            slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap),
-            text("Text").size(14),
-            iced::widget::checkbox(self.settings.formula_center).label("Formeln zentrieren ($$…$$ und Formelblöcke)").on_toggle(Message::FormulaCenter).size(14).text_size(13),
-            text("Geräte (Sync)").size(14),
-            self.devices_view(),
-            text("Exportierte PDFs bleiben weiß. Gespeichert in ~/.config/n0te/laptop.conf").size(12).color(theme::p().muted),
-            button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowSettings(false)).style(theme::ghost),
+        let section = settings_section;
+        let rule = || container(Space::new()).height(1).width(Length::Fill).style(theme::hairline);
+        let body = column![
+            section("Design", "Farben, Formen und Schrift. Exportierte PDFs bleiben weiß.", designs.into()),
+            rule(),
+            section("Abstände", "Zwischen den Seiten im Notizbuch.", column![slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap), slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap)].spacing(8).into()),
+            rule(),
+            section(
+                "Text",
+                "Textseiten und Textfelder.",
+                iced::widget::toggler(self.settings.formula_center).label("Formeln zentrieren ($$…$$ und Formelblöcke)").on_toggle(Message::FormulaCenter).size(20).text_size(14).spacing(12).style(theme::switch).into(),
+            ),
+            rule(),
+            section("Geräte", "Sync mit dem Tablet, direkt und ohne Server.", self.devices_view()),
         ]
-        .spacing(12);
-        container(container(col).padding(20).width(Length::Fixed(720.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
+        .spacing(18);
+        let col = column![
+            row![theme::heading("Einstellungen", 24.0), Space::new().width(Length::Fill), button(theme::btn_small("Schließen")).padding(theme::pad()).on_press(Message::ShowSettings(false)).style(theme::ghost)].align_y(Alignment::Center),
+            iced::widget::scrollable(body).style(theme::scroll_dark).height(Length::Shrink),
+            text("Gespeichert in ~/.config/n0te/laptop.conf").font(theme::meta_font()).size(11.5).color(theme::p().muted),
+        ]
+        .spacing(20);
+        container(container(col).padding(26).width(Length::Fixed(860.0)).max_height(820.0).style(theme::panel)).padding(Padding { top: 40.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
     fn notebook_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
@@ -1799,9 +1849,9 @@ impl App {
         } else if let Some(invites) = &self.share {
             Some(self.share_panel(invites))
         } else if self.show_pdf_import {
-            Some(library::pdf_panel(&self.pdfs, "PDF EINFÜGEN — NACH DER AKTUELLEN SEITE"))
+            Some(library::pdf_panel(&self.pdfs, "PDF einfügen: nach der aktuellen Seite"))
         } else {
-            self.export.as_ref().map(|picked| crate::library::export_panel(o, picked))
+            None
         };
         let canvas: Element<'a, Message> = match panel {
             Some(p) => stack![canvas, container(p).padding(16).width(Length::Fill)].into(),
@@ -1819,7 +1869,7 @@ impl App {
         let live_bar: Element<'a, Message> = match &self.live_session {
             Some(l) => container(
                 row![
-                    text(format!("LIVE MIT {}", l.name.to_uppercase())).font(theme::MONO_BOLD).size(theme::LABEL).color(theme::p().accent),
+                    text(theme::cased(&format!("Live mit {}", l.name))).font(theme::label_font()).size(theme::label_size()).color(theme::p().accent),
                     Space::new().width(18),
                     iced::widget::checkbox(l.follow_them).label("Ansicht folgt dem Tablet").on_toggle(Message::FollowThem).size(14).text_size(12),
                     Space::new().width(18),
@@ -1827,7 +1877,7 @@ impl App {
                     Space::new().width(18),
                     iced::widget::checkbox(self.settings.remote_frame).label("Rahmen zeigen").on_toggle(Message::RemoteFrame).size(14).text_size(12),
                     Space::new().width(Length::Fill),
-                    button(text("BEENDEN").font(theme::MONO_BOLD).size(10)).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
+                    button(theme::btn_small("Beenden")).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
                 ]
                 .align_y(Alignment::Center),
             )
@@ -1852,7 +1902,7 @@ impl App {
         let chip = |s: String| container(text(s).font(theme::MONO).size(theme::LABEL)).padding([3, 10]).style(theme::chip);
         container(
             row![
-                button(text("‹ BIBLIOTHEK").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::Back).style(theme::ghost),
+                button(theme::btn("‹ Bibliothek")).padding(theme::pad()).on_press(Message::Back).style(theme::ghost),
                 Space::new().width(18),
                 text(o.nb.title().to_uppercase()).font(theme::MONO).size(theme::SMALL).color(theme::p().text),
                 Space::new().width(Length::Fill),
@@ -1860,19 +1910,19 @@ impl App {
                 Space::new().width(8),
                 chip(format!("{current:02} / {:02}", o.pages.total_pages)),
                 Space::new().width(14),
-                button(text("+ TEXTSEITE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::NewTextPage).style(theme::tab(false)),
+                button(theme::btn("+ Textseite")).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
                 Space::new().width(6),
-                button(text("NOTIZEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ToggleNotes).style(theme::tab(self.text_page.as_ref().is_some_and(|t| t.docked))),
+                button(theme::btn("Notizen")).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(self.text_page.as_ref().is_some_and(|t| t.docked))),
                 Space::new().width(6),
-                button(text("PDF EINFÜGEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
+                button(theme::btn("PDF einfügen")).padding(theme::pad()).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
                 Space::new().width(6),
-                button(text("EXPORT").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
+                button(theme::btn("Export")).padding(theme::pad()).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
                 Space::new().width(6),
-                button(text("TEILEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
+                button(theme::btn("Teilen")).padding(theme::pad()).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
                 Space::new().width(6),
                 match &self.live_session {
-                    Some(l) => button(text(format!("● LIVE · {}", l.name.to_uppercase())).font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::StopLive).style(theme::accent_button),
-                    None => button(text("LIVE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::StartLive).style(theme::tab(false)),
+                    Some(l) => button(theme::btn(&format!("● Live · {}", l.name))).padding(theme::pad()).on_press(Message::StopLive).style(theme::accent_button),
+                    None => button(theme::btn("Live")).padding(theme::pad()).on_press(Message::StartLive).style(theme::tab(false)),
                 },
             ]
             .align_y(Alignment::Center),
@@ -1890,7 +1940,7 @@ impl App {
                 text(s.as_str()).font(theme::MONO).size(10.5).color(theme::p().text),
                 Space::new().width(10),
                 match &self.last_export {
-                    Some(p) => Element::from(button(text("ÖFFNEN").font(theme::MONO_BOLD).size(10)).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
+                    Some(p) => Element::from(button(theme::btn_small("Öffnen")).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
                     None => Space::new().into(),
                 },
                 Space::new().width(6),
@@ -1913,11 +1963,11 @@ impl App {
         let t = self.creating.as_ref()?;
         Some(
             row![
-                text_input("Titel, z. B. Analysis I", t).on_input(Message::NewTitle).on_submit(Message::Create).padding(10).size(15).width(Length::Fixed(380.0)),
+                text_input("Titel, z. B. Analysis I", t).on_input(Message::NewTitle).on_submit(Message::Create).padding(10).size(15).width(Length::Fixed(380.0)).style(theme::field),
                 Space::new().width(10),
-                button(text("ANLEGEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([8, 14]).on_press(Message::Create).style(theme::tab(true)),
+                button(theme::btn("Anlegen")).padding(theme::pad()).on_press(Message::Create).style(theme::accent_button),
                 Space::new().width(8),
-                button(text("ABBRECHEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([8, 14]).on_press(Message::CancelCreate).style(theme::ghost),
+                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::CancelCreate).style(theme::ghost),
             ]
             .align_y(Alignment::Center)
             .into(),
@@ -1968,6 +2018,52 @@ async fn n0bridge(args: Vec<String>) -> Result<String, String> {
 fn scannable_qr(data: &iced::widget::qr_code::Data, cell: f32) -> Element<'_, Message> {
     let qr = iced::widget::qr_code(data).cell_size(cell).style(|_| iced::widget::qr_code::Style { cell: iced::Color::BLACK, background: iced::Color::WHITE });
     container(qr).padding(4.0 * cell).style(|_| container::Style { background: Some(iced::Color::WHITE.into()), ..Default::default() }).into()
+}
+
+/// A settings section: title and explanation on the left, the controls on the right.
+fn settings_section<'a>(title: &str, desc: &str, body: Element<'a, Message>) -> Element<'a, Message> {
+    row![
+        column![text(title.to_string()).font(theme::title_font()).size(15).color(theme::p().text), text(desc.to_string()).size(12).color(theme::p().muted)].spacing(3).width(Length::Fixed(190.0)),
+        Space::new().width(24),
+        container(body).width(Length::Fill),
+    ]
+    .into()
+}
+
+/// A design in miniature: its chrome, heading face, a primary and a secondary button in its
+/// shapes, and a sheet of its paper.
+fn style_preview(t: &'static theme::Palette) -> Element<'static, Message> {
+    use theme::{Fill, Heading};
+    let st = t.style;
+    let face = match st.heading {
+        Heading::Dot => theme::DOT,
+        Heading::Mono => theme::MONO_BOLD,
+        Heading::Sans => theme::SANS_BOLD,
+        Heading::Serif => theme::SERIF_MEDIUM,
+    };
+    let r = st.button.min(7.0);
+    let primary = container(Space::new().width(30).height(11)).style(move |_| container::Style { background: Some(t.accent.into()), border: iced::Border { radius: r.into(), ..Default::default() }, ..Default::default() });
+    let secondary = container(Space::new().width(24).height(11)).style(move |_| {
+        let (bg, line) = match st.fill {
+            Fill::Outline => (iced::Color::TRANSPARENT, t.border),
+            Fill::Tonal => (if t.dark { theme::alpha(t.accent, 0.22) } else { t.surface_2 }, iced::Color::TRANSPARENT),
+            Fill::Rule => (iced::Color::TRANSPARENT, theme::alpha(t.text, 0.6)),
+        };
+        container::Style { background: Some(bg.into()), border: iced::Border { radius: r.into(), width: if line.a > 0.0 { 1.0 } else { 0.0 }, color: line }, ..Default::default() }
+    });
+    let sheet = container(Space::new().width(30).height(40)).style(move |_| container::Style { background: Some(t.paper.into()), border: iced::Border { radius: st.card.min(3.0).into(), ..Default::default() }, ..Default::default() });
+    container(
+        row![
+            column![text(if st.heading == Heading::Dot { "aa" } else { "Aa" }).font(face).size(if st.heading == Heading::Dot { 26 } else { 22 }).color(t.text), row![primary, Space::new().width(5), secondary]].spacing(6),
+            Space::new().width(Length::Fill),
+            sheet,
+        ]
+        .align_y(Alignment::Center),
+    )
+    .padding([10, 12])
+    .width(Length::Fill)
+    .style(move |_| container::Style { background: Some(t.chrome.into()), border: iced::Border { radius: st.card.min(10.0).into(), width: 1.0, color: t.border }, ..Default::default() })
+    .into()
 }
 
 /// Whether the n0bridge CLI is installed (then codes can go straight to the tablet).

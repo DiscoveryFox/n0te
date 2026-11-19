@@ -14,29 +14,37 @@ use crate::app::{App, Bundle, Entry, ExportWhat, Message, Open};
 use crate::theme;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let imports = if app.bundles.is_empty() { "IMPORTIEREN".to_string() } else { format!("IMPORTIEREN · {}", app.bundles.len()) };
+    let imports = if app.bundles.is_empty() { "Importieren".to_string() } else { format!("Importieren · {}", app.bundles.len()) };
     let top = container(
         row![
             wordmark(),
-            Space::new().width(18),
-            text("BIBLIOTHEK").font(theme::MONO).size(theme::SMALL).color(theme::p().muted),
             Space::new().width(Length::Fill),
-            button(text("EINLADUNG").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::StartJoin).style(theme::tab(app.joining.is_some())),
+            sync_chip(app),
+            Space::new().width(12),
+            button(theme::btn("Einladung")).padding(theme::pad()).on_press(Message::StartJoin).style(theme::tab(app.joining.is_some())),
             Space::new().width(8),
-            button(text("PDF IMPORTIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowPdfImport(!app.show_pdf_import)).style(theme::tab(app.show_pdf_import)),
+            button(theme::btn(&imports)).padding(theme::pad()).on_press(Message::ShowImports(!app.show_imports)).style(theme::tab(app.show_imports)),
             Space::new().width(8),
-            button(text(imports).font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowImports(!app.show_imports)).style(theme::tab(app.show_imports)),
+            button(theme::btn("+ Neues Notizbuch")).padding(theme::pad()).on_press(Message::StartCreate).style(theme::accent_button),
             Space::new().width(8),
-            button(text("+ NOTIZBUCH").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::StartCreate).style(theme::accent_button),
+            button(theme::btn("Einstellungen")).padding(theme::pad()).on_press(Message::ShowSettings(true)).style(theme::ghost),
         ]
         .align_y(Alignment::Center),
     )
-    .padding(Padding { top: 8.0, bottom: 8.0, left: 18.0, right: 14.0 })
-    .height(56)
+    .padding(Padding { top: 8.0, bottom: 8.0, left: 20.0, right: 16.0 })
+    .height(58)
     .width(Length::Fill)
     .style(theme::chrome);
 
-    let mut content = column![].spacing(18).padding(Padding { top: 18.0, right: 24.0, bottom: 32.0, left: 24.0 });
+    let folders = app.entries.iter().map(|e| e.folder.as_str()).filter(|f| !f.is_empty()).collect::<HashSet<_>>().len();
+    let n = app.entries.len();
+    let mut facts = format!("{n} {}", if n == 1 { "Notizbuch" } else { "Notizbücher" });
+    if folders > 0 {
+        facts += &format!(" · {folders} {}", if folders == 1 { "Ordner" } else { "Ordner" });
+    }
+    let mut content = column![column![theme::heading("Bibliothek", 30.0), text(facts).font(theme::meta_font()).size(13).color(theme::p().muted)].spacing(2)]
+        .spacing(26)
+        .padding(Padding { top: 26.0, right: 32.0, bottom: 40.0, left: 32.0 });
     if let Some(r) = app.create_row() {
         content = content.push(r);
     }
@@ -44,35 +52,47 @@ pub fn view(app: &App) -> Element<'_, Message> {
         content = content.push(
             container(
                 column![
-                    text("EINLADUNG ÖFFNEN — DAS NOTIZBUCH WIRD DIREKT VOM BESITZER GELADEN").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+                    theme::caption("Einladung öffnen"),
                     row![
-                        iced::widget::text_input("n0te://invite/…", link).on_input(Message::JoinLink).on_submit(Message::Join).padding(10).size(14),
+                        iced::widget::text_input("n0te://invite/…", link).on_input(Message::JoinLink).on_submit(Message::Join).padding(10).size(14).style(theme::field),
                         Space::new().width(8),
-                        button(text("BEITRETEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([8, 14]).on_press(Message::Join).style(theme::accent_button),
+                        button(theme::btn("Beitreten")).padding(theme::pad()).on_press(Message::Join).style(theme::accent_button),
+                        Space::new().width(6),
+                        button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::CancelJoin).style(theme::ghost),
                     ]
                     .align_y(Alignment::Center),
+                    text("Das Notizbuch wird direkt vom Gerät geladen, das es geteilt hat, ohne Server.").size(12).color(theme::p().muted),
                 ]
-                .spacing(8),
+                .spacing(10),
             )
-            .padding(14)
+            .padding(18)
             .width(Length::Fill)
             .max_width(900)
             .style(theme::panel),
         );
     }
     if app.show_imports {
-        content = content.push(imports_panel(&app.bundles));
-    }
-    if app.show_pdf_import {
-        content = content.push(pdf_panel(&app.pdfs, "PDF IMPORTIEREN — WIRD EIN NEUES NOTIZBUCH"));
+        content = content.push(row![imports_panel(&app.bundles), pdf_panel(&app.pdfs, "PDF importieren: wird ein neues Notizbuch")].spacing(16));
+    } else if app.show_pdf_import {
+        content = content.push(pdf_panel(&app.pdfs, "PDF importieren: wird ein neues Notizbuch"));
     }
     if app.entries.is_empty() {
         content = content.push(
-            column![
-                text("Noch keine Notizbücher auf dem Laptop.").size(18).color(theme::p().text),
-                text("Auf dem Tablet: Notizbuch halten → AN DEN LAPTOP. Es kommt über n0bridge und erscheint unter IMPORTIEREN.").size(14).color(theme::p().muted),
-            ]
-            .spacing(8),
+            container(
+                column![
+                    theme::heading("Noch leer", 22.0),
+                    text("Leg ein Notizbuch an, nimm eins vom Tablet (dort: Notizbuch halten → An den Laptop) oder importiere eine PDF.").size(14).color(theme::p().muted),
+                    row![
+                        button(theme::btn("+ Neues Notizbuch")).padding(theme::pad()).on_press(Message::StartCreate).style(theme::accent_button),
+                        Space::new().width(8),
+                        button(theme::btn("Importieren")).padding(theme::pad()).on_press(Message::ShowImports(true)).style(theme::secondary),
+                    ],
+                ]
+                .spacing(12),
+            )
+            .padding(24)
+            .max_width(620)
+            .style(theme::group),
         );
     }
     let mut folder: Option<&str> = None;
@@ -96,14 +116,46 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Adds a folder's cards (wrapping grid) under its label.
+/// "● Tablet verbunden" (or not reachable) when a tablet is paired.
+fn sync_chip(app: &App) -> Element<'_, Message> {
+    if app.sync.is_none() || app.devices.is_empty() {
+        return Space::new().into();
+    }
+    let d = app.devices.iter().find(|d| d.online).unwrap_or(&app.devices[0]);
+    let label = if d.online { format!("{} verbunden", d.name) } else { format!("{} nicht erreichbar", d.name) };
+    container(
+        row![
+            container(Space::new().width(7).height(7)).style(move |_| container::Style {
+                background: Some((if d.online { theme::p().accent } else { theme::p().muted }).into()),
+                border: iced::Border { radius: 4.0.into(), ..Default::default() },
+                ..Default::default()
+            }),
+            text(theme::cased(&label)).font(theme::meta_font()).size(if theme::s().label == theme::Label::MonoCaps { theme::LABEL } else { 12.5 }).color(if d.online { theme::p().text } else { theme::p().muted }),
+        ]
+        .spacing(7)
+        .align_y(Alignment::Center),
+    )
+    .padding([5, 11])
+    .style(theme::chip)
+    .into()
+}
+
+/// Adds a folder's cards (wrapping grid) under its heading and a hairline.
 fn flush<'a>(content: iced::widget::Column<'a, Message>, folder: Option<&str>, cards: &mut Vec<Element<'a, Message>>) -> iced::widget::Column<'a, Message> {
     if cards.is_empty() {
         return content;
     }
-    let label = folder.filter(|f| !f.is_empty()).unwrap_or("NOTIZBÜCHER").to_uppercase();
-    let grid = iced::widget::Row::with_children(std::mem::take(cards)).spacing(14).wrap().vertical_spacing(14);
-    content.push(column![text(label).font(theme::MONO).size(theme::LABEL).color(theme::p().muted), grid].spacing(8))
+    let label = folder.filter(|f| !f.is_empty()).unwrap_or("Notizbücher").to_string();
+    let head = row![
+        theme::caption(&label),
+        Space::new().width(10),
+        text(cards.len().to_string()).font(theme::meta_font()).size(11.5).color(theme::alpha(theme::p().muted, 0.8)),
+        Space::new().width(14),
+        container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
+    ]
+    .align_y(Alignment::Center);
+    let grid = iced::widget::Row::with_children(std::mem::take(cards)).spacing(20).wrap().vertical_spacing(22);
+    content.push(column![head, grid].spacing(14))
 }
 
 /// "n0te" in the dot face with the red dot.
@@ -117,102 +169,116 @@ pub fn wordmark<'a>() -> Element<'a, Message> {
     .into()
 }
 
+const COVER: (f32, f32) = (164.0, 212.0);
+
 fn card(e: &Entry) -> Element<'_, Message> {
-    let pages = format!("{} {}", e.sheets, if e.sheets == 1 { "Seite" } else { "Seiten" });
+    let mut meta = format!("{} {}", e.sheets, if e.sheets == 1 { "Seite" } else { "Seiten" });
+    if let Some(t) = e.modified {
+        meta += &format!(" · {}", age(t));
+    }
     button(
         column![
-            canvas_widget(Cover { kind: e.cover.clone(), title: e.title.clone() }).width(196).height(132),
-            Space::new().height(8),
-            text(fit(&e.title, 24)).font(theme::SANS_MEDIUM).size(15).color(theme::p().text),
-            text(pages).font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+            canvas_widget(Cover { kind: e.cover.clone(), title: e.title.clone() }).width(COVER.0).height(COVER.1),
+            Space::new().height(10),
+            text(fit(&e.title, 21)).font(theme::title_font()).size(15).color(theme::p().text),
+            text(theme::cased(&meta)).font(theme::meta_font()).size(if theme::s().label == theme::Label::MonoCaps { theme::LABEL } else { 12.0 }).color(theme::p().muted),
         ]
-        .spacing(2),
+        .spacing(3),
     )
     .padding(10)
+    .width(COVER.0 + 20.0)
     .on_press(Message::Open(e.id.clone()))
     .style(theme::card)
     .into()
 }
 
 fn imports_panel(bundles: &[Bundle]) -> Element<'_, Message> {
-    let mut list = column![text("VOM TABLET (~/Downloads/n0bridge)").font(theme::MONO).size(theme::LABEL).color(theme::p().muted)].spacing(6);
+    let mut list = column![theme::caption("Vom Tablet (~/Downloads/n0bridge)")].spacing(8);
     if bundles.is_empty() {
-        list = list.push(text("Keine .n0te-Dateien gefunden. Auf dem Tablet: Notizbuch halten → AN DEN LAPTOP.").size(13).color(theme::p().muted));
+        list = list.push(text("Keine .n0te-Dateien gefunden. Auf dem Tablet: Notizbuch halten → An den Laptop.").size(13).color(theme::p().muted));
     }
     for b in bundles {
         let name = b.path.file_stem().map(|s| s.to_string_lossy().replace('_', " ")).unwrap_or_default();
         list = list.push(
             row![
-                text(name).size(14).color(theme::p().text),
-                Space::new().width(12),
-                text(age(b.modified)).font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+                column![text(name).size(14).color(theme::p().text), text(age(b.modified)).font(theme::meta_font()).size(11.5).color(theme::p().muted)].spacing(1),
                 Space::new().width(Length::Fill),
-                button(text("ÜBERNEHMEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::Import(b.path.clone())).style(theme::tab(false)),
+                button(theme::btn_small("Übernehmen")).padding(theme::pad()).on_press(Message::Import(b.path.clone())).style(theme::secondary),
             ]
             .align_y(Alignment::Center),
         );
     }
     list = list.push(text("Übernehmen führt mit dem Stand auf dem Laptop zusammen: nichts geht verloren.").size(12).color(theme::p().muted));
-    container(list).padding(14).width(Length::Fill).style(theme::panel).into()
+    container(list).padding(18).width(Length::Fill).style(theme::panel).into()
 }
 
 /// Recent PDFs to import; dropping a file onto the window works too.
 pub fn pdf_panel<'a>(pdfs: &'a [(PathBuf, SystemTime)], title: &'a str) -> Element<'a, Message> {
-    let mut list = column![text(title).font(theme::MONO).size(theme::LABEL).color(theme::p().muted)].spacing(6);
+    let mut list = column![theme::caption(title)].spacing(8);
     if pdfs.is_empty() {
         list = list.push(text("Keine PDFs in Downloads oder Dokumente.").size(13).color(theme::p().muted));
     }
-    for (path, modified) in pdfs.iter().take(14) {
+    for (path, modified) in pdfs.iter().take(12) {
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = path.parent().and_then(|d| d.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         list = list.push(
             row![
-                text(fit(&name, 60)).size(14).color(theme::p().text),
-                Space::new().width(10),
-                text(format!("{dir} · {}", age(*modified))).font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+                column![text(fit(&name, 52)).size(14).color(theme::p().text), text(format!("{dir} · {}", age(*modified))).font(theme::meta_font()).size(11.5).color(theme::p().muted)].spacing(1),
                 Space::new().width(Length::Fill),
-                button(text("NEHMEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ImportPdf(path.clone())).style(theme::tab(false)),
+                button(theme::btn_small("Nehmen")).padding(theme::pad()).on_press(Message::ImportPdf(path.clone())).style(theme::secondary),
             ]
             .align_y(Alignment::Center),
         );
     }
     list = list.push(text("Oder eine PDF- bzw. .n0te-Datei ins Fenster ziehen.").size(12).color(theme::p().muted));
-    container(list).padding(14).width(Length::Fill).max_width(900).style(theme::panel).into()
+    container(list).padding(18).width(Length::Fill).max_width(900).style(theme::panel).into()
 }
 
-/// Export: whole notebook, this page, or the picked pages (with their side pages).
-pub fn export_panel<'a>(o: &'a Open, picked: &'a HashSet<String>) -> Element<'a, Message> {
-    let mut pages = column![].spacing(2);
-    for p in o.pages.pages.iter().filter(|p| p.placed.side == 0) {
-        let on = picked.contains(&p.placed.node);
-        let sides = o.pages.pages.iter().filter(|s| s.placed.main_node == p.placed.node && s.placed.side != 0).count();
-        let label = format!("{}  {:02}{}", if on { "■" } else { "□" }, p.placed.number, if sides > 0 { format!("  +{sides}") } else { String::new() });
-        pages = pages.push(button(text(label).font(theme::MONO).size(12)).padding([3, 8]).on_press(Message::TogglePick(p.placed.node.clone())).style(theme::row(on)));
-    }
-    let list = iced::widget::scrollable(pages).style(theme::scroll_dark).height(Length::Fixed(260.0));
-    container(
-        column![
-            text("PDF EXPORTIEREN — NACH ~/Downloads").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
-            row![
-                button(text("GANZES NOTIZBUCH").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::All)).style(theme::accent_button),
-                Space::new().width(8),
-                button(text("DIESE SEITE").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::Current)).style(theme::tab(false)),
-                Space::new().width(8),
-                button(text(format!("AUSWAHL ({})", picked.len())).font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::Picked)).style(theme::tab(false)),
-                Space::new().width(Length::Fill),
-                button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowExport(false)).style(theme::ghost),
-            ]
-            .align_y(Alignment::Center),
-            text("Für AUSWAHL Seiten anklicken (Seitenblätter kommen mit):").size(12).color(theme::p().muted),
-            list,
+/// Export as a dialog: pick the scope (whole notebook, this page, a selection), then one
+/// primary action. Selected pages take their side pages along.
+pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportWhat, current: u32) -> Element<'a, Message> {
+    let tile = |what: ExportWhat, title: &str, sub: String| {
+        button(column![text(title.to_string()).font(theme::title_font()).size(15).color(theme::p().text), text(sub).size(12).color(theme::p().muted)].spacing(4))
+            .padding([14, 16])
+            .width(Length::Fill)
+            .on_press(Message::ExportMode(what))
+            .style(theme::option(mode == what))
+    };
+    let mut col = column![
+        row![theme::heading("PDF exportieren", 22.0), Space::new().width(Length::Fill), button(theme::btn_small("Schließen")).padding(theme::pad()).on_press(Message::ShowExport(false)).style(theme::ghost)].align_y(Alignment::Center),
+        theme::caption("Umfang"),
+        row![
+            tile(ExportWhat::All, "Ganzes Notizbuch", format!("{} Seiten mit Seitenblättern", o.pages.total_pages)),
+            tile(ExportWhat::Current, "Diese Seite", format!("Seite {current} und ihre Seitenblätter")),
+            tile(ExportWhat::Picked, "Auswahl", if picked.is_empty() { "Seiten unten antippen".to_string() } else { format!("{} {} gewählt", picked.len(), if picked.len() == 1 { "Seite" } else { "Seiten" }) }),
         ]
         .spacing(10),
-    )
-    .padding(14)
-    .width(Length::Fill)
-    .max_width(640)
-    .style(theme::panel)
-    .into()
+    ]
+    .spacing(14);
+    if mode == ExportWhat::Picked {
+        let mut chips = Vec::new();
+        for p in o.pages.pages.iter().filter(|p| p.placed.side == 0) {
+            let on = picked.contains(&p.placed.node);
+            let sides = o.pages.pages.iter().filter(|s| s.placed.main_node == p.placed.node && s.placed.side != 0).count();
+            let label = format!("{:02}{}", p.placed.number, if sides > 0 { format!(" +{sides}") } else { String::new() });
+            chips.push(button(text(label).font(theme::MONO).size(12)).padding([6, 11]).on_press(Message::TogglePick(p.placed.node.clone())).style(theme::tab(on)).into());
+        }
+        col = col.push(theme::caption("Seiten (+n: Seitenblätter, kommen mit)"));
+        col = col.push(iced::widget::scrollable(iced::widget::Row::with_children(chips).spacing(6).wrap().vertical_spacing(6)).style(theme::scroll_dark).height(Length::Fixed(190.0)));
+    }
+    let ready = mode != ExportWhat::Picked || !picked.is_empty();
+    col = col.push(container(Space::new()).height(1).width(Length::Fill).style(theme::hairline));
+    col = col.push(
+        row![
+            text("Nach ~/Downloads · Seiten bleiben weiß, auch in dunklen Designs").font(theme::meta_font()).size(12).color(theme::p().muted),
+            Space::new().width(Length::Fill),
+            button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::ShowExport(false)).style(theme::ghost),
+            Space::new().width(8),
+            button(theme::btn("Exportieren")).padding(theme::pad()).on_press_maybe(ready.then_some(Message::Export(mode))).style(theme::accent_button),
+        ]
+        .align_y(Alignment::Center),
+    );
+    container(container(col).padding(24).width(Length::Fixed(700.0)).style(theme::panel)).padding(Padding { top: 80.0, ..Padding::ZERO }).center_x(Length::Fill).into()
 }
 
 fn age(t: SystemTime) -> String {
@@ -308,8 +374,8 @@ impl<M> canvas::Program<M> for Cover {
                 if !theme::p().dark {
                     f.stroke(&Path::rectangle(Point::new(0.5, 0.5), Size::new(w - 1.0, h - 1.0)), Stroke::default().with_color(theme::p().border).with_width(1.0));
                 }
-                let mut y = 24.0;
-                for _ in 0..6 {
+                let mut y = 30.0;
+                while y < h - 12.0 {
                     f.stroke(&Path::line(Point::new(14.0, y), Point::new(w - 14.0, y)), Stroke::default().with_color(iced::color!(0xE3E7EE)).with_width(1.0));
                     y += 17.0;
                 }
