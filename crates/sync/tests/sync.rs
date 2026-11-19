@@ -161,9 +161,11 @@ fn guests_get_one_notebook_with_their_rights_and_can_be_revoked() {
 
     // Revoke the writer: disconnected, refused when it comes back, owner edits stay home.
     let events = writer.events().unwrap();
+    let owner_events = owner.events().unwrap();
     let rw_id = owner.list_invites().into_iter().find(|i| i.role == Role::ReadWrite).unwrap().id;
     owner.revoke(&rw_id).unwrap();
     wait_event(&events, "access revoked", |e| matches!(e, Event::AccessRevoked { notebook } if *notebook == nb1));
+    wait_event(&owner_events, "owner sees the guest leave", |e| matches!(e, Event::GuestLeft { invite, .. } if *invite == rw_id));
     let before = strokes(&rw, &nb1, &s1);
     add_strokes(&ro, &nb1, &s1, 1);
     owner.notify_local_change(&nb1);

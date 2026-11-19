@@ -445,11 +445,17 @@ impl Engine {
             r.revoked = true;
             st.save_invites()?;
         }
-        let mut sessions = self.inner.sessions.lock().expect("sessions");
-        let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| *k).collect();
-        for k in gone {
-            if let Some(s) = sessions.remove(&k) {
-                s.conn.close(3u32.into(), b"revoked");
+        let removed: Vec<Arc<Session>> = {
+            let mut sessions = self.inner.sessions.lock().expect("sessions");
+            let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| *k).collect();
+            gone.into_iter().filter_map(|k| sessions.remove(&k)).collect()
+        };
+        // Taken out of the map here, so the session's own end won't report it: do it now
+        // (outside the lock, listeners may call back in).
+        for s in removed {
+            s.conn.close(3u32.into(), b"revoked");
+            if let Kind::Guest { invite, notebook, .. } = &s.kind {
+                (self.inner.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone() });
             }
         }
         Ok(())
