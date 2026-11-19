@@ -47,6 +47,10 @@ pub enum FfiSyncEvent {
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: Vec<f32>, zoom: f32, laser: Option<Vec<f32>> },
     /// Samples (packed LE f32 x, y, pressure, t_ms) of a stroke being drawn elsewhere.
     LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: FfiBrush, samples: Vec<u8>, done: bool },
+    /// An own device asks for a picture of this app's screen: answer with `send_screenshot`.
+    ScreenshotRequest { device: String },
+    /// A picture another device sent (JPEG).
+    Screenshot { device: String, image: Vec<u8> },
     /// Another device is erasing: strokes it hid, area-eraser dabs as x, y, r triples.
     LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<f32> },
     OpenRequest { device: String, notebook: String },
@@ -137,6 +141,8 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::DeviceOffline { id } => FfiSyncEvent::DeviceOffline { id },
         Event::Paired { device: d } => FfiSyncEvent::Paired { device: device(d) },
         Event::Presence { device, notebook, sheet, viewport, zoom, laser } => FfiSyncEvent::Presence { device, notebook, sheet, viewport: viewport.to_vec(), zoom, laser: laser.map(|l| l.to_vec()) },
+        Event::ScreenshotRequest { device } => FfiSyncEvent::ScreenshotRequest { device },
+        Event::Screenshot { device, image } => FfiSyncEvent::Screenshot { device, image },
         Event::LiveErase { device, notebook, sheet, ids, dabs } => FfiSyncEvent::LiveErase { device, notebook, sheet, ids, dabs: dabs.iter().flatten().copied().collect() },
         Event::LiveStroke { device, notebook, sheet, stroke, seq, brush, samples, done } => FfiSyncEvent::LiveStroke {
             device,
@@ -229,6 +235,10 @@ impl SyncEngine {
             e.send_presence(&notebook, sheet.as_deref(), v, zoom, l);
             Ok(())
         })
+    }
+    /// Answers a screenshot request from an own device (JPEG of this app's screen).
+    pub fn send_screenshot(&self, device: String, image: Vec<u8>) -> R<()> {
+        self.with(|e| Ok(e.send_screenshot(&device, &image)?))
     }
     /// Erasing as it happens: strokes just hidden (stroke eraser) and new area-eraser dabs as
     /// x, y, r triples (sheet points). The stored result follows with the next save.

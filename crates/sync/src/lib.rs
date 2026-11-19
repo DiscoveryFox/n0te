@@ -72,6 +72,10 @@ pub enum Event {
     Paired { device: DeviceInfo },
     Presence { device: String, notebook: String, sheet: Option<String>, viewport: [f32; 4], zoom: f32, laser: Option<[f32; 2]> },
     LiveStroke { device: String, notebook: String, sheet: String, stroke: u64, seq: u32, brush: LiveBrush, samples: Vec<u8>, done: bool },
+    /// An own device asks for a picture of this app's screen (answer with `send_screenshot`).
+    ScreenshotRequest { device: String },
+    /// The picture another device sent (JPEG).
+    Screenshot { device: String, image: Vec<u8> },
     /// Another device is erasing: strokes it hid, area-eraser dabs (x, y, radius).
     LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
     /// An own device asks to open a notebook (live session button).

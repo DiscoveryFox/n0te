@@ -64,6 +64,10 @@ pub enum Msg {
     Follow { on: bool },
     /// A live message that didn't fit in a datagram.
     Live(Vec<u8>),
+    /// "Send me a picture of your n0te screen" (own devices only: testing without the tablet).
+    Shot,
+    /// The picture (JPEG).
+    ShotData { image: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

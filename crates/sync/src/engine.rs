@@ -405,6 +405,18 @@ impl Engine {
         Ok(())
     }
 
+    /// Asks an own device for a picture of its n0te screen (arrives as `Event::Screenshot`).
+    pub fn request_screenshot(&self, device: &str) -> Result<()> {
+        self.own_session(device)?.send(Msg::Shot);
+        Ok(())
+    }
+
+    /// Answers a screenshot request (JPEG of this app's screen).
+    pub fn send_screenshot(&self, device: &str, image: &[u8]) -> Result<()> {
+        self.own_session(device)?.send(Msg::ShotData { image: image.to_vec() });
+        Ok(())
+    }
+
     /// Asks an own device to follow (or stop following) this device's view.
     pub fn set_follow(&self, device: &str, on: bool) -> Result<()> {
         self.own_session(device)?.send(Msg::Follow { on });
@@ -1117,6 +1129,8 @@ impl Inner {
             }
             Msg::Open { notebook } if s.kind == Kind::Own => (self.emit)(Event::OpenRequest { device: s.id(), notebook }),
             Msg::Follow { on } if s.kind == Kind::Own => (self.emit)(Event::FollowRequest { device: s.id(), on }),
+            Msg::Shot if s.kind == Kind::Own => (self.emit)(Event::ScreenshotRequest { device: s.id() }),
+            Msg::ShotData { image } if s.kind == Kind::Own => (self.emit)(Event::Screenshot { device: s.id(), image }),
             Msg::Live(bytes) => {
                 if let Ok(live) = proto::decode::<Live>(&bytes) {
                     self.on_live(s, live);

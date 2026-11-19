@@ -48,6 +48,9 @@ fn event_json(e: &Event) -> Option<String> {
             "t": "live", "device": device, "notebook": notebook, "sheet": sheet, "stroke": stroke, "seq": seq,
             "brush": { "width": brush.width, "thinning": brush.thinning, "color": brush.color, "kind": brush.kind }, "samples": samples, "done": done
         }),
+        Event::Screenshot { device, image } => json!({ "t": "screenshot", "device": device, "bytes": image.len(), "path": shot_path(device) }),
+        // The laptop has no screen to send (the app is the GUI, not this service).
+        Event::ScreenshotRequest { device } => json!({ "t": "shot_request", "device": device }),
         Event::LiveErase { device, notebook, sheet, ids, dabs } => json!({ "t": "erase", "device": device, "notebook": notebook, "sheet": sheet, "ids": ids, "dabs": dabs }),
         Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
         Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
@@ -69,6 +72,26 @@ fn library_root() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
         .unwrap_or_else(|| PathBuf::from("."))
         .join("n0te")
+}
+
+/// Where a device's screenshot lands (next to the socket).
+fn shot_path(device: &str) -> PathBuf {
+    let short: String = device.chars().take(10).collect();
+    socket_path().with_file_name(format!("n0te-shot-{short}.jpg"))
+}
+
+/// Writes a file only this user can read.
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    #[cfg(unix)]
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    o.mode(0o600);
+    o.open(&tmp)?.write_all(data)?;
+    std::fs::rename(tmp, path)
 }
 
 fn socket_path() -> PathBuf {
@@ -140,6 +163,10 @@ fn service() -> Res<()> {
     opts.local_only = std::env::var_os("N0TE_SYNC_LOCAL_ONLY").is_some();
     let _ = SUBS.set(std::sync::Mutex::new(Vec::new()));
     opts.listener = Some(Arc::new(|e: Event| {
+        if let Event::Screenshot { device, image } = &e {
+            // For `n0te-sync screenshot`: next to the socket, only for this user.
+            let _ = write_private(&shot_path(device), image);
+        }
         if let Some(s) = describe(&e) {
             log(&s);
         }
@@ -394,6 +421,24 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             let samples: Vec<u8> = args.get(9).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             engine.send_live_stroke(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, num(3) as u64, num(4) as u32, brush, &samples, args.get(10).is_some_and(|d| d == "1"));
             String::new()
+        }
+        // screenshot <device>: a picture of n0te on that own device (path printed when it's in).
+        "screenshot" => {
+            let dev = arg(1, "Gerät")?;
+            let path = shot_path(&dev);
+            let before = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+            engine.request_screenshot(&dev).map_err(e)?;
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                let now = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+                if now.is_some() && now != before {
+                    break path.display().to_string();
+                }
+                if Instant::now() > deadline {
+                    return Err("kein Bild bekommen (ist n0te dort offen?)".into());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
         }
         // erase <notebook> <sheet> <ids json array> <dabs json array of [x, y, r]>
         "erase" => {

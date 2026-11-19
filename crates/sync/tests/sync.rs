@@ -232,6 +232,19 @@ fn live_presence_strokes_and_open_requests() {
     assert_eq!(got_dabs, vec![[10.0, 20.0, 3.0], [12.0, 21.0, 3.5]]);
     a.set_follow(&tablet, true).unwrap();
     wait_event(&events, "follow", |e| matches!(e, Event::FollowRequest { on: true, .. }));
+    // The laptop asks for a picture of the tablet's screen; it answers with one.
+    let a_events = a.events().unwrap();
+    a.request_screenshot(&tablet).unwrap();
+    let laptop = match wait_event(&events, "screenshot request", |e| matches!(e, Event::ScreenshotRequest { .. })) {
+        Event::ScreenshotRequest { device } => device,
+        _ => unreachable!(),
+    };
+    let jpeg: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    b.send_screenshot(&laptop, &jpeg).unwrap();
+    match wait_event(&a_events, "screenshot", |e| matches!(e, Event::Screenshot { .. })) {
+        Event::Screenshot { image, .. } => assert_eq!(image, jpeg, "the picture arrives whole"),
+        _ => unreachable!(),
+    }
 }
 
 #[test]
