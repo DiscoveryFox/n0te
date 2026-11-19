@@ -101,6 +101,12 @@ pub enum Message {
     PairToTablet,
     PairSent(Result<String, String>),
     ShowShare(bool),
+    /// An invite's rights: read (false) or read-write (true).
+    SetRole(String, bool),
+    GuestFrames(bool),
+    ShareView(bool),
+    /// After joining: the notebook arrived (or not, after the wait).
+    JoinReady(String, bool),
     /// Version history of the open notebook: (unix time, label) per checkpoint.
     ShowHistory(bool),
     Restore(u64),
@@ -222,6 +228,9 @@ pub struct App {
     pub devices: Vec<live::Device>,
     devices_at: Option<Instant>,
     pub live_session: Option<LiveSession>,
+    /// Guests in our notebooks right now, and notebooks we joined as a guest.
+    pub guests: Vec<live::Guest>,
+    pub joined: Vec<live::Joined>,
     presence_at: Option<Instant>,
     pub pair_code: Option<String>,
     /// Share panel open, with the invites of the open notebook.
@@ -318,6 +327,8 @@ impl App {
             devices: Vec::new(),
             devices_at: None,
             live_session: None,
+            guests: Vec::new(),
+            joined: Vec::new(),
             presence_at: None,
             pair_code: None,
             share: None,
@@ -642,6 +653,7 @@ impl App {
                         self.connect_sync();
                     } else if self.devices_at.is_none_or(|t| t.elapsed().as_secs() >= 10) {
                         self.devices = live::devices();
+                self.refresh_guests();
                         self.devices_at = Some(Instant::now());
                     }
                 }
@@ -801,6 +813,42 @@ impl App {
                     Err(e) => self.say(format!("Einladen: {e}")),
                 }
             }
+            Message::SetRole(id, write) => {
+                match live::request(&["set-role", &id, if write { "write" } else { "read" }]) {
+                    Ok(_) => self.say(if write { "Gäste dürfen jetzt mitschreiben" } else { "Gäste dürfen jetzt nur lesen" }),
+                    Err(e) => self.say(format!("Rechte: {e}")),
+                }
+                return self.update(Message::ShowShare(true));
+            }
+            Message::GuestFrames(on) => {
+                self.settings.guest_frames = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+                if !on && let Screen::Notebook(o) = &self.screen {
+                    let names: Vec<String> = self.guests.iter().map(|g| g.name.clone()).collect();
+                    o.pages.remote.borrow_mut().retain(|m| !names.contains(&m.name));
+                }
+            }
+            Message::ShareView(on) => {
+                self.settings.share_view = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+                if let Some(s) = &self.sync {
+                    s.send(&["share-view".to_string(), if on { "on" } else { "off" }.to_string()]);
+                }
+            }
+            Message::JoinReady(id, ready) => {
+                self.refresh();
+                self.refresh_guests();
+                if ready {
+                    let _ = self.open(&id);
+                    self.say("Beigetreten");
+                } else {
+                    self.say("Beigetreten — das Notizbuch kommt, sobald der Besitzer erreichbar ist");
+                }
+            }
             Message::Revoke(id) => {
                 match live::request(&["revoke", &id]) {
                     Ok(_) => self.say("Widerrufen: der Gast ist getrennt"),
@@ -819,12 +867,25 @@ impl App {
                 let link = self.joining.take().unwrap_or_default();
                 match live::request(&["join", link.trim()]) {
                     Ok(out) => {
-                        self.refresh();
                         let id = out.rsplit(' ').next().unwrap_or_default().to_string();
-                        if self.entries.iter().any(|e| e.id == id) {
-                            let _ = self.open(&id);
-                        }
-                        self.say("Beigetreten");
+                        self.say("Lade das Notizbuch vom Besitzer …");
+                        // It arrives in the background: open it once it is here (opening it at
+                        // once found nothing), waiting at most 45 s.
+                        let root = self.lib.root().to_path_buf();
+                        return Task::perform(
+                            async move {
+                                let until = Instant::now() + std::time::Duration::from_secs(45);
+                                let mut ready = false;
+                                while !ready && Instant::now() < until {
+                                    ready = Library::open(&root).and_then(|l| l.load_notebook(&id)).map(|nb| nb.sheet_count() > 0).unwrap_or(false);
+                                    if !ready {
+                                        std::thread::sleep(std::time::Duration::from_millis(400));
+                                    }
+                                }
+                                (id, ready)
+                            },
+                            |(id, ready)| Message::JoinReady(id, ready),
+                        );
                     }
                     Err(e) => self.say(format!("Beitreten: {e}")),
                 }
@@ -919,6 +980,7 @@ impl App {
         if let Some(s) = live::Session::connect() {
             self.sync = Some(Arc::new(s));
             self.devices = live::devices();
+                self.refresh_guests();
             self.devices_at = Some(Instant::now());
         }
     }
@@ -926,7 +988,15 @@ impl App {
     /// What the sync service reports.
     fn on_live(&mut self, e: LiveEvent) -> Task<Message> {
         match e {
-            LiveEvent::Hello { .. } => {}
+            LiveEvent::Hello { .. } => {
+                // Connected to the sync service: who's around, and whether guests see this view.
+                self.refresh_guests();
+                if !self.settings.share_view
+                    && let Some(sync) = &self.sync
+                {
+                    sync.send(&["share-view".to_string(), "off".to_string()]);
+                }
+            }
             LiveEvent::Changed { notebook, index, sheets } => {
                 if self.notebook_id().as_deref() == Some(notebook.as_str()) {
                     self.refresh_open(index, &sheets);
@@ -949,6 +1019,7 @@ impl App {
                     self.say(format!("Gekoppelt mit {name}"));
                 }
                 self.devices = live::devices();
+                self.refresh_guests();
                 self.devices_at = Some(Instant::now());
             }
             LiveEvent::Presence { device, notebook, sheet, viewport, laser, .. } => {
@@ -956,8 +1027,25 @@ impl App {
                 if o.id != notebook {
                     return Task::none();
                 }
-                let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
-                let Some(sheet) = sheet else { return Task::none() };
+                // Named: own device, guest or the owner; guests' frames only when wanted.
+                let guest = self.guests.iter().find(|g| g.device == device);
+                let host = self.joined.iter().any(|j| j.owner == device);
+                if (guest.is_some() || host) && !self.settings.guest_frames {
+                    return Task::none();
+                }
+                let name = self
+                    .devices
+                    .iter()
+                    .find(|d| d.id == device)
+                    .map(|d| d.name.clone())
+                    .or_else(|| guest.map(|g| g.name.clone()))
+                    .or_else(|| self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()))
+                    .unwrap_or_else(|| "Gast".into());
+                // Looking nowhere (e.g. the owner stopped sharing its view): its frame goes.
+                let Some(sheet) = sheet else {
+                    o.pages.remote.borrow_mut().retain(|m| m.name != name);
+                    return Task::none();
+                };
                 let mark = crate::pages::RemoteMark { sheet_id: sheet.clone(), rect: n0te_core::ink::Rect::new(viewport[0], viewport[1], viewport[2], viewport[3]), laser: laser.map(|l| (l[0], l[1])), name };
                 {
                     let mut marks = o.pages.remote.borrow_mut();
@@ -1016,7 +1104,23 @@ impl App {
                     self.live_session = Some(LiveSession { device, name, follow_them: true, they_follow: false });
                 }
             }
-            LiveEvent::Guest { name, on, .. } => self.say(if on { format!("Gast verbunden: {name}") } else { "Gast getrennt".to_string() }),
+            LiveEvent::Guest { name, on, device, .. } => {
+                self.say(if on { format!("{name} ist dazugekommen") } else { format!("{} ist gegangen", self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| "Ein Gast".into())) });
+                if !on && let Screen::Notebook(o) = &self.screen {
+                    let gone = self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone());
+                    if let Some(gone) = gone {
+                        o.pages.remote.borrow_mut().retain(|m| m.name != gone);
+                    }
+                }
+                self.refresh_guests();
+                if self.share.is_some() {
+                    return self.update(Message::ShowShare(true));
+                }
+            }
+            LiveEvent::Role { write, .. } => {
+                self.refresh_guests();
+                self.say(if write { "Du darfst jetzt mitschreiben" } else { "Ab jetzt nur noch lesen" });
+            }
             LiveEvent::Revoked { .. } => self.say("Die Einladung zu diesem Notizbuch wurde widerrufen"),
             LiveEvent::Error { message } => self.say(format!("Sync: {message}")),
             LiveEvent::Disconnected => self.sync = None,
@@ -1056,8 +1160,23 @@ impl App {
     }
 
     /// Live: where this view is (sheet points of the page in the middle), at most 10× a second.
+    /// Who is connected around our notebooks (guests here, owners of joined ones).
+    fn refresh_guests(&mut self) {
+        if self.sync.is_some() {
+            self.guests = live::guests();
+            self.joined = live::joined();
+        }
+    }
+
     fn send_presence(&mut self) {
-        let (Some(_), Some(sync)) = (&self.live_session, &self.sync) else { return };
+        let Some(sync) = &self.sync else { return };
+        // Own tablet live, guests in this notebook, or (as a guest) its owner: they see where
+        // the laptop looks. Before, only the live tablet got it.
+        let nb = self.notebook_id().unwrap_or_default();
+        let anyone = self.live_session.is_some() || self.guests.iter().any(|g| g.notebook == nb) || self.joined.iter().any(|j| j.notebook == nb && j.online);
+        if !anyone {
+            return;
+        }
         if self.presence_at.is_some_and(|t| t.elapsed().as_millis() < 100) {
             return;
         }
@@ -1700,21 +1819,48 @@ impl App {
         if invites.is_empty() {
             col = col.push(text("Noch keine Einladungen. Der Link wird beim Erstellen kopiert; Gäste öffnen ihn in n0te (EINLADUNG).").size(13).color(theme::p().muted));
         }
-        for i in invites.iter().rev() {
-            let state = if i.revoked { "widerrufen".to_string() } else if i.online > 0 { format!("{} verbunden", i.online) } else { "nicht verbunden".to_string() };
-            let mut r = row![
-                text(theme::cased(if i.rw { "Lesen & schreiben" } else { "Nur lesen" })).font(theme::label_font()).size(theme::label_size()).width(Length::Fixed(150.0)),
-                text(state).size(12).color(theme::p().muted).width(Length::Fixed(130.0)),
+        // Who is here right now, with their rights.
+        let nb = self.notebook_id().unwrap_or_default();
+        let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
+        col = col.push(theme::caption("Jetzt da"));
+        if here.is_empty() {
+            col = col.push(text("Gerade ist kein Gast verbunden.").size(13).color(theme::p().muted));
+        }
+        for g in here {
+            col = col.push(
+                row![
+                    container(Space::new().width(8).height(8)).style(|_| container::Style { background: Some(theme::p().accent.into()), border: iced::Border { radius: 4.0.into(), ..Default::default() }, ..Default::default() }),
+                    text(g.name.clone()).size(14).color(theme::p().text),
+                    text(if g.write { "lesen & schreiben" } else { "nur lesen" }).size(12).color(theme::p().muted),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            );
+        }
+        col = col.push(theme::caption("Einladungen"));
+        for i in invites.iter().rev().filter(|i| !i.revoked) {
+            let state = if i.online > 0 { format!("{} verbunden", i.online) } else { "niemand verbunden".to_string() };
+            let r = row![
+                // The rights, switchable: guests reconnect with them at once.
+                button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
+                button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
+                text(state).size(12).color(theme::p().muted),
                 Space::new().width(Length::Fill),
+                button(theme::btn_small("Link kopieren")).padding(theme::pad()).on_press(Message::CopyText(i.link.clone())).style(theme::ghost),
+                button(theme::btn_small("Widerrufen")).padding(theme::pad()).on_press(Message::Revoke(i.id.clone())).style(theme::ghost),
             ]
             .align_y(Alignment::Center)
             .spacing(6);
-            if !i.revoked {
-                r = r.push(button(theme::btn_small("Link kopieren")).padding([3, 8]).on_press(Message::CopyText(i.link.clone())).style(theme::ghost));
-                r = r.push(button(theme::btn_small("Widerrufen")).padding([3, 8]).on_press(Message::Revoke(i.id.clone())).style(theme::ghost));
-            }
             col = col.push(r);
         }
+        col = col.push(
+            row![
+                iced::widget::toggler(self.settings.guest_frames).label("Ansicht der Gäste zeigen").on_toggle(Message::GuestFrames).size(18).text_size(13).spacing(10).style(theme::switch),
+                Space::new().width(24),
+                iced::widget::toggler(self.settings.share_view).label("Gäste sehen meine Ansicht").on_toggle(Message::ShareView).size(18).text_size(13).spacing(10).style(theme::switch),
+            ]
+            .align_y(Alignment::Center),
+        );
         // The newest invite as a QR code (scan with the tablet/phone).
         if let Some(data) = &self.share_qr {
             col = col.push(row![scannable_qr(data, 3.0), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
@@ -1946,7 +2092,8 @@ impl App {
                 Space::new().width(6),
                 button(theme::btn("Export")).padding(theme::pad()).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
                 Space::new().width(6),
-                button(theme::btn("Teilen")).padding(theme::pad()).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
+                // Guests here show on the button ("Teilen · 2 Gäste"); as a guest: whose notebook.
+                button(theme::btn(&self.share_label(&o.id))).padding(theme::pad()).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
                 Space::new().width(6),
                 match &self.live_session {
                     Some(l) => button(theme::btn(&format!("● Live · {}", l.name))).padding(theme::pad()).on_press(Message::StopLive).style(theme::accent_button),
@@ -1960,6 +2107,18 @@ impl App {
         .width(Length::Fill)
         .style(theme::chrome)
         .into()
+    }
+
+    fn share_label(&self, nb: &str) -> String {
+        if let Some(j) = self.joined.iter().find(|j| j.notebook == nb) {
+            return format!("{} Gast bei {}{}", if j.online { "●" } else { "○" }, j.owner_name, if j.write { "" } else { " · nur lesen" });
+        }
+        let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
+        match here.len() {
+            0 => "Teilen".into(),
+            1 => format!("Teilen · ● {}", here[0].name),
+            n => format!("Teilen · ● {n} Gäste"),
+        }
     }
 
     pub fn status_bar(&self) -> Element<'_, Message> {

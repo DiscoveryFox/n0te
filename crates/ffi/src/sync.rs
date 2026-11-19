@@ -59,8 +59,9 @@ pub enum FfiSyncEvent {
     LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<f32> },
     OpenRequest { device: String, notebook: String },
     FollowRequest { device: String, on: bool },
-    GuestJoined { invite: String, notebook: String, name: String },
-    GuestLeft { invite: String, notebook: String },
+    GuestJoined { invite: String, notebook: String, name: String, device: String },
+    GuestLeft { invite: String, notebook: String, device: String },
+    RoleChanged { notebook: String, write: bool },
     AccessRevoked { notebook: String },
     SyncError { message: String },
 }
@@ -70,6 +71,9 @@ pub struct FfiGuest {
     pub invite: String,
     pub notebook: String,
     pub name: String,
+    /// Its id (presence and live strokes carry it).
+    pub device: String,
+    pub write: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -162,8 +166,9 @@ fn event(e: Event) -> FfiSyncEvent {
         },
         Event::OpenRequest { device, notebook } => FfiSyncEvent::OpenRequest { device, notebook },
         Event::FollowRequest { device, on } => FfiSyncEvent::FollowRequest { device, on },
-        Event::GuestJoined { invite, notebook, name } => FfiSyncEvent::GuestJoined { invite, notebook, name },
-        Event::GuestLeft { invite, notebook } => FfiSyncEvent::GuestLeft { invite, notebook },
+        Event::GuestJoined { invite, notebook, name, device } => FfiSyncEvent::GuestJoined { invite, notebook, name, device },
+        Event::GuestLeft { invite, notebook, device } => FfiSyncEvent::GuestLeft { invite, notebook, device },
+        Event::RoleChanged { notebook, write } => FfiSyncEvent::RoleChanged { notebook, write },
         Event::AccessRevoked { notebook } => FfiSyncEvent::AccessRevoked { notebook },
         Event::SyncError { message } => FfiSyncEvent::SyncError { message },
     }
@@ -217,7 +222,7 @@ impl SyncEngine {
             Ok(FfiSyncStatus {
                 node_id: s.node_id,
                 devices: s.devices.into_iter().map(device).collect(),
-                guests: s.guests.into_iter().map(|g| FfiGuest { invite: g.invite, notebook: g.notebook, name: g.name }).collect(),
+                guests: s.guests.into_iter().map(|g| FfiGuest { invite: g.invite, notebook: g.notebook, name: g.name, device: g.device.clone(), write: g.role == Role::ReadWrite }).collect(),
                 joined: s.joined.into_iter().map(joined).collect(),
                 last_sync: s.last_sync.into_iter().map(|(notebook, at)| FfiLastSync { notebook, at }).collect(),
                 relay: s.relay,
@@ -286,6 +291,17 @@ impl SyncEngine {
     }
     pub fn revoke(&self, invite: String) -> R<()> {
         self.with(|e| Ok(e.revoke(&invite)?))
+    }
+    /// Changes an invite's rights; its guests reconnect with them at once.
+    pub fn set_role(&self, invite: String, role: FfiRole) -> R<()> {
+        self.with(|e| Ok(e.set_role(&invite, if role == FfiRole::ReadWrite { Role::ReadWrite } else { Role::Read })?))
+    }
+    /// Whether our guests see where we look.
+    pub fn set_share_view(&self, on: bool) -> R<()> {
+        self.with(|e| {
+            e.set_share_view(on);
+            Ok(())
+        })
     }
     /// Joins a notebook from an invite link; returns its id.
     pub fn join(&self, link: String) -> R<String> {

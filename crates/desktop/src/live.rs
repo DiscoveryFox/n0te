@@ -32,7 +32,9 @@ pub enum LiveEvent {
     Erase { notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
     Open { device: String, notebook: String },
     Follow { device: String, on: bool },
-    Guest { name: String, notebook: String, on: bool },
+    Guest { name: String, notebook: String, device: String, on: bool },
+    /// As a guest: the owner changed our rights.
+    Role { notebook: String, write: bool },
     Revoked { notebook: String },
     Error { message: String },
     Disconnected,
@@ -88,7 +90,8 @@ fn parse(line: &str) -> Option<LiveEvent> {
         },
         "open" => LiveEvent::Open { device: s("device"), notebook: s("notebook") },
         "follow" => LiveEvent::Follow { device: s("device"), on: v["on"].as_bool().unwrap_or(false) },
-        "guest" => LiveEvent::Guest { name: s("name"), notebook: s("notebook"), on: v["on"].as_bool().unwrap_or(false) },
+        "guest" => LiveEvent::Guest { name: s("name"), notebook: s("notebook"), device: s("device"), on: v["on"].as_bool().unwrap_or(false) },
+        "role" => LiveEvent::Role { notebook: s("notebook"), write: v["write"].as_bool().unwrap_or(false) },
         "revoked" => LiveEvent::Revoked { notebook: s("notebook") },
         "error" => LiveEvent::Error { message: s("message") },
         _ => return None,
@@ -199,6 +202,63 @@ pub fn invites() -> Vec<Invite> {
                     online: i["online"].as_u64().unwrap_or(0),
                     link: i["link"].as_str().unwrap_or_default().into(),
                     expires: i["expires"].as_u64().unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A guest connected to one of our notebooks.
+#[derive(Debug, Clone)]
+pub struct Guest {
+    pub invite: String,
+    pub notebook: String,
+    pub name: String,
+    pub device: String,
+    pub write: bool,
+}
+
+pub fn guests() -> Vec<Guest> {
+    let Ok(out) = request(&["guests-json"]) else { return Vec::new() };
+    let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .map(|g| Guest {
+                    invite: g["invite"].as_str().unwrap_or_default().into(),
+                    notebook: g["notebook"].as_str().unwrap_or_default().into(),
+                    name: g["name"].as_str().unwrap_or_default().into(),
+                    device: g["device"].as_str().unwrap_or_default().into(),
+                    write: g["write"].as_bool().unwrap_or(false),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A notebook we joined as a guest.
+#[derive(Debug, Clone)]
+pub struct Joined {
+    pub notebook: String,
+    pub owner: String,
+    pub owner_name: String,
+    pub write: bool,
+    pub online: bool,
+}
+
+pub fn joined() -> Vec<Joined> {
+    let Ok(out) = request(&["joined-json"]) else { return Vec::new() };
+    let v: Value = serde_json::from_str(&out).unwrap_or(Value::Null);
+    v.as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|j| !j["revoked"].as_bool().unwrap_or(false))
+                .map(|j| Joined {
+                    notebook: j["notebook"].as_str().unwrap_or_default().into(),
+                    owner: j["owner_id"].as_str().unwrap_or_default().into(),
+                    owner_name: j["owner_name"].as_str().unwrap_or_default().into(),
+                    write: j["write"].as_bool().unwrap_or(false),
+                    online: j["online"].as_bool().unwrap_or(false),
                 })
                 .collect()
         })

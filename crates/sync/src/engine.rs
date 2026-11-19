@@ -51,6 +51,9 @@ pub struct GuestInfo {
     pub invite: String,
     pub notebook: String,
     pub name: String,
+    /// The guest's id (its presence and live strokes carry it).
+    pub device: String,
+    pub role: Role,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -146,6 +149,8 @@ struct Inner {
     key: SecretKey,
     name: String,
     guest_ignores_role: bool,
+    /// Whether guests get our presence (where we look, the laser); own devices always do.
+    share_view: AtomicBool,
     emit: Box<dyn Fn(Event) + Send + Sync>,
     state: Mutex<State>,
     sessions: Mutex<HashMap<EndpointId, Arc<Session>>>,
@@ -227,6 +232,7 @@ impl Engine {
             key,
             name: opts.device_name,
             guest_ignores_role: opts.guest_ignores_role,
+            share_view: AtomicBool::new(true),
             emit,
             state: Mutex::new(state),
             sessions: Mutex::new(HashMap::new()),
@@ -335,7 +341,7 @@ impl Engine {
         let guests = sessions
             .values()
             .filter_map(|s| match &s.kind {
-                Kind::Guest { invite, notebook, .. } => Some(GuestInfo { invite: invite.clone(), notebook: notebook.clone(), name: s.name.clone() }),
+                Kind::Guest { invite, notebook, role } => Some(GuestInfo { invite: invite.clone(), notebook: notebook.clone(), name: s.name.clone(), device: s.id(), role: *role }),
                 _ => None,
             })
             .collect();
@@ -371,7 +377,55 @@ impl Engine {
     /// laser pointer, to all devices (and guests) with that notebook.
     pub fn send_presence(&self, notebook: &str, sheet: Option<&str>, viewport: [f32; 4], zoom: f32, laser: Option<[f32; 2]>) {
         let live = Live::Presence { notebook: notebook.into(), sheet: sheet.map(Into::into), viewport, zoom, laser };
-        self.inner.send_live(notebook, None, live);
+        if self.inner.share_view.load(Ordering::Relaxed) {
+            self.inner.send_live(notebook, None, live);
+        } else {
+            // Not to our guests: only own devices (and, as a guest, the owner).
+            let bytes = proto::encode(&live);
+            for s in self.inner.sessions_for(notebook).into_iter().filter(|s| !matches!(s.kind, Kind::Guest { .. })) {
+                s.send(Msg::Live(bytes.clone()));
+            }
+        }
+    }
+
+    /// Whether our guests see where we look (presence); own devices always do. Turned off,
+    /// guests get a last "looking nowhere" (no sheet), so our frame goes from their screen.
+    pub fn set_share_view(&self, on: bool) {
+        let was = self.inner.share_view.swap(on, Ordering::Relaxed);
+        if was && !on {
+            let sessions: Vec<Arc<Session>> = self.inner.sessions.lock().expect("sessions").values().cloned().collect();
+            for s in sessions {
+                if let Kind::Guest { notebook, .. } = &s.kind {
+                    s.send(Msg::Live(proto::encode(&Live::Presence { notebook: notebook.clone(), sheet: None, viewport: [0.0; 4], zoom: 1.0, laser: None })));
+                }
+            }
+        }
+    }
+
+    /// Changes an invite's rights. Its guests reconnect at once and get the new rights (their
+    /// app is told: [`Event::RoleChanged`]).
+    pub fn set_role(&self, invite: &str, role: Role) -> Result<()> {
+        {
+            let mut st = self.inner.state.lock().expect("state");
+            let r = st.invites.iter_mut().find(|r| r.id == invite && !r.revoked).ok_or_else(|| Error::Invalid(format!("keine Einladung {invite}")))?;
+            if r.role == role {
+                return Ok(());
+            }
+            r.role = role;
+            st.save_invites()?;
+        }
+        let removed: Vec<Arc<Session>> = {
+            let mut sessions = self.inner.sessions.lock().expect("sessions");
+            let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| *k).collect();
+            gone.into_iter().filter_map(|k| sessions.remove(&k)).collect()
+        };
+        for s in removed {
+            s.conn.close(4u32.into(), b"role");
+            if let Kind::Guest { invite, notebook, .. } = &s.kind {
+                (self.inner.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone(), device: s.id() });
+            }
+        }
+        Ok(())
     }
 
     /// New samples of a stroke being drawn (packed LE f32 x, y, pressure, t_ms; sheet points).
@@ -491,7 +545,7 @@ impl Engine {
         for s in removed {
             s.conn.close(3u32.into(), b"revoked");
             if let Kind::Guest { invite, notebook, .. } = &s.kind {
-                (self.inner.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone() });
+                (self.inner.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone(), device: s.id() });
             }
         }
         Ok(())
@@ -700,7 +754,18 @@ async fn host_loop(inner: Arc<Inner>, invite: String, mut first: Option<Establis
             Ok(est) => {
                 backoff = Duration::from_secs(1);
                 let owner = est.conn.remote_id();
-                let kind = Kind::Host { invite: invite.clone(), notebook: record.notebook.clone(), role: est.role.unwrap_or(record.role) };
+                let role = est.role.unwrap_or(record.role);
+                if role != record.role {
+                    // The owner changed our rights: remember them and tell the app.
+                    let mut st = inner.state.lock().expect("state");
+                    if let Some(j) = st.joined.iter_mut().find(|j| j.invite == invite) {
+                        j.role = role;
+                    }
+                    let _ = st.save_joined();
+                    drop(st);
+                    (inner.emit)(Event::RoleChanged { notebook: record.notebook.clone(), write: role == Role::ReadWrite });
+                }
+                let kind = Kind::Host { invite: invite.clone(), notebook: record.notebook.clone(), role };
                 let _ = run_session(inner.clone(), owner, kind, est, true).await;
             }
             Err(Error::Rejected(reason)) => {
@@ -819,7 +884,7 @@ async fn run_session(inner: Arc<Inner>, peer: EndpointId, kind: Kind, est: Estab
     }
     match &kind {
         Kind::Own => (inner.emit)(Event::DeviceOnline { device: inner.device_info(&peer, true) }),
-        Kind::Guest { invite, notebook, .. } => (inner.emit)(Event::GuestJoined { invite: invite.clone(), notebook: notebook.clone(), name: session.name.clone() }),
+        Kind::Guest { invite, notebook, .. } => (inner.emit)(Event::GuestJoined { invite: invite.clone(), notebook: notebook.clone(), name: session.name.clone(), device: session.id() }),
         Kind::Host { .. } => {}
     }
     // Writer.
@@ -964,7 +1029,7 @@ impl Inner {
         if removed {
             match &s.kind {
                 Kind::Own => (self.emit)(Event::DeviceOffline { id: s.id() }),
-                Kind::Guest { invite, notebook, .. } => (self.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone() }),
+                Kind::Guest { invite, notebook, .. } => (self.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone(), device: s.id() }),
                 Kind::Host { .. } => {}
             }
         }

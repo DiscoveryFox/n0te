@@ -175,6 +175,58 @@ fn guests_get_one_notebook_with_their_rights_and_can_be_revoked() {
     assert!(writer.join(&rw_link).is_err(), "joining again is refused");
 }
 
+#[test]
+fn owner_switches_a_guest_between_read_and_write_and_sees_its_live_view() {
+    let (ro, rg) = (root("ro"), root("rg"));
+    let owner = engine(&ro, "Laptop");
+    let (nb, s1) = notebook_with_strokes(&ro, "Rollen", 1);
+    let guest = engine(&rg, "Mia");
+    let owner_events = owner.events().unwrap();
+    let guest_events = guest.events().unwrap();
+    let link = owner.create_invite(&nb, Role::Read, 0).unwrap();
+    guest.join(&link).unwrap();
+    wait("guest synced", || strokes(&rg, &nb, &s1) == 1);
+    // The owner learns who joined, with the id their live view carries.
+    let device = match wait_event(&owner_events, "guest joined", |e| matches!(e, Event::GuestJoined { .. })) {
+        Event::GuestJoined { name, device, .. } => {
+            assert_eq!(name, "Mia");
+            device
+        }
+        _ => unreachable!(),
+    };
+    assert_eq!(owner.status().guests[0].device, device);
+    guest.send_presence(&nb, Some(&s1), [0.0, 0.0, 300.0, 400.0], 1.0, None);
+    wait_event(&owner_events, "the guest's view", |e| matches!(e, Event::Presence { device: d, .. } if *d == device));
+
+    // Read → write: the guest is told, and its edits arrive.
+    let id = owner.list_invites()[0].id.clone();
+    owner.set_role(&id, Role::ReadWrite).unwrap();
+    wait_event(&guest_events, "rights changed", |e| matches!(e, Event::RoleChanged { write: true, .. }));
+    assert_eq!(guest.joined()[0].role, Role::ReadWrite);
+    wait("guest back online", || owner.status().guests.len() == 1);
+    add_strokes(&rg, &nb, &s1, 1);
+    guest.notify_local_change(&nb);
+    wait("the owner has the guest's stroke", || strokes(&ro, &nb, &s1) == 2);
+
+    // And back to read-only.
+    owner.set_role(&id, Role::Read).unwrap();
+    wait_event(&guest_events, "read-only again", |e| matches!(e, Event::RoleChanged { write: false, .. }));
+    assert_eq!(owner.list_invites()[0].role, Role::Read);
+
+    // The owner can keep where it looks to itself.
+    wait("guest back again", || owner.status().guests.len() == 1);
+    owner.set_share_view(false);
+    // The guest is told once that the owner looks nowhere (its frame goes) ...
+    wait_event(&guest_events, "frame cleared", |e| matches!(e, Event::Presence { sheet: None, .. }));
+    owner.send_presence(&nb, Some(&s1), [0.0, 0.0, 100.0, 100.0], 2.0, None);
+    std::thread::sleep(Duration::from_millis(800));
+    // ... and then gets nothing more.
+    assert!(guest_events.try_iter().all(|e| !matches!(e, Event::Presence { .. })), "no presence to guests when not shared");
+    owner.set_share_view(true);
+    owner.send_presence(&nb, Some(&s1), [0.0, 0.0, 100.0, 100.0], 2.0, None);
+    wait_event(&guest_events, "presence when shared", |e| matches!(e, Event::Presence { .. }));
+}
+
 fn wait_event(rx: &Receiver<Event>, what: &str, f: impl Fn(&Event) -> bool) -> Event {
     let deadline = Instant::now() + Duration::from_secs(20);
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {

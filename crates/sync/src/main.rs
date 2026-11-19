@@ -60,8 +60,9 @@ fn event_json(e: &Event) -> Option<String> {
         Event::LiveErase { device, notebook, sheet, ids, dabs } => json!({ "t": "erase", "device": device, "notebook": notebook, "sheet": sheet, "ids": ids, "dabs": dabs }),
         Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
         Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
-        Event::GuestJoined { invite, notebook, name } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "name": name, "on": true }),
-        Event::GuestLeft { invite, notebook } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "on": false }),
+        Event::GuestJoined { invite, notebook, name, device } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "name": name, "device": device, "on": true }),
+        Event::GuestLeft { invite, notebook, device } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "device": device, "on": false }),
+        Event::RoleChanged { notebook, write } => json!({ "t": "role", "notebook": notebook, "write": write }),
         Event::AccessRevoked { notebook } => json!({ "t": "revoked", "notebook": notebook }),
         Event::SyncError { message } => json!({ "t": "error", "message": message }),
         Event::BlobArrived { .. } => return None,
@@ -145,6 +146,7 @@ fn describe(e: &Event) -> Option<String> {
         Event::Paired { device } => format!("gekoppelt: {} ({})", device.name, short(&device.id)),
         Event::GuestJoined { notebook, name, .. } => format!("Gast verbunden: {name} → {notebook}"),
         Event::GuestLeft { notebook, .. } => format!("Gast getrennt: {notebook}"),
+        Event::RoleChanged { notebook, write } => format!("Rechte geändert: {notebook} → {}", if *write { "lesen & schreiben" } else { "nur lesen" }),
         Event::AccessRevoked { notebook } => format!("Zugriff widerrufen: {notebook}"),
         Event::SyncError { message } => format!("Fehler: {message}"),
         Event::OpenRequest { notebook, .. } => format!("Öffnen angefragt: {notebook}"),
@@ -386,6 +388,19 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
             engine.revoke(&arg(1, "Einladungs-ID")?).map_err(e)?;
             "Widerrufen.".into()
         }
+        // set-role <invite> read|write
+        "set-role" => {
+            let id = arg(1, "Einladungs-ID")?;
+            let write = matches!(arg(2, "read|write")?.as_str(), "write" | "rw");
+            engine.set_role(&id, if write { Role::ReadWrite } else { Role::Read }).map_err(e)?;
+            if write { "Gäste dürfen jetzt schreiben.".into() } else { "Gäste dürfen jetzt nur lesen.".into() }
+        }
+        // share-view on|off: whether guests see where this laptop looks
+        "share-view" => {
+            engine.set_share_view(arg(1, "on|off")? != "off");
+            "OK".into()
+        }
+        "guests-json" => serde_json::to_string(&engine.status().guests.iter().map(|g| serde_json::json!({ "invite": g.invite, "notebook": g.notebook, "name": g.name, "device": g.device, "write": g.role == Role::ReadWrite })).collect::<Vec<_>>()).unwrap_or_default(),
         "join" => {
             let nb = engine.join(&arg(1, "Link")?).map_err(e)?;
             format!("Beigetreten: {nb}")
@@ -425,7 +440,7 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
                 .collect::<Vec<_>>(),
         )
         .unwrap_or_default(),
-        "joined-json" => serde_json::to_string(&engine.joined().iter().map(|j| serde_json::json!({ "invite": j.invite, "notebook": j.notebook, "title": j.title, "owner": j.owner_name, "online": j.online, "revoked": j.revoked })).collect::<Vec<_>>()).unwrap_or_default(),
+        "joined-json" => serde_json::to_string(&engine.joined().iter().map(|j| serde_json::json!({ "invite": j.invite, "notebook": j.notebook, "title": j.title, "owner": j.owner_name, "owner_id": j.owner, "owner_name": j.owner_name, "write": j.role == Role::ReadWrite, "online": j.online, "revoked": j.revoked })).collect::<Vec<_>>()).unwrap_or_default(),
         "node" => engine.node_id(),
         // Live (sessions): presence, stroke samples, open / follow requests.
         "presence" => {

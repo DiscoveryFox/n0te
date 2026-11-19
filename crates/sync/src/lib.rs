@@ -87,8 +87,11 @@ pub enum Event {
     /// An own device asks this one to follow (or stop following) its view.
     FollowRequest { device: String, on: bool },
     /// Owner side: a guest connected / left.
-    GuestJoined { invite: String, notebook: String, name: String },
-    GuestLeft { invite: String, notebook: String },
+    /// `device`: the guest's id (its presence and live strokes carry it).
+    GuestJoined { invite: String, notebook: String, name: String, device: String },
+    GuestLeft { invite: String, notebook: String, device: String },
+    /// Guest side: the owner changed our rights (read ↔ read-write).
+    RoleChanged { notebook: String, write: bool },
     /// Guest side: the owner revoked (or let expire) our invite.
     AccessRevoked { notebook: String },
     SyncError { message: String },

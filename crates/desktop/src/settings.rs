@@ -11,6 +11,10 @@ pub struct Settings {
     pub side_gap: f32,
     /// Show the other device's view as a red frame (live).
     pub remote_frame: bool,
+    /// Guests' frames (where they look); `remote_frame` covers own devices.
+    pub guest_frames: bool,
+    /// Guests see where this laptop looks.
+    pub share_view: bool,
     /// Display formulas ($$…$$, formula blocks) centred.
     pub formula_center: bool,
 }
@@ -25,7 +29,7 @@ pub fn formula_center() -> bool {
 impl Default for Settings {
     fn default() -> Self {
         let o = Options::default();
-        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap, remote_frame: true, formula_center: true }
+        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap, remote_frame: true, formula_center: true, guest_frames: true, share_view: true }
     }
 }
 
@@ -49,6 +53,8 @@ impl Settings {
                 "side_gap" => s.side_gap = v.parse().unwrap_or(s.side_gap).clamp(4.0, 200.0),
                 "remote_frame" => s.remote_frame = v != "0",
                 "formula_center" => s.formula_center = v != "0",
+                "guest_frames" => s.guest_frames = v != "0",
+                "share_view" => s.share_view = v != "0",
                 _ => {}
             }
         }
@@ -64,17 +70,21 @@ impl Settings {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(
-            p,
-            format!(
-                "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\n",
-                self.theme,
-                self.row_gap,
-                self.side_gap,
-                if self.remote_frame { 1 } else { 0 },
-                if self.formula_center { 1 } else { 0 }
-            ),
-        );
+        let _ = std::fs::write(p, self.text());
+    }
+
+    /// The settings file's text (what [`Settings::parse`] reads back).
+    pub fn text(&self) -> String {
+        format!(
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\n",
+            self.theme,
+            self.row_gap,
+            self.side_gap,
+            if self.remote_frame { 1 } else { 0 },
+            if self.formula_center { 1 } else { 0 },
+            if self.guest_frames { 1 } else { 0 },
+            if self.share_view { 1 } else { 0 }
+        )
     }
 
     pub fn layout(&self) -> Options {
@@ -91,5 +101,15 @@ mod tests {
         let s = Settings::parse("theme=sepia\nrow_gap=60\nside_gap=9999\njunk\n");
         assert_eq!((s.theme.as_str(), s.row_gap, s.side_gap), ("sepia", 60.0, 200.0));
         assert_eq!(Settings::parse(""), Settings::default());
+    }
+
+    #[test]
+    fn guest_switches_default_on_and_survive_a_save() {
+        let d = Settings::default();
+        assert!(d.guest_frames && d.share_view);
+        let s = Settings { guest_frames: false, ..Settings::default() };
+        let back = Settings::parse(&s.text());
+        assert_eq!(back, s);
+        assert!(!back.guest_frames && back.share_view);
     }
 }

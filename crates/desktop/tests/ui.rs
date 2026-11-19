@@ -486,3 +486,40 @@ fn images_on_a_page_are_drawn() {
     assert!(green > 5_000, "the image is drawn: {green} green pixels");
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn guests_are_named_their_frames_can_be_hidden_and_the_share_panel_lists_them() {
+    use n0te_desktop::live::{Guest, Invite, LiveEvent};
+    let mut h = opened("guests");
+    let (nb, sheet) = {
+        let o = open(&h);
+        (o.id.clone(), o.pages.pages[0].placed.sheet_id.clone())
+    };
+    h.app.guests = vec![Guest { invite: "inv1".into(), notebook: nb.clone(), name: "Mia".into(), device: "dev-mia".into(), write: false }];
+    let presence = |sheet: Option<String>| LiveEvent::Presence { device: "dev-mia".into(), notebook: nb.clone(), sheet, viewport: [10.0, 10.0, 200.0, 150.0], zoom: 1.0, laser: None };
+    let marks = |h: &Harness| open(h).pages.remote.borrow().iter().map(|m| m.name.clone()).collect::<Vec<_>>();
+
+    // A guest's view shows with the guest's name (it said "Tablet" before).
+    h.message(Message::Live(presence(Some(sheet.clone()))));
+    assert_eq!(marks(&h), vec!["Mia".to_string()]);
+    // Looking nowhere (the guest's owner-side view sharing stopped / it left the page): gone.
+    h.message(Message::Live(presence(None)));
+    assert!(marks(&h).is_empty());
+
+    // "Ansicht der Gäste zeigen" off: the frame goes and new ones don't come.
+    h.message(Message::Live(presence(Some(sheet.clone()))));
+    h.message(Message::GuestFrames(false));
+    assert!(marks(&h).is_empty());
+    h.message(Message::Live(presence(Some(sheet.clone()))));
+    assert!(marks(&h).is_empty(), "no guest frames while switched off");
+    h.message(Message::GuestFrames(true));
+    h.message(Message::Live(presence(Some(sheet))));
+    assert_eq!(marks(&h), vec!["Mia".to_string()]);
+
+    // The share panel with who's here and the invite's rights draws (no service needed).
+    h.app.share = Some(vec![Invite { id: "inv1".into(), notebook: nb, rw: false, revoked: false, online: 1, link: "n0te://invite/x".into(), expires: 0 }]);
+    h.events(&[]);
+    if let Some(dir) = std::env::var_os("N0TE_UI_SHOTS") {
+        h.screenshot(std::path::Path::new(&dir).join("share-guests.png"));
+    }
+}
