@@ -894,8 +894,15 @@ impl App {
             LiveEvent::Open { device, notebook } => {
                 let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
                 if self.entries.iter().any(|e| e.id == notebook) || self.lib.load_notebook(&notebook).is_ok() {
-                    let _ = self.open(&notebook);
-                    self.live_session = Some(LiveSession { device, name: name.clone(), follow_them: false, they_follow: false });
+                    if self.notebook_id().as_deref() != Some(notebook.as_str()) {
+                        let _ = self.open(&notebook);
+                    }
+                    // Keep who follows whom when the same device asks again (e.g. "Laptop folgt mir").
+                    let (follow_them, they_follow) = self.live_session.as_ref().filter(|l| l.device == device).map(|l| (l.follow_them, l.they_follow)).unwrap_or((false, false));
+                    self.live_session = Some(LiveSession { device, name: name.clone(), follow_them, they_follow });
+                    // Where this view is, right away (the tablet may want to follow it).
+                    self.presence_at = None;
+                    self.send_presence();
                     self.say(format!("{name} hat dieses Notizbuch live geöffnet"));
                 }
             }
