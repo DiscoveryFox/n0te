@@ -100,12 +100,19 @@ pub fn add_ink(pdf: Vec<u8>, pages: &[&[Stroke<'_>]]) -> Result<Vec<u8>> {
 
 /// [`add_ink`] plus a paper ruling per page (`papers[i]`, missing entries = none) drawn under
 /// the ink. Pages with paper but no strokes get the paper.
-pub fn add_ink_and_paper(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -> Result<Vec<u8>> {
+pub fn add_ink_and_paper(pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -> Result<Vec<u8>> {
+    add_ink_paper_text(pdf, pages, papers, &[])
+}
+
+/// [`add_ink_and_paper`] plus text boxes per page (`texts[i]`), typeset with the standard PDF
+/// fonts inside the ink layer, under the strokes.
+pub fn add_ink_paper_text(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]]) -> Result<Vec<u8>> {
     let has_paper = papers.iter().any(|p| p.is_some_and(|p| p.background != n0te_core::notebook::Background::Blank));
-    if pages.iter().all(|s| s.is_empty()) && !has_paper {
+    let has_text = texts.iter().any(|t| !t.is_empty());
+    if pages.iter().all(|s| s.is_empty()) && !has_paper && !has_text {
         return Ok(pdf);
     }
-    let update = build_update(&pdf, pages, papers)?;
+    let update = build_update(&pdf, pages, papers, texts)?;
     pdf.extend_from_slice(&update);
     Ok(pdf)
 }
@@ -124,6 +131,9 @@ struct PageNode<'a> {
 /// What one inked page needs written.
 struct Plan<'s> {
     strokes: &'s [Stroke<'s>],
+    /// Text boxes and the font resource names (regular, bold, mono) when there are any.
+    texts: &'s [crate::text_layout::PdfText],
+    fonts: Option<[String; 3]>,
     /// Paper ruling and the displayed page size (points) it spans.
     paper: Option<(Paper, f64, f64)>,
     matrix: [f64; 6],
@@ -132,7 +142,7 @@ struct Plan<'s> {
     gs_names: Vec<(u8, String)>,
 }
 
-fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -> Result<Vec<u8>> {
+fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]]) -> Result<Vec<u8>> {
     let file = File::parse(pdf)?;
     let (root_num, root_gen) = match file.trailer.get("Root") {
         Some(Obj::Ref(n, g)) => (*n, *g),
@@ -151,14 +161,17 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -
     };
     let (wrap_open, wrap_close, ocg) = (alloc(), alloc(), alloc());
     let mut gs_objects: BTreeMap<u8, u32> = BTreeMap::new();
+    // The three standard fonts, written once if any page has text.
+    let font_objects: Option<[u32; 3]> = texts.iter().any(|t| !t.is_empty()).then(|| [alloc(), alloc(), alloc()]);
 
     // Plan every inked page: new resources, contents and the names its ink stream uses.
     let mut plans = Vec::new();
     let mut page_dicts = Vec::new();
     for (i, (node, &strokes)) in tree.into_iter().zip(pages).enumerate() {
         let paper = papers.get(i).copied().flatten().filter(|p| p.background != n0te_core::notebook::Background::Blank && p.spacing >= 2.0);
+        let page_texts: &[crate::text_layout::PdfText] = texts.get(i).copied().unwrap_or(&[]);
         let mut alphas: Vec<u8> = strokes.iter().filter(|s| visible(s)).map(|s| (s.brush.color >> 24) as u8).collect();
-        if alphas.is_empty() && paper.is_none() {
+        if alphas.is_empty() && paper.is_none() && page_texts.is_empty() {
             continue;
         }
         alphas.sort_unstable();
@@ -186,6 +199,20 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -
             }
             res.set("ExtGState", Obj::Dict(ext));
         }
+        let mut fonts = None;
+        if let (Some(objs), false) = (font_objects, page_texts.is_empty()) {
+            let mut fd = sub_dict(&file, &res, "Font")?;
+            let names = ["N0teHelv", "N0teHelvB", "N0teMono"].map(|base| {
+                let n = unique_name(&fd, base);
+                fd.set(&n, Obj::Null);
+                n
+            });
+            for (n, o) in names.iter().zip(objs) {
+                fd.set(n, Obj::Ref(o, 0));
+            }
+            res.set("Font", Obj::Dict(fd));
+            fonts = Some(names);
+        }
 
         let ink_obj = alloc();
         let existing = contents(&file, node.dict.get("Contents"))?;
@@ -207,7 +234,7 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -
         dict.set("Contents", Obj::Array(new_contents));
         dict.set("Resources", Obj::Dict(res));
         page_dicts.push((node.num, node.generation, dict, ink_obj));
-        plans.push(Plan { strokes, paper: paper.map(|p| (p, pw, ph)), matrix, oc_name, gs_names });
+        plans.push(Plan { strokes, texts: page_texts, fonts, paper: paper.map(|p| (p, pw, ph)), matrix, oc_name, gs_names });
     }
 
     if plans.is_empty() {
@@ -228,6 +255,17 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>]) -
         ("N0te".as_bytes().into(), Obj::num(1.0)),
     ]));
     out.object(ocg, 0, &ocg_dict);
+    if let Some(objs) = font_objects {
+        for (num, base) in objs.into_iter().zip(["Helvetica", "Helvetica-Bold", "Courier"]) {
+            let f = Dict(vec![
+                ("Type".as_bytes().into(), Obj::name("Font")),
+                ("Subtype".as_bytes().into(), Obj::name("Type1")),
+                ("BaseFont".as_bytes().into(), Obj::name(base)),
+                ("Encoding".as_bytes().into(), Obj::name("WinAnsiEncoding")),
+            ]);
+            out.object(num, 0, &Obj::Dict(f));
+        }
+    }
     for (&alpha, &num) in &gs_objects {
         let a = Obj::num(alpha as f64 / 255.0);
         let gs = Dict(vec![("Type".as_bytes().into(), Obj::name("ExtGState")), ("ca".as_bytes().into(), a.clone()), ("CA".as_bytes().into(), a)]);
@@ -608,7 +646,7 @@ fn paper_content(out: &mut Vec<u8>, plan: &Plan) {
 fn ink_content(plan: &Plan) -> Vec<u8> {
     let mut out = Vec::with_capacity(plan.strokes.iter().map(|s| s.points.len() * 30 + 64).sum::<usize>() + 128);
     paper_content(&mut out, plan);
-    if !plan.strokes.iter().any(visible) {
+    if !plan.strokes.iter().any(visible) && plan.texts.is_empty() {
         return out;
     }
     out.extend_from_slice(b"/OC /");
@@ -619,6 +657,7 @@ fn ink_content(plan: &Plan) -> Vec<u8> {
         out.push(b' ');
     }
     out.extend_from_slice(b"cm\n");
+    text_content(&mut out, plan);
     let (mut color, mut alpha) = (None, 255u8);
     for s in plan.strokes.iter().filter(|s| visible(s)) {
         let poly = ink::outline(s.points, &s.brush);
@@ -653,6 +692,32 @@ fn ink_content(plan: &Plan) -> Vec<u8> {
     }
     out.extend_from_slice(b"Q\nEMC\n");
     out
+}
+
+/// Text boxes (page coordinates, y down after `cm`): each line its own text object with a
+/// flipped text matrix so glyphs stand upright.
+fn text_content(out: &mut Vec<u8>, plan: &Plan) {
+    use crate::text_layout::{Face, layout, pdf_string};
+    let Some(names) = &plan.fonts else { return };
+    for t in plan.texts {
+        for line in layout(t) {
+            let font = match line.face {
+                Face::Regular => &names[0],
+                Face::Bold => &names[1],
+                Face::Mono => &names[2],
+            };
+            out.extend_from_slice(if line.grey { b"0.54 0.54 0.57 rg\nBT /" } else { b"0.067 0.067 0.078 rg\nBT /" });
+            out.extend_from_slice(font.as_bytes());
+            out.extend_from_slice(b" 1 Tf ");
+            for v in [line.size as f64, 0.0, 0.0, -line.size as f64, line.x as f64, line.baseline as f64] {
+                write_num(out, v, 3);
+                out.push(b' ');
+            }
+            out.extend_from_slice(b"Tm ");
+            out.extend_from_slice(&pdf_string(&line.bytes));
+            out.extend_from_slice(b" Tj ET\n");
+        }
+    }
 }
 
 /// The update being written: objects and their offsets in the final file.
@@ -823,7 +888,7 @@ mod tests {
         let (p1, b1) = dot(5.0, 5.0, 0x80FF0000);
         let (p2, b2) = dot(7.0, 7.0, 0xFF000000);
         let strokes = [Stroke { points: &p2, brush: b2 }, Stroke { points: &p1, brush: b1 }, Stroke { points: &p2, brush: b2 }];
-        let plan = Plan { strokes: &strokes, paper: None, matrix: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0], oc_name: "N0teInk".into(), gs_names: vec![(128, "A".into()), (255, "B".into())] };
+        let plan = Plan { strokes: &strokes, texts: &[], fonts: None, paper: None, matrix: [1.0, 0.0, 0.0, -1.0, 0.0, 842.0], oc_name: "N0teInk".into(), gs_names: vec![(128, "A".into()), (255, "B".into())] };
         let s = String::from_utf8(ink_content(&plan)).unwrap();
         assert!(s.starts_with("/OC /N0teInk BDC\nq\n1 0 0 -1 0 842 cm\n0 0 0 rg\n"), "{s}");
         assert!(s.ends_with("f\nQ\nEMC\n"));

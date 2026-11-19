@@ -36,6 +36,7 @@ pub mod notebook;
 mod render;
 mod syntax;
 mod text;
+pub mod text_layout;
 pub mod worker;
 
 use std::mem::ManuallyDrop;
@@ -49,7 +50,8 @@ pub use pdfium_render;
 use pdfium_render::prelude::{PdfDocument, PdfPage, PdfRenderConfig, Pdfium, PdfiumError, PdfiumLibraryConfig};
 
 pub use export::{ExportPage, PageSource, Stroke};
-pub use ink_writer::{INK_LAYER_NAME, Paper, add_ink, add_ink_and_paper, hide_ink};
+pub use ink_writer::{INK_LAYER_NAME, Paper, add_ink, add_ink_and_paper, add_ink_paper_text, hide_ink};
+pub use text_layout::PdfText;
 pub use render::{Rgba, Tile, page_pixels, tiles};
 pub use text::{PageText, TextChar};
 pub use worker::{Docs, ExportSheet, PdfWorker, SheetSource, TileRequest, TileResult, WorkerOptions};

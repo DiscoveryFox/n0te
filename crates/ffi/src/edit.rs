@@ -27,6 +27,23 @@ impl SheetHandle {
     pub fn hit_test(&self, x: f32, y: f32, radius: f32) -> Vec<String> {
         lock(&self.sheet).hit_test(x, y, radius)
     }
+    /// The sheet's text boxes (typed on the laptop), top to bottom.
+    pub fn text_boxes(&self) -> Vec<crate::FfiTextBox> {
+        lock(&self.sheet)
+            .text_boxes()
+            .into_iter()
+            .map(|t| crate::FfiTextBox { id: t.id, x: t.x, y: t.y, w: t.w, size: t.size, text: t.text })
+            .collect()
+    }
+    pub fn add_text_box(&self, x: f32, y: f32, w: f32, size: f32, text: String) -> R<String> {
+        Ok(lock(&self.sheet).add_text_box(x, y, w, size, &text)?)
+    }
+    pub fn set_text(&self, id: String, text: String) -> R<()> {
+        Ok(lock(&self.sheet).set_text(&id, &text)?)
+    }
+    pub fn place_text_box(&self, id: String, x: f32, y: f32, w: f32, size: f32) -> R<()> {
+        Ok(lock(&self.sheet).place_text_box(&id, x, y, w, size)?)
+    }
     /// Strokes the path (packed LE f32 x,y pairs) passes within `radius` of.
     pub fn hit_path(&self, path: Vec<u8>, radius: f32) -> Vec<String> {
         lock(&self.sheet).hit_path(&pairs(&path), radius)

@@ -70,6 +70,17 @@ pub struct FfiStroke {
     pub layers: Vec<Vec<u8>>,
 }
 
+/// Typed text on a page (Markdown), position and width in page points.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiTextBox {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub size: f32,
+    pub text: String,
+}
+
 /// A stroke's brush and samples (packed LE f32 x, y, pressure, t_ms), for copy/paste.
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiStrokeData {

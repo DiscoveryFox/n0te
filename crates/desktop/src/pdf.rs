@@ -158,7 +158,11 @@ impl Pdf {
     /// Exports all sheets (`None`) or the given ones as a PDF; returns bytes and page count.
     pub fn export(&self, lib: &Library, nb: &Notebook, selected: Option<&[String]>) -> Result<(Vec<u8>, usize), String> {
         let id = nb.id();
-        let pages = n0te_pdf::notebook::export_sheets(nb, selected, |sheet| Ok(lib.load_sheet(&id, sheet)?.strokes())).map_err(|e| e.to_string())?;
+        let pages = n0te_pdf::notebook::export_sheets_with_text(nb, selected, |sheet| {
+            let s = lib.load_sheet(&id, sheet)?;
+            Ok((s.strokes(), s.text_boxes()))
+        })
+        .map_err(|e| e.to_string())?;
         if pages.is_empty() {
             return Err("nichts zu exportieren".into());
         }

@@ -203,19 +203,22 @@ pub fn pdf_page_pixels(width: f32, height: f32, scale: f32) -> Vec<u32> {
 }
 
 impl NotebookHandle {
-    /// Strokes of a sheet for export: from an open handle (unsaved edits included), else stored.
-    fn strokes_for_export(&self, nb_id: &str, sheet_id: &str) -> n0te_pdf::Result<Vec<n0te_core::sheet::Stroke>> {
+    /// Strokes and text boxes of a sheet for export: from an open handle (unsaved edits
+    /// included), else stored.
+    fn content_for_export(&self, nb_id: &str, sheet_id: &str) -> n0te_pdf::Result<(Vec<n0te_core::sheet::Stroke>, Vec<n0te_core::sheet::TextBox>)> {
         if let Some(open) = self.open_sheet_handle(sheet_id) {
-            return Ok(lock(&open.sheet).strokes());
+            let s = lock(&open.sheet);
+            return Ok((s.strokes(), s.text_boxes()));
         }
-        Ok(self.lib.inner.load_sheet(nb_id, sheet_id)?.strokes())
+        let s = self.lib.inner.load_sheet(nb_id, sheet_id)?;
+        Ok((s.strokes(), s.text_boxes()))
     }
 
     fn export_bytes(&self, pdf: &PdfService, sheet_ids: Option<Vec<String>>) -> R<(Vec<u8>, u32)> {
         let pages = {
             let nb = lock(&self.nb);
             let id = nb.id();
-            n0te_pdf::notebook::export_sheets(&nb, sheet_ids.as_deref(), |sheet| self.strokes_for_export(&id, sheet))?
+            n0te_pdf::notebook::export_sheets_with_text(&nb, sheet_ids.as_deref(), |sheet| self.content_for_export(&id, sheet))?
         };
         if pages.is_empty() {
             return Err(N0teError::Failed { msg: "nothing to export".into() });

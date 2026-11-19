@@ -72,6 +72,11 @@ pub fn add_pdf_sheets(nb: &Notebook, pdf: &StoredPdf, parent: Option<&str>, inde
 /// around their strokes ([`BOARD_MARGIN`]); empty boards are left out. `strokes` returns a
 /// sheet's strokes (apps prefer an open, possibly unsaved sheet over the stored one).
 pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: impl FnMut(&str) -> Result<Vec<sheet::Stroke>>) -> Result<Vec<ExportSheet>> {
+    export_sheets_with_text(nb, selected, |id| Ok((strokes(id)?, Vec::new())))
+}
+
+/// [`export_sheets`] with each sheet's text boxes too (`content` returns strokes and boxes).
+pub fn export_sheets_with_text(nb: &Notebook, selected: Option<&[String]>, mut content: impl FnMut(&str) -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>)>) -> Result<Vec<ExportSheet>> {
     let mut specs: HashMap<String, SheetSpec> = HashMap::new();
     for row in nb.outline(true) {
         if let OutlineRow::Sheet { sheet_id, spec, left, right, .. } = row {
@@ -95,7 +100,9 @@ pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: im
     let mut out = Vec::with_capacity(ids.len());
     for id in ids {
         let spec = &specs[&id];
-        let mut ink: Vec<(Vec<InkPoint>, Brush)> = strokes(&id)?.into_iter().map(|s| (s.points, s.brush)).collect();
+        let (strokes, boxes) = content(&id)?;
+        let mut ink: Vec<(Vec<InkPoint>, Brush)> = strokes.into_iter().map(|s| (s.points, s.brush)).collect();
+        let texts: Vec<crate::text_layout::PdfText> = boxes.into_iter().filter(|t| !t.text.trim().is_empty()).map(|t| crate::text_layout::PdfText { x: t.x, y: t.y, w: t.w, size: t.size, text: t.text }).collect();
         let source = match &spec.pdf {
             Some((blob, page)) => SheetSource::Pdf { doc: blob.clone(), page: *page },
             None if !spec.is_board() => SheetSource::Blank { width: spec.width, height: spec.height },
@@ -105,7 +112,7 @@ pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: im
             },
         };
         let paper = (spec.pdf.is_none() && !spec.is_board()).then_some(crate::ink_writer::Paper { background: spec.background, spacing: spec.spacing });
-        out.push(ExportSheet { source, strokes: ink, paper });
+        out.push(ExportSheet { source, strokes: ink, paper, texts });
     }
     Ok(out)
 }

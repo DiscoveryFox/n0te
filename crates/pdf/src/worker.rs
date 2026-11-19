@@ -321,7 +321,8 @@ impl PdfWorker {
         let strokes: Vec<Vec<Stroke>> = sheets.iter().map(|s| s.strokes.iter().map(|(p, b)| Stroke { points: p, brush: *b }).collect()).collect();
         let refs: Vec<&[Stroke]> = strokes.iter().map(Vec::as_slice).collect();
         let papers: Vec<Option<crate::ink_writer::Paper>> = sheets.iter().map(|s| s.paper).collect();
-        crate::ink_writer::add_ink_and_paper(bytes, &refs, &papers)
+        let texts: Vec<&[crate::text_layout::PdfText]> = sheets.iter().map(|s| s.texts.as_slice()).collect();
+        crate::ink_writer::add_ink_paper_text(bytes, &refs, &papers, &texts)
     }
 }
 
@@ -349,6 +350,8 @@ pub enum SheetSource {
 pub struct ExportSheet {
     pub source: SheetSource,
     pub strokes: Vec<(Vec<InkPoint>, Brush)>,
+    /// Typed text boxes (drawn under the ink).
+    pub texts: Vec<crate::text_layout::PdfText>,
     /// Ruling drawn under the ink (fixed-size n0te sheets; None for PDF pages and boards).
     pub paper: Option<crate::ink_writer::Paper>,
 }
