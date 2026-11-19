@@ -5,17 +5,18 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Space, button, column, container, row, scrollable, text, text_input};
+use iced::widget::{Space, button, column, container, mouse_area, pin, row, scrollable, stack, text, text_editor, text_input};
 use iced::{Alignment, Element, Length, Padding, Subscription, Task, Theme};
 
 use n0te_core::layout::{self as nl, Options};
 use n0te_core::notebook::{Background, Notebook, OutlineRow, SheetSpec};
+use n0te_core::sheet::Sheet;
 use n0te_core::store::Library;
 
-use crate::pages::{self, Camera, Pages};
+use crate::pages::{self, Camera, Pages, SheetContent};
 use crate::pdf::{self, Pdf};
 use crate::{library, sidebar, theme};
 
@@ -65,6 +66,36 @@ pub enum Message {
     Export(ExportWhat),
     TogglePick(String),
     OpenPath(PathBuf),
+    /// Text boxes: new at (sheet, x, y), edit (sheet, box), typing, move/resize drags, size,
+    /// delete, done; a click on the canvas ends editing; the tick saves after a pause.
+    NewText(String, f32, f32),
+    EditText(String, String),
+    EditAction(text_editor::Action),
+    MoveText(iced::Vector),
+    ResizeText(iced::Vector),
+    PlaceText,
+    TextSize(f32),
+    DeleteText,
+    DoneText,
+    Tick,
+}
+
+/// The text box being edited: its sheet stays open while typing.
+pub struct Editing {
+    pub sheet_id: String,
+    pub box_id: String,
+    pub sheet: Sheet,
+    pub content: text_editor::Content,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub size: f32,
+    pub dirty: bool,
+    pub last_change: Instant,
+}
+
+pub fn editor_id() -> iced::widget::Id {
+    iced::widget::Id::new("n0te-text-box")
 }
 
 /// What to export as PDF.
@@ -100,6 +131,7 @@ pub struct App {
     pub last_export: Option<PathBuf>,
     /// Where exported PDFs go (~/Downloads).
     pub export_dir: PathBuf,
+    pub editing: Option<Editing>,
     pub entries: Vec<Entry>,
     pub bundles: Vec<Bundle>,
     pub screen: Screen,
@@ -158,6 +190,7 @@ impl App {
             export: None,
             last_export: None,
             export_dir: downloads(),
+            editing: None,
             entries: Vec::new(),
             bundles: Vec::new(),
             screen: Screen::Library,
@@ -192,6 +225,7 @@ impl App {
         Subscription::batch([
             keyboard::listen().map(Message::Key),
             Pdf::subscription().map(|_| Message::TileReady),
+            Subscription::run(ticks).map(|_| Message::Tick),
             iced::event::listen_with(|e, _, _| match e {
                 iced::Event::Window(iced::window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
                 _ => None,
@@ -221,7 +255,12 @@ impl App {
         let layout = nl::layout(&rows, &nb.outline(true), Options::default());
         let lib = self.lib.clone();
         let nid = id.to_string();
-        let pages = Pages::new(layout, Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| s.strokes()).unwrap_or_default()), self.pdf.clone());
+        let pages = Pages::new(
+            layout,
+            Box::new(move |sheet| lib.load_sheet(&nid, sheet).map(|s| SheetContent { strokes: s.strokes(), texts: s.text_boxes() }).unwrap_or_default()),
+            self.pdf.clone(),
+        );
+        self.finish_text();
         self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, pages, camera: Camera::default() }));
         Ok(())
     }
@@ -238,6 +277,7 @@ impl App {
                 }
             }
             Message::Back => {
+                self.finish_text();
                 self.screen = Screen::Library;
                 self.refresh();
             }
@@ -373,8 +413,179 @@ impl App {
             Message::OpenPath(p) => {
                 let _ = std::process::Command::new("xdg-open").arg(p).spawn();
             }
+            Message::NewText(sheet, x, y) => return self.new_text(&sheet, x, y),
+            Message::EditText(sheet, id) => return self.edit_text(&sheet, &id),
+            Message::EditAction(a) => {
+                if let Some(e) = &mut self.editing {
+                    let edit = a.is_edit();
+                    e.content.perform(a);
+                    if edit {
+                        e.dirty = true;
+                        e.last_change = Instant::now();
+                    }
+                }
+            }
+            Message::MoveText(d) | Message::ResizeText(d) => {
+                let zoom = match &self.screen {
+                    Screen::Notebook(o) => o.camera.zoom,
+                    _ => 1.0,
+                };
+                if let Some(e) = &mut self.editing {
+                    if matches!(message, Message::MoveText(_)) {
+                        e.x += d.x / zoom;
+                        e.y += d.y / zoom;
+                    } else {
+                        e.w = (e.w + d.x / zoom).max(40.0);
+                    }
+                }
+            }
+            Message::PlaceText => self.save_text(true),
+            Message::TextSize(d) => {
+                if let Some(e) = &mut self.editing {
+                    e.size = (e.size + d).clamp(6.0, 72.0);
+                }
+                self.save_text(true);
+            }
+            Message::DeleteText => {
+                if let Some(e) = self.editing.take() {
+                    let _ = e.sheet.remove(std::slice::from_ref(&e.box_id));
+                    self.store_sheet(&e.sheet_id, &e.sheet);
+                }
+            }
+            Message::DoneText => self.finish_text(),
+            Message::Tick => {
+                if self.editing.as_ref().is_some_and(|e| e.dirty && e.last_change.elapsed().as_millis() > 800) {
+                    self.save_text(false);
+                }
+            }
         }
         Task::none()
+    }
+
+    fn notebook_id(&self) -> Option<String> {
+        match &self.screen {
+            Screen::Notebook(o) => Some(o.id.clone()),
+            Screen::Library => None,
+        }
+    }
+
+    /// Writes a sheet and makes the canvas read it again.
+    fn store_sheet(&mut self, sheet_id: &str, sheet: &Sheet) {
+        let Some(nb) = self.notebook_id() else { return };
+        if let Err(e) = self.lib.save_sheet(&nb, sheet_id, sheet) {
+            self.say(format!("Speichern fehlgeschlagen: {e}"));
+        }
+        if let Screen::Notebook(o) = &self.screen {
+            o.pages.reload_sheet(sheet_id);
+        }
+    }
+
+    /// Saves the box being edited (text, and with `place` its position/size).
+    fn save_text(&mut self, place: bool) {
+        let Some(e) = self.editing.as_mut() else { return };
+        let text = e.content.text();
+        let text = text.strip_suffix('\n').unwrap_or(&text).to_string();
+        let _ = e.sheet.set_text(&e.box_id, &text);
+        if place {
+            let _ = e.sheet.place_text_box(&e.box_id, e.x, e.y, e.w, e.size);
+        }
+        e.dirty = false;
+        let (sheet_id, sheet) = (e.sheet_id.clone(), Sheet::load(0, &e.sheet.snapshot().unwrap_or_default()));
+        if let Ok(sheet) = sheet {
+            self.store_sheet(&sheet_id, &sheet);
+        }
+    }
+
+    /// Ends editing: saves; an empty box is removed.
+    fn finish_text(&mut self) {
+        if self.editing.is_none() {
+            return;
+        }
+        self.save_text(true);
+        if let Some(e) = self.editing.take()
+            && e.content.text().trim().is_empty()
+        {
+            let _ = e.sheet.remove(std::slice::from_ref(&e.box_id));
+            self.store_sheet(&e.sheet_id, &e.sheet);
+        }
+    }
+
+    fn edit_text(&mut self, sheet_id: &str, box_id: &str) -> Task<Message> {
+        if self.editing.as_ref().is_some_and(|e| e.box_id == box_id) {
+            return Task::none();
+        }
+        self.finish_text();
+        let Some(nb) = self.notebook_id() else { return Task::none() };
+        let Ok(sheet) = self.lib.load_sheet(&nb, sheet_id) else { return Task::none() };
+        let Some(tb) = sheet.text_boxes().into_iter().find(|t| t.id == box_id) else { return Task::none() };
+        let mut content = text_editor::Content::with_text(&tb.text);
+        content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
+        self.editing = Some(Editing { sheet_id: sheet_id.to_string(), box_id: box_id.to_string(), sheet, content, x: tb.x, y: tb.y, w: tb.w, size: tb.size, dirty: false, last_change: Instant::now() });
+        iced::widget::operation::focus(editor_id())
+    }
+
+    fn new_text(&mut self, sheet_id: &str, x: f32, y: f32) -> Task<Message> {
+        self.finish_text();
+        let Some(nb) = self.notebook_id() else { return Task::none() };
+        let page_w = match &self.screen {
+            Screen::Notebook(o) => o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet_id).map(|p| p.placed.rect.width()).unwrap_or(595.0),
+            _ => 595.0,
+        };
+        let Ok(sheet) = self.lib.load_sheet(&nb, sheet_id) else { return Task::none() };
+        let w = (page_w - x - 24.0).clamp(80.0, 360.0);
+        let Ok(id) = sheet.add_text_box(x, y, w, 14.0, "") else { return Task::none() };
+        self.store_sheet(sheet_id, &sheet);
+        self.edit_text(sheet_id, &id)
+    }
+
+    /// Text boxes over the canvas: the edited one as an editor with grips, the others as
+    /// rendered Markdown (a click edits).
+    fn text_layers<'a>(&'a self, o: &'a Open) -> Vec<Element<'a, Message>> {
+        let cam = o.camera;
+        if cam.viewport.width <= 0.0 || cam.zoom < 0.2 {
+            return Vec::new();
+        }
+        let mut out: Vec<Element<'a, Message>> = Vec::new();
+        for (sheet, page, tb) in o.pages.visible_texts(&cam) {
+            if self.editing.as_ref().is_some_and(|e| e.box_id == tb.id) {
+                continue;
+            }
+            let x = (page.x0 + tb.x - cam.x) * cam.zoom;
+            let y = (page.y0 + tb.y - cam.y) * cam.zoom;
+            let body = crate::markdown::view(&tb.text, tb.size * cam.zoom, tb.w * cam.zoom);
+            let area = mouse_area(body).on_press(Message::EditText(sheet.clone(), tb.id.clone())).interaction(iced::mouse::Interaction::Text);
+            out.push(pin(area).x(x).y(y).into());
+        }
+        if let Some(e) = &self.editing
+            && let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == e.sheet_id).map(|p| p.placed.rect)
+        {
+            let x = (page.x0 + e.x - cam.x) * cam.zoom;
+            let y = (page.y0 + e.y - cam.y) * cam.zoom;
+            let small = |label: &'static str, m: Message| button(text(label).font(theme::SANS_BOLD).size(12)).padding([3, 8]).on_press(m).style(theme::text_tool);
+            let tools = row![
+                crate::widgets::grip("⠿", iced::mouse::Interaction::Grab, Message::MoveText, Message::PlaceText),
+                Space::new().width(4),
+                small("A−", Message::TextSize(-2.0)),
+                small("A+", Message::TextSize(2.0)),
+                small("×", Message::DeleteText),
+                small("✓", Message::DoneText),
+                Space::new().width(Length::Fill),
+                crate::widgets::grip("↔", iced::mouse::Interaction::ResizingHorizontally, Message::ResizeText, Message::PlaceText),
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center)
+            .width(Length::Fixed((e.w * cam.zoom).max(150.0)));
+            let editor = text_editor(&e.content)
+                .id(editor_id())
+                .on_action(Message::EditAction)
+                .size(e.size * cam.zoom)
+                .font(theme::SANS)
+                .padding(4)
+                .placeholder("Text, Markdown: # Titel, - Punkt, **fett**, $x^2$")
+                .style(theme::editor_on_paper_framed);
+            out.push(pin(column![tools, container(editor).width(Length::Fixed(e.w * cam.zoom))].spacing(4)).x(x - 4.0).y(y - 32.0).into());
+        }
+        out
     }
 
     /// Lays the open notebook out again after a structural change (keeps the camera).
@@ -464,6 +675,10 @@ impl App {
     /// Global shortcuts (keys no focused widget consumed).
     fn shortcut(&mut self, key: Key, m: keyboard::Modifiers) -> Task<Message> {
         if let Key::Named(Named::Escape) = key.as_ref() {
+            if self.editing.is_some() {
+                self.finish_text();
+                return Task::none();
+            }
             if self.creating.is_some() || self.show_imports {
                 self.creating = None;
                 self.show_imports = false;
@@ -485,6 +700,14 @@ impl App {
                 Key::Character("+" | "=") => self.update(Message::Zoom(c.zoom * 1.25)),
                 Key::Character("-") => self.update(Message::Zoom(c.zoom / 1.25)),
                 Key::Character("b") => self.update(Message::ToggleSidebar),
+                Key::Character("t") => {
+                    // A text box in the middle of the view, on the page there.
+                    let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 3.0);
+                    match o.pages.sheet_at(cx, cy).filter(|p| !p.is_board()).map(|p| (p.sheet_id.clone(), cx - p.rect.x0, cy - p.rect.y0)) {
+                        Some((sheet, x, y)) => self.update(Message::NewText(sheet, x, y)),
+                        None => Task::none(),
+                    }
+                }
                 _ => Task::none(),
             };
         }
@@ -513,7 +736,10 @@ impl App {
 
     fn notebook_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
         let current = o.pages.current_number(&o.camera);
-        let canvas: Element<'a, Message> = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold).into();
+        let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold).on_double_click(Message::NewText);
+        let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
+        layers.extend(self.text_layers(o));
+        let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
         if self.sidebar {
             body = body.push(sidebar::view(&o.rows, &o.pages, current));
@@ -525,7 +751,7 @@ impl App {
             self.export.as_ref().map(|picked| crate::library::export_panel(o, picked))
         };
         let canvas: Element<'a, Message> = match panel {
-            Some(p) => iced::widget::stack![canvas, container(p).padding(16).width(Length::Fill)].into(),
+            Some(p) => stack![canvas, container(p).padding(16).width(Length::Fill)].into(),
             None => canvas,
         };
         body = body.push(canvas);
@@ -624,6 +850,18 @@ pub fn free_path(dir: &Path, title: &str, ext: &str) -> PathBuf {
         .map(|i| dir.join(if i == 1 { format!("{base}.{ext}") } else { format!("{base} ({i}).{ext}") }))
         .find(|p| !p.exists())
         .expect("a free name")
+}
+
+/// One tick per second (text boxes save after a pause in typing).
+fn ticks() -> iced::futures::stream::BoxStream<'static, ()> {
+    use iced::futures::StreamExt;
+    let (tx, rx) = iced::futures::channel::mpsc::unbounded();
+    std::thread::spawn(move || {
+        while tx.unbounded_send(()).is_ok() {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    });
+    rx.boxed()
 }
 
 /// Sends a file to the tablet with the n0bridge CLI.

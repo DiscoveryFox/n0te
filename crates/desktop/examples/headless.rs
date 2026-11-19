@@ -77,6 +77,22 @@ fn main() {
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
         h.screenshot(out.join("m2-06-pdf.png"));
+        // Text boxes on the slide: one rendered, one being edited.
+        if let Screen::Notebook(o) = &h.app.screen {
+            let sheet = o.pages.pages[0].placed.sheet_id.clone();
+            h.message(Message::NewText(sheet.clone(), 470.0, 160.0));
+            for (i, line) in ["## Merke", "- Folge **konvergiert**, wenn $|a_n - a| < \\epsilon$", "- Reihe: `Summe der Folgenglieder`"].iter().enumerate() {
+                if i > 0 {
+                    h.press(iced::keyboard::key::Named::Enter);
+                }
+                h.type_text(line);
+            }
+            h.message(Message::DoneText);
+            h.message(Message::NewText(sheet, 60.0, 250.0));
+            h.type_text("Frage an Prof: Gilt das auch für komplexe Folgen?");
+        }
+        h.events(&[]);
+        h.screenshot(out.join("m2-07-text.png"));
     }
     println!("screenshots in {}", out.display());
     let _ = std::fs::remove_dir_all(root);

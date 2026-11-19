@@ -5,10 +5,12 @@ pub mod app;
 pub mod blocks;
 pub mod demo;
 pub mod library;
+pub mod markdown;
 pub mod pages;
 pub mod pdf;
 pub mod sidebar;
 pub mod theme;
+pub mod widgets;
 
 pub use app::{App, Message};
 

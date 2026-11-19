@@ -29,7 +29,7 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Theme, Transfo
 use n0te_core::ink::{self, KIND_PENCIL, Rect};
 use n0te_core::layout::{self as nl, Header, Placed};
 use n0te_core::notebook::{Background, SheetSpec};
-use n0te_core::sheet::Stroke;
+use n0te_core::sheet::{Stroke, TextBox};
 
 use crate::pdf::{self, Pdf};
 use crate::theme;
@@ -41,12 +41,19 @@ pub const MAX_CACHED: usize = 24;
 /// Pencil passes (outer band, middle band, core) at the tablet's default softness.
 const PENCIL_ALPHA: [f32; 3] = [0.84, 0.14, 0.24];
 
-/// Reads a sheet's strokes (from the library).
-pub type Loader = Box<dyn Fn(&str) -> Vec<Stroke>>;
+/// What a sheet holds.
+#[derive(Default)]
+pub struct SheetContent {
+    pub strokes: Vec<Stroke>,
+    pub texts: Vec<TextBox>,
+}
+
+/// Reads a sheet's content (from the library).
+pub type Loader = Box<dyn Fn(&str) -> SheetContent>;
 
 pub struct Page {
     pub placed: Placed,
-    strokes: RefCell<Option<Rc<Vec<Stroke>>>>,
+    content: RefCell<Option<Rc<SheetContent>>>,
     cache: RefCell<canvas::Cache>,
     lod: Cell<f32>,
     /// (sample step, mesh): zoomed-out views use a decimated mesh.
@@ -58,7 +65,7 @@ impl Page {
     fn new(placed: Placed) -> Self {
         Page {
             placed,
-            strokes: RefCell::new(None),
+            content: RefCell::new(None),
             cache: RefCell::new(canvas::Cache::new()),
             lod: Cell::new(0.0),
             ink: RefCell::new(None),
@@ -84,8 +91,8 @@ impl Page {
         self.lod.set(0.0);
     }
 
-    fn strokes(&self, load: &Loader) -> Rc<Vec<Stroke>> {
-        self.strokes.borrow_mut().get_or_insert_with(|| Rc::new(load(&self.placed.sheet_id))).clone()
+    fn content(&self, load: &Loader) -> Rc<SheetContent> {
+        self.content.borrow_mut().get_or_insert_with(|| Rc::new(load(&self.placed.sheet_id))).clone()
     }
 
     /// Paper and pattern at `lod`, built on first use.
@@ -114,9 +121,9 @@ impl Page {
         {
             return cache.clone();
         }
-        let strokes = self.strokes(load);
+        let content = self.content(load);
         let (w, h) = self.size();
-        let cache = mesh::Cache::new(Arc::from(ink_meshes(&strokes, step, Rectangle::new(Point::ORIGIN, Size::new(w, h)))));
+        let cache = mesh::Cache::new(Arc::from(ink_meshes(&content.strokes, step, Rectangle::new(Point::ORIGIN, Size::new(w, h)))));
         *self.ink.borrow_mut() = Some((step, cache.clone()));
         cache
     }
@@ -269,9 +276,26 @@ impl Pages {
     /// Drops a sheet's strokes and meshes (it changed on disk or was edited).
     pub fn reload_sheet(&self, sheet_id: &str) {
         if let Some(p) = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id) {
-            *p.strokes.borrow_mut() = None;
+            *p.content.borrow_mut() = None;
             *p.ink.borrow_mut() = None;
         }
+    }
+
+    /// Text boxes on the pages in view: (sheet id, the sheet's rect, box).
+    pub fn visible_texts(&self, cam: &Camera) -> Vec<(String, Rect, TextBox)> {
+        let view = cam.view_rect();
+        let mut out = Vec::new();
+        for p in self.pages.iter().filter(|p| p.rect().intersects(&view)) {
+            for t in &p.content(&self.load).texts {
+                out.push((p.placed.sheet_id.clone(), p.placed.rect, t.clone()));
+            }
+        }
+        out
+    }
+
+    /// The sheet under a page point.
+    pub fn sheet_at(&self, x: f32, y: f32) -> Option<&Placed> {
+        self.pages.iter().map(|p| &p.placed).find(|p| p.rect.contains(x, y))
     }
 
     /// Draws a PDF page's background: the thumbnail, sharp tiles of the visible part on top.
@@ -428,16 +452,27 @@ pub struct PageView<'a, Message> {
     camera: Camera,
     on_camera: Box<dyn Fn(Camera) -> Message + 'a>,
     on_fold: Box<dyn Fn(String) -> Message + 'a>,
+    on_double: Option<Box<dyn Fn(String, f32, f32) -> Message + 'a>>,
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold) }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None }
+}
+
+impl<'a, Message> PageView<'a, Message> {
+    /// A double click on a page: (sheet id, x, y in the sheet's points) — a new text box there.
+    pub fn on_double_click(mut self, f: impl Fn(String, f32, f32) -> Message + 'a) -> Self {
+        self.on_double = Some(Box::new(f));
+        self
+    }
 }
 
 #[derive(Default)]
 struct State {
     /// Where a left/middle drag started (screen) and whether it moved (else it's a click).
     drag: Option<(Point, Point, bool)>,
+    /// The last click (time, page point), for double clicks.
+    last_click: Option<(std::time::Instant, Point)>,
     modifiers: keyboard::Modifiers,
     /// (notebook, camera the app gave us, camera we published from it): iced delivers a batch
     /// of events before the app applies the camera, so each event builds on what we already
@@ -528,9 +563,17 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             },
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
                 if let Some((start, _, false)) = state.drag.take() {
-                    // A click: on a group title it folds/unfolds the group.
-                    if let Some(h) = self.pages.header_at(cam.to_page(bounds, start)) {
+                    let at = cam.to_page(bounds, start);
+                    let double = state.last_click.is_some_and(|(t, p)| t.elapsed().as_millis() < 400 && p.distance(at) * cam.zoom < 8.0);
+                    state.last_click = if double { None } else { Some((std::time::Instant::now(), at)) };
+                    if let Some(h) = self.pages.header_at(at) {
+                        // A click on a group title folds/unfolds the group.
                         fold = Some(h.node.clone());
+                    } else if double
+                        && let (Some(f), Some(p)) = (&self.on_double, self.pages.sheet_at(at.x, at.y))
+                        && !p.is_board()
+                    {
+                        shell.publish(f(p.sheet_id.clone(), at.x - p.rect.x0, at.y - p.rect.y0));
                     }
                 }
                 None

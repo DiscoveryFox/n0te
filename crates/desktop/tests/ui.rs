@@ -201,3 +201,69 @@ fn opening_another_notebook_directly_gets_its_own_camera() {
     h.events(&[]);
     assert!(open(&h).camera.viewport.width > 0.0, "B got a camera for the view");
 }
+
+/// A library with one empty grid page, opened.
+fn blank_notebook(tag: &str) -> (Harness, std::path::PathBuf, String) {
+    let root = temp_root(tag);
+    let lib = Library::open(&root).unwrap();
+    let nb = lib.create_notebook("Texte").unwrap();
+    nb.add_sheet(None, 0, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Lines)).unwrap();
+    lib.save_notebook(&nb).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::Open(nb.id()));
+    h.events(&[]);
+    h.events(&[]);
+    (h, root, nb.id())
+}
+
+fn stored_texts(root: &std::path::Path, nb: &str) -> Vec<n0te_core::sheet::TextBox> {
+    let lib = Library::open(root).unwrap();
+    let n = lib.load_notebook(nb).unwrap();
+    let sheet = n.sheet_order()[0].clone();
+    lib.load_sheet(nb, &sheet).unwrap().text_boxes()
+}
+
+#[test]
+fn double_click_creates_a_text_box_typing_saves_it() {
+    let (mut h, root, nb) = blank_notebook("text");
+    let cam = open(&h).camera;
+    let page = open(&h).pages.pages[0].placed.rect;
+    let origin = (1600.0 - cam.viewport.width, 900.0 - 26.0 - 1.0 - cam.viewport.height);
+    let at = Point::new(origin.0 + (page.x0 + 60.0 - cam.x) * cam.zoom, origin.1 + (page.y0 + 100.0 - cam.y) * cam.zoom);
+    h.click(at);
+    h.click(at);
+    assert!(h.app.editing.is_some(), "double click opened a text box for editing");
+    h.type_text("# Satz 4.2 **wichtig**");
+    h.message(Message::DoneText);
+    let texts = stored_texts(&root, &nb);
+    assert_eq!(texts.len(), 1);
+    assert_eq!(texts[0].text, "# Satz 4.2 **wichtig**");
+    assert!((texts[0].x - 60.0).abs() < 1.0 && (texts[0].y - 100.0).abs() < 1.0, "{:?}", texts[0]);
+    // Edit again: move, widen, bigger, then delete.
+    let (sheet, id) = (open(&h).pages.pages[0].placed.sheet_id.clone(), texts[0].id.clone());
+    h.message(Message::EditText(sheet, id));
+    h.message(Message::MoveText(iced::Vector::new(20.0 * cam.zoom, 10.0 * cam.zoom)));
+    h.message(Message::ResizeText(iced::Vector::new(30.0 * cam.zoom, 0.0)));
+    h.message(Message::PlaceText);
+    h.message(Message::TextSize(2.0));
+    let t = &stored_texts(&root, &nb)[0];
+    assert!((t.x - 80.0).abs() < 1.0 && (t.y - 110.0).abs() < 1.0 && (t.w - texts[0].w - 30.0).abs() < 1.0 && t.size == 16.0, "{t:?}");
+    h.message(Message::DeleteText);
+    assert!(stored_texts(&root, &nb).is_empty());
+}
+
+#[test]
+fn an_empty_box_disappears_and_ctrl_t_makes_one() {
+    let (mut h, root, nb) = blank_notebook("ctrlt");
+    let ev = match h.key_event(iced::keyboard::Key::Character("t".into()), None)[0].clone() {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modified_key, physical_key, location, text, repeat, .. }) => {
+            iced::keyboard::Event::KeyPressed { key, modified_key, physical_key, location, modifiers: iced::keyboard::Modifiers::CTRL, text, repeat }
+        }
+        _ => unreachable!(),
+    };
+    h.message(Message::Key(ev));
+    assert!(h.app.editing.is_some());
+    assert_eq!(stored_texts(&root, &nb).len(), 1);
+    h.message(Message::DoneText);
+    assert!(stored_texts(&root, &nb).is_empty(), "nothing typed: the box is gone");
+}

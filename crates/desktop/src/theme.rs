@@ -208,3 +208,25 @@ pub fn editor_on_paper(_: &Theme, _status: text_editor::Status) -> text_editor::
         selection: alpha(ACCENT, 0.20),
     }
 }
+
+/// The text box editor: a thin red frame on the paper.
+pub fn editor_on_paper_framed(_: &Theme, _status: text_editor::Status) -> text_editor::Style {
+    text_editor::Style {
+        background: Background::Color(Color { a: 0.92, ..Color::WHITE }),
+        border: border(alpha(ACCENT, 0.7), 1.0, 4.0),
+        placeholder: color!(0xB0B0B8),
+        value: INK,
+        selection: alpha(ACCENT, 0.20),
+    }
+}
+
+/// Small buttons in the text box toolbar.
+pub fn text_tool(_: &Theme, status: button::Status) -> button::Style {
+    let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+    button::Style {
+        background: Some(Background::Color(if hovered { ACCENT } else { Color::WHITE })),
+        text_color: if hovered { Color::WHITE } else { ACCENT },
+        border: border(ACCENT, 1.0, 6.0),
+        ..Default::default()
+    }
+}

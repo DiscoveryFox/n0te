@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use loro::{ExportMode, LoroDoc, LoroMap, LoroValue, UndoManager, ValueOrContainer, VersionVector};
+use loro::{Container, ExportMode, LoroDoc, LoroMap, LoroText, LoroValue, UndoManager, UpdateOptions, ValueOrContainer, VersionVector};
 
 use crate::error::{Error, Result};
 use crate::ids;
@@ -17,6 +17,21 @@ pub struct Stroke {
     pub brush: Brush,
     pub bounds: Rect,
     pub points: Vec<InkPoint>,
+}
+
+/// Typed text on a page: top-left (x, y) and width in page points, height follows the text.
+/// Stored as a map in the objects map (`kind: "text"`, collaborative `text`), so two devices
+/// typing in the same box merge character by character. Apps that predate text boxes skip it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextBox {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    /// Font size in page points.
+    pub size: f32,
+    /// Markdown.
+    pub text: String,
 }
 
 pub struct Sheet {
@@ -183,6 +198,70 @@ impl Sheet {
         Ok(changed)
     }
 
+    /// Adds a text box; returns its id.
+    pub fn add_text_box(&self, x: f32, y: f32, w: f32, size: f32, text: &str) -> Result<String> {
+        let id = ids::new_id(self.doc.peer_id());
+        let m = self.objects.insert_container(&id, LoroMap::new())?;
+        m.insert("kind", "text")?;
+        m.insert("x", x as f64)?;
+        m.insert("y", y as f64)?;
+        m.insert("w", w.max(20.0) as f64)?;
+        m.insert("size", size.clamp(4.0, 200.0) as f64)?;
+        let t = m.insert_container("text", LoroText::new())?;
+        t.insert(0, text)?;
+        self.doc.commit();
+        Ok(id)
+    }
+
+    fn text_map(&self, id: &str) -> Option<LoroMap> {
+        match self.objects.get(id) {
+            Some(ValueOrContainer::Container(Container::Map(m))) if map_str(&m, "kind").as_deref() == Some("text") => Some(m),
+            _ => None,
+        }
+    }
+
+    /// Replaces a text box's text (as a minimal edit, so concurrent typing elsewhere survives).
+    pub fn set_text(&self, id: &str, text: &str) -> Result<()> {
+        let m = self.text_map(id).ok_or_else(|| Error::NotFound(format!("text box {id}")))?;
+        let t = match m.get("text") {
+            Some(ValueOrContainer::Container(Container::Text(t))) => t,
+            _ => m.insert_container("text", LoroText::new())?,
+        };
+        t.update(text, UpdateOptions::default()).map_err(|e| Error::Invalid(format!("{e:?}")))?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Moves / resizes a text box (any of position, width, font size).
+    pub fn place_text_box(&self, id: &str, x: f32, y: f32, w: f32, size: f32) -> Result<()> {
+        let m = self.text_map(id).ok_or_else(|| Error::NotFound(format!("text box {id}")))?;
+        m.insert("x", x as f64)?;
+        m.insert("y", y as f64)?;
+        m.insert("w", w.max(20.0) as f64)?;
+        m.insert("size", size.clamp(4.0, 200.0) as f64)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// All text boxes, top to bottom.
+    pub fn text_boxes(&self) -> Vec<TextBox> {
+        let mut out = Vec::new();
+        self.objects.for_each(|k, v| {
+            if let ValueOrContainer::Container(Container::Map(m)) = v
+                && map_str(&m, "kind").as_deref() == Some("text")
+            {
+                let f = |key: &str, d: f64| map_f64(&m, key).unwrap_or(d) as f32;
+                let text = match m.get("text") {
+                    Some(ValueOrContainer::Container(Container::Text(t))) => t.to_string(),
+                    _ => String::new(),
+                };
+                out.push(TextBox { id: k.to_string(), x: f("x", 0.0), y: f("y", 0.0), w: f("w", 200.0), size: f("size", 14.0), text });
+            }
+        });
+        out.sort_by(|a, b| a.y.total_cmp(&b.y).then(a.x.total_cmp(&b.x)));
+        out
+    }
+
     /// Removes objects (erase, delete selection). Unknown ids are ignored.
     pub fn remove(&self, ids: &[String]) -> Result<()> {
         for id in ids {
@@ -277,6 +356,21 @@ impl Sheet {
     pub fn import(&self, bytes: &[u8]) -> Result<()> {
         self.doc.import(bytes)?;
         Ok(())
+    }
+}
+
+fn map_str(m: &LoroMap, key: &str) -> Option<String> {
+    match m.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
+        _ => None,
+    }
+}
+
+fn map_f64(m: &LoroMap, key: &str) -> Option<f64> {
+    match m.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::Double(d))) => Some(d),
+        Some(ValueOrContainer::Value(LoroValue::I64(i))) => Some(i as f64),
+        _ => None,
     }
 }
 
@@ -451,6 +545,26 @@ mod tests {
 
     fn line(x0: f32, x1: f32, y: f32) -> Vec<InkPoint> {
         (0..=10).map(|i| InkPoint { x: x0 + (x1 - x0) * i as f32 / 10.0, y, pressure: 0.5, t_ms: i * 8 }).collect()
+    }
+
+    #[test]
+    fn text_boxes_store_edit_move_and_merge_concurrent_typing() {
+        let a = Sheet::create(10).unwrap();
+        a.add_stroke(Brush::default(), &pts(0.0, 5)).unwrap();
+        let id = a.add_text_box(50.0, 80.0, 300.0, 14.0, "# Satz\nDer Mittelwertsatz").unwrap();
+        assert_eq!(a.strokes().len(), 1, "text boxes are not strokes");
+        let tb = &a.text_boxes()[0];
+        assert_eq!((tb.x, tb.y, tb.w, tb.size, tb.text.as_str()), (50.0, 80.0, 300.0, 14.0, "# Satz\nDer Mittelwertsatz"));
+        a.place_text_box(&id, 60.0, 90.0, 250.0, 16.0).unwrap();
+        assert_eq!(a.text_boxes()[0].w, 250.0);
+        // Another device types at the end while this one fixes the start: both survive.
+        let b = Sheet::load(11, &a.snapshot().unwrap()).unwrap();
+        a.set_text(&id, "# Satz 4.2\nDer Mittelwertsatz").unwrap();
+        b.set_text(&id, "# Satz\nDer Mittelwertsatz der Differentialrechnung").unwrap();
+        a.import(&b.updates_since(&a.version()).unwrap()).unwrap();
+        assert_eq!(a.text_boxes()[0].text, "# Satz 4.2\nDer Mittelwertsatz der Differentialrechnung");
+        a.remove(&[id]).unwrap();
+        assert!(a.text_boxes().is_empty());
     }
 
     #[test]
