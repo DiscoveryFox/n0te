@@ -23,7 +23,7 @@ fn inline(line: &str, size: f32, base: Font, color: Color) -> Vec<Span<'static, 
                 }
                 let inner_start = i + m.len();
                 let end = inner_start + rest[inner_start..].find(m).expect("checked");
-                let mut s = span(rest[inner_start..end].to_string()).font(f).size(size).color(if m == "$" { theme::ACCENT } else { color });
+                let mut s = span(rest[inner_start..end].to_string()).font(f).size(size).color(if m == "$" { theme::p().accent } else { color });
                 if m == "`" {
                     s = s.background(theme::PAPER_TINT);
                 }
@@ -67,7 +67,7 @@ pub fn view<'a, M: 'a>(text: &str, size: f32, width: f32) -> Element<'a, M> {
         } else if let Some(h) = t.strip_prefix("# ") {
             (inline(h, size * 1.6, theme::SANS_BOLD, theme::INK), 0.0)
         } else if let Some(item) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
-            let mut v = vec![span("•  ").font(theme::SANS).size(size).color(theme::ACCENT)];
+            let mut v = vec![span("•  ").font(theme::SANS).size(size).color(theme::p().accent)];
             v.extend(inline(item, size, theme::SANS, theme::INK));
             (v, size * 0.6)
         } else if let Some(q) = t.strip_prefix("> ") {

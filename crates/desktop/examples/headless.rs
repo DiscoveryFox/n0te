@@ -115,6 +115,19 @@ fn main() {
         h.events(&[]);
         h.screenshot(out.join("m2-09-textpage.png"));
     }
+    // Command palette and the light theme.
+    h.message(Message::CloseTextPage);
+    h.message(Message::OpenPalette);
+    h.type_text("pdf");
+    h.events(&[]);
+    h.screenshot(out.join("m2-10-palette.png"));
+    h.message(Message::PaletteQuery(String::new()));
+    h.app.palette = None;
+    h.message(Message::SetTheme("light"));
+    h.message(Message::Back);
+    h.events(&[]);
+    h.screenshot(out.join("m2-11-light.png"));
+    h.message(Message::SetTheme("nothing"));
     println!("screenshots in {}", out.display());
     let _ = std::fs::remove_dir_all(root);
 }

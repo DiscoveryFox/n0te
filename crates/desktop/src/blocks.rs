@@ -534,7 +534,7 @@ impl Doc {
             .into(),
             Kind::Formula => container(column![
                 row![
-                    text("$$").font(theme::MONO_BOLD).size(10).color(theme::ACCENT),
+                    text("$$").font(theme::MONO_BOLD).size(10).color(theme::p().accent),
                     Space::new().width(Length::Fill),
                     text("FORMEL · VORSCHAU FOLGT").font(theme::MONO).size(10).color(theme::PAPER_MUTED)
                 ],
@@ -622,7 +622,7 @@ fn clamp_cursor(content: &Content, c: Cursor) -> Cursor {
 /// A small red square: the bullet glyph (no font dependency).
 fn bullet<'a>() -> Element<'a, Msg> {
     container(Space::new().width(6).height(6))
-        .style(|_| container::Style { background: Some(theme::ACCENT.into()), ..Default::default() })
+        .style(|_| container::Style { background: Some(theme::p().accent.into()), ..Default::default() })
         .into()
 }
 

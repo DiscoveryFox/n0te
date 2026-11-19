@@ -307,3 +307,39 @@ fn notes_column_creates_a_side_text_page_and_follows_the_page() {
     assert!(h.app.text_page.is_none());
     assert_eq!(stored_body(&root, &nb, &sheet), "Frage: gilt das für komplexe Zahlen?");
 }
+
+#[test]
+fn palette_finds_and_runs_commands_and_pages() {
+    let (mut h, _root, _nb) = blank_notebook("palette");
+    h.message(Message::OpenPalette);
+    assert!(h.app.palette.is_some());
+    h.type_text("textseite");
+    h.message(Message::PaletteRun(None));
+    assert!(h.app.palette.is_none());
+    assert!(h.app.text_page.is_some(), "\"Neue Textseite\" ran");
+    h.message(Message::CloseTextPage);
+    // Pages by number: go to page 2 (the new text page).
+    h.message(Message::OpenPalette);
+    h.type_text("seite 2");
+    h.message(Message::PaletteRun(None));
+    let o = open(&h);
+    assert_eq!(o.pages.current_number(&o.camera), 2);
+}
+
+#[test]
+fn theme_and_gaps_change_and_the_view_follows() {
+    let (mut h, _root, _nb) = blank_notebook("theme");
+    h.message(Message::NewTextPage);
+    h.message(Message::CloseTextPage);
+    let gap = |h: &Harness| {
+        let o = open(h);
+        o.pages.pages[1].placed.rect.y0 - o.pages.pages[0].placed.rect.y1
+    };
+    let before = gap(&h);
+    h.message(Message::SetRowGap(100.0));
+    assert!((gap(&h) - 100.0).abs() < 0.01 && before != 100.0);
+    h.message(Message::SetTheme("sepia"));
+    assert_eq!(n0te_desktop::theme::p().id, "sepia");
+    assert!(matches!(h.app.screen, Screen::Notebook(_)), "still in the notebook");
+    h.message(Message::SetTheme("nothing"));
+}

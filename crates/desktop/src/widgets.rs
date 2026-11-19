@@ -76,8 +76,8 @@ impl<'a, Message: Clone> Widget<Message, Theme, iced::Renderer> for Grip<'a, Mes
         let b = layout.bounds();
         let hover = cursor.is_over(b);
         renderer.fill_quad(
-            renderer::Quad { bounds: b, border: Border { color: theme::ACCENT, width: 1.0, radius: 6.0.into() }, ..Default::default() },
-            if hover { theme::ACCENT } else { Color::WHITE },
+            renderer::Quad { bounds: b, border: Border { color: theme::p().accent, width: 1.0, radius: 6.0.into() }, ..Default::default() },
+            if hover { theme::p().accent } else { Color::WHITE },
         );
         renderer.fill_text(
             text::Text {
@@ -92,7 +92,7 @@ impl<'a, Message: Clone> Widget<Message, Theme, iced::Renderer> for Grip<'a, Mes
                 wrapping: text::Wrapping::None,
             },
             b.center(),
-            if hover { Color::WHITE } else { theme::ACCENT },
+            if hover { Color::WHITE } else { theme::p().accent },
             *viewport,
         );
     }

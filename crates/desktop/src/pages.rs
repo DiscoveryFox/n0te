@@ -104,7 +104,7 @@ impl Page {
         let board = self.placed.is_board();
         let geometry = self.cache.borrow().draw(renderer, Size::new(w * lod, h * lod), |frame| {
             frame.scale(lod);
-            frame.fill_rectangle(Point::ORIGIN, Size::new(w, h), theme::PAPER);
+            frame.fill_rectangle(Point::ORIGIN, Size::new(w, h), theme::p().paper);
             if board {
                 draw_pattern(frame, Background::Dots, w, h, spec.spacing.max(4.0), lod);
             } else if spec.pdf.is_none() {
@@ -202,7 +202,7 @@ fn draw_pattern(frame: &mut canvas::Frame, bg: Background, w: f32, h: f32, step:
                 hline(frame, y);
                 y += step;
             }
-            let margin = LineStroke::default().with_color(theme::alpha(theme::ACCENT, 0.4)).with_width((1.5 / lod).max(0.75));
+            let margin = LineStroke::default().with_color(theme::alpha(theme::p().accent, 0.4)).with_width((1.5 / lod).max(0.75));
             frame.stroke(&Path::line(Point::new(150.0, 70.0), Point::new(150.0, h - 150.0)), margin.clone());
             frame.stroke(&Path::line(Point::new(0.0, h - 150.0), Point::new(w, h - 150.0)), margin.clone());
             frame.stroke(&Path::line(Point::new(0.0, 70.0), Point::new(w, 70.0)), margin);
@@ -629,7 +629,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         let cam = self.camera;
         let frame_no = pages.frame.get() + 1;
         pages.frame.set(frame_no);
-        renderer.fill_quad(renderer::Quad { bounds, ..Default::default() }, theme::SURFACE);
+        renderer.fill_quad(renderer::Quad { bounds, ..Default::default() }, theme::p().surface);
         if cam.viewport.width <= 0.0 {
             return;
         }
@@ -686,7 +686,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 // Number left of main pages, "3 L1" above side pages, BOARD over boards.
                 if cam.zoom >= 0.18 {
                     let p = &page.placed;
-                    let color = if p.side == 0 && p.number == current { theme::ACCENT } else { theme::MUTED };
+                    let color = if p.side == 0 && p.number == current { theme::p().accent } else { theme::p().muted };
                     if p.side == 0 {
                         label(r, format!("{:02}", p.number), Point::new(at.x - 46.0, at.y), 40.0, color, 11.0, theme::MONO, text::Alignment::Right);
                     } else {
@@ -694,7 +694,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                         label(r, p.label(), Point::new(at.x, at.y - 18.0), w, color, 11.0, theme::MONO, if p.side < 0 { text::Alignment::Left } else { text::Alignment::Right });
                     }
                     if p.is_board() {
-                        label(r, "BOARD".into(), Point::new(at.x, at.y - 18.0), rect.width() * cam.zoom, theme::MUTED, 11.0, theme::MONO, text::Alignment::Right);
+                        label(r, "BOARD".into(), Point::new(at.x, at.y - 18.0), rect.width() * cam.zoom, theme::p().muted, 11.0, theme::MONO, text::Alignment::Right);
                     }
                 }
             }
@@ -705,10 +705,10 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let w = h.rect.width() * cam.zoom;
                 let size = (15.0 * cam.zoom).clamp(9.0, 22.0);
                 let y = at.y + (hh - size * 1.3) / 2.0;
-                label(r, if h.collapsed { "▸".into() } else { "▾".into() }, Point::new(at.x, y), 20.0, theme::ACCENT, size, theme::SANS_BOLD, text::Alignment::Left);
+                label(r, if h.collapsed { "▸".into() } else { "▾".into() }, Point::new(at.x, y), 20.0, theme::p().accent, size, theme::SANS_BOLD, text::Alignment::Left);
                 let title = if h.title.trim().is_empty() { "Gruppe".to_string() } else { h.title.clone() };
-                label(r, format!("{title}   {}", h.count), Point::new(at.x + size * 1.4, y), w - size * 1.4, theme::TEXT, size, theme::SANS_BOLD, text::Alignment::Left);
-                r.fill_quad(renderer::Quad { bounds: Rectangle::new(Point::new(at.x, at.y + hh - 1.0), Size::new(w, 1.0)), ..Default::default() }, theme::BORDER);
+                label(r, format!("{title}   {}", h.count), Point::new(at.x + size * 1.4, y), w - size * 1.4, theme::p().text, size, theme::SANS_BOLD, text::Alignment::Left);
+                r.fill_quad(renderer::Quad { bounds: Rectangle::new(Point::new(at.x, at.y + hh - 1.0), Size::new(w, 1.0)), ..Default::default() }, theme::p().border);
             }
         });
         pages.evict_stale();

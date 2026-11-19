@@ -173,12 +173,12 @@ impl Harness {
         let mut ui = UserInterface::build(self.app.view(), self.size, self.cache.take().unwrap_or_default(), &mut self.renderer);
         t.view = s.elapsed().as_secs_f32() * 1000.0;
         let s = Instant::now();
-        ui.draw(&mut self.renderer, &self.theme, &core::renderer::Style { text_color: theme::TEXT }, self.cursor);
+        ui.draw(&mut self.renderer, &self.theme, &core::renderer::Style { text_color: theme::p().text }, self.cursor);
         t.draw = s.elapsed().as_secs_f32() * 1000.0;
         self.cache = Some(ui.into_cache());
         let s = Instant::now();
         let physical = Size::new((self.size.width * self.scale).round() as u32, (self.size.height * self.scale).round() as u32);
-        let rgba = self.renderer.screenshot(physical, self.scale, theme::CHROME);
+        let rgba = self.renderer.screenshot(physical, self.scale, theme::p().chrome);
         t.render = s.elapsed().as_secs_f32() * 1000.0;
         (rgba, t)
     }

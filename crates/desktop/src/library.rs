@@ -19,7 +19,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         row![
             wordmark(),
             Space::new().width(18),
-            text("BIBLIOTHEK").font(theme::MONO).size(theme::SMALL).color(theme::MUTED),
+            text("BIBLIOTHEK").font(theme::MONO).size(theme::SMALL).color(theme::p().muted),
             Space::new().width(Length::Fill),
             button(text("PDF IMPORTIEREN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowPdfImport(!app.show_pdf_import)).style(theme::tab(app.show_pdf_import)),
             Space::new().width(8),
@@ -47,8 +47,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if app.entries.is_empty() {
         content = content.push(
             column![
-                text("Noch keine Notizbücher auf dem Laptop.").size(18).color(theme::TEXT),
-                text("Auf dem Tablet: Notizbuch halten → AN DEN LAPTOP. Es kommt über n0bridge und erscheint unter IMPORTIEREN.").size(14).color(theme::MUTED),
+                text("Noch keine Notizbücher auf dem Laptop.").size(18).color(theme::p().text),
+                text("Auf dem Tablet: Notizbuch halten → AN DEN LAPTOP. Es kommt über n0bridge und erscheint unter IMPORTIEREN.").size(14).color(theme::p().muted),
             ]
             .spacing(8),
         );
@@ -81,14 +81,14 @@ fn flush<'a>(content: iced::widget::Column<'a, Message>, folder: Option<&str>, c
     }
     let label = folder.filter(|f| !f.is_empty()).unwrap_or("NOTIZBÜCHER").to_uppercase();
     let grid = iced::widget::Row::with_children(std::mem::take(cards)).spacing(14).wrap().vertical_spacing(14);
-    content.push(column![text(label).font(theme::MONO).size(theme::LABEL).color(theme::MUTED), grid].spacing(8))
+    content.push(column![text(label).font(theme::MONO).size(theme::LABEL).color(theme::p().muted), grid].spacing(8))
 }
 
 /// "n0te" in the dot face with the red dot.
 pub fn wordmark<'a>() -> Element<'a, Message> {
     row![
-        text("n0te").font(theme::DOT).size(30).color(theme::TEXT),
-        container(Space::new().width(7).height(7)).style(|_| container::Style { background: Some(theme::ACCENT.into()), border: iced::Border { radius: 4.0.into(), ..Default::default() }, ..Default::default() }),
+        text("n0te").font(theme::DOT).size(30).color(theme::p().text),
+        container(Space::new().width(7).height(7)).style(|_| container::Style { background: Some(theme::p().accent.into()), border: iced::Border { radius: 4.0.into(), ..Default::default() }, ..Default::default() }),
     ]
     .spacing(4)
     .align_y(Alignment::Center)
@@ -101,8 +101,8 @@ fn card(e: &Entry) -> Element<'_, Message> {
         column![
             canvas_widget(Cover { kind: e.cover.clone(), title: e.title.clone() }).width(196).height(132),
             Space::new().height(8),
-            text(fit(&e.title, 24)).font(theme::SANS_MEDIUM).size(15).color(theme::TEXT),
-            text(pages).font(theme::MONO).size(theme::LABEL).color(theme::MUTED),
+            text(fit(&e.title, 24)).font(theme::SANS_MEDIUM).size(15).color(theme::p().text),
+            text(pages).font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
         ]
         .spacing(2),
     )
@@ -113,48 +113,48 @@ fn card(e: &Entry) -> Element<'_, Message> {
 }
 
 fn imports_panel(bundles: &[Bundle]) -> Element<'_, Message> {
-    let mut list = column![text("VOM TABLET (~/Downloads/n0bridge)").font(theme::MONO).size(theme::LABEL).color(theme::MUTED)].spacing(6);
+    let mut list = column![text("VOM TABLET (~/Downloads/n0bridge)").font(theme::MONO).size(theme::LABEL).color(theme::p().muted)].spacing(6);
     if bundles.is_empty() {
-        list = list.push(text("Keine .n0te-Dateien gefunden. Auf dem Tablet: Notizbuch halten → AN DEN LAPTOP.").size(13).color(theme::MUTED));
+        list = list.push(text("Keine .n0te-Dateien gefunden. Auf dem Tablet: Notizbuch halten → AN DEN LAPTOP.").size(13).color(theme::p().muted));
     }
     for b in bundles {
         let name = b.path.file_stem().map(|s| s.to_string_lossy().replace('_', " ")).unwrap_or_default();
         list = list.push(
             row![
-                text(name).size(14).color(theme::TEXT),
+                text(name).size(14).color(theme::p().text),
                 Space::new().width(12),
-                text(age(b.modified)).font(theme::MONO).size(theme::LABEL).color(theme::MUTED),
+                text(age(b.modified)).font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
                 Space::new().width(Length::Fill),
                 button(text("ÜBERNEHMEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::Import(b.path.clone())).style(theme::tab(false)),
             ]
             .align_y(Alignment::Center),
         );
     }
-    list = list.push(text("Übernehmen führt mit dem Stand auf dem Laptop zusammen: nichts geht verloren.").size(12).color(theme::MUTED));
+    list = list.push(text("Übernehmen führt mit dem Stand auf dem Laptop zusammen: nichts geht verloren.").size(12).color(theme::p().muted));
     container(list).padding(14).width(Length::Fill).style(theme::panel).into()
 }
 
 /// Recent PDFs to import; dropping a file onto the window works too.
 pub fn pdf_panel<'a>(pdfs: &'a [(PathBuf, SystemTime)], title: &'a str) -> Element<'a, Message> {
-    let mut list = column![text(title).font(theme::MONO).size(theme::LABEL).color(theme::MUTED)].spacing(6);
+    let mut list = column![text(title).font(theme::MONO).size(theme::LABEL).color(theme::p().muted)].spacing(6);
     if pdfs.is_empty() {
-        list = list.push(text("Keine PDFs in Downloads oder Dokumente.").size(13).color(theme::MUTED));
+        list = list.push(text("Keine PDFs in Downloads oder Dokumente.").size(13).color(theme::p().muted));
     }
     for (path, modified) in pdfs.iter().take(14) {
         let name = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         let dir = path.parent().and_then(|d| d.file_name()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         list = list.push(
             row![
-                text(fit(&name, 60)).size(14).color(theme::TEXT),
+                text(fit(&name, 60)).size(14).color(theme::p().text),
                 Space::new().width(10),
-                text(format!("{dir} · {}", age(*modified))).font(theme::MONO).size(theme::LABEL).color(theme::MUTED),
+                text(format!("{dir} · {}", age(*modified))).font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
                 Space::new().width(Length::Fill),
                 button(text("NEHMEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::ImportPdf(path.clone())).style(theme::tab(false)),
             ]
             .align_y(Alignment::Center),
         );
     }
-    list = list.push(text("Oder eine PDF- bzw. .n0te-Datei ins Fenster ziehen.").size(12).color(theme::MUTED));
+    list = list.push(text("Oder eine PDF- bzw. .n0te-Datei ins Fenster ziehen.").size(12).color(theme::p().muted));
     container(list).padding(14).width(Length::Fill).max_width(900).style(theme::panel).into()
 }
 
@@ -170,7 +170,7 @@ pub fn export_panel<'a>(o: &'a Open, picked: &'a HashSet<String>) -> Element<'a,
     let list = iced::widget::scrollable(pages).style(theme::scroll_dark).height(Length::Fixed(260.0));
     container(
         column![
-            text("PDF EXPORTIEREN — NACH ~/Downloads").font(theme::MONO).size(theme::LABEL).color(theme::MUTED),
+            text("PDF EXPORTIEREN — NACH ~/Downloads").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
             row![
                 button(text("GANZES NOTIZBUCH").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::Export(ExportWhat::All)).style(theme::accent_button),
                 Space::new().width(8),
@@ -181,7 +181,7 @@ pub fn export_panel<'a>(o: &'a Open, picked: &'a HashSet<String>) -> Element<'a,
                 button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowExport(false)).style(theme::ghost),
             ]
             .align_y(Alignment::Center),
-            text("Für AUSWAHL Seiten anklicken (Seitenblätter kommen mit):").size(12).color(theme::MUTED),
+            text("Für AUSWAHL Seiten anklicken (Seitenblätter kommen mit):").size(12).color(theme::p().muted),
             list,
         ]
         .spacing(10),
@@ -262,18 +262,18 @@ impl<M> canvas::Program<M> for Cover {
                     }
                 });
                 f.fill(&dots, iced::color!(0x3A3A40));
-                f.fill(&Path::circle(Point::new(w - 21.0, 21.0), 5.0), theme::ACCENT);
+                f.fill(&Path::circle(Point::new(w - 21.0, 21.0), 5.0), theme::p().accent);
             }
             "initial" => {
                 f.fill_rectangle(Point::ORIGIN, Size::new(w, h), dark);
                 big(&mut f, iced::color!(0xF2F2F4), h * 0.62);
-                f.fill(&Path::circle(Point::new(w * 0.82, h * 0.2), 4.0), theme::ACCENT);
+                f.fill(&Path::circle(Point::new(w * 0.82, h * 0.2), 4.0), theme::p().accent);
             }
             "stripes" => {
                 f.fill_rectangle(Point::ORIGIN, Size::new(w, h), dark);
                 let mut x = -h;
                 while x < w {
-                    f.stroke(&Path::line(Point::new(x, h), Point::new(x + h, 0.0)), Stroke::default().with_color(theme::ACCENT).with_width(5.0));
+                    f.stroke(&Path::line(Point::new(x, h), Point::new(x + h, 0.0)), Stroke::default().with_color(theme::p().accent).with_width(5.0));
                     x += 22.0;
                 }
             }
@@ -282,7 +282,10 @@ impl<M> canvas::Program<M> for Cover {
                 big(&mut f, Color { a: 0.9, ..Color::WHITE }, h * 0.5);
             }
             _ => {
-                f.fill_rectangle(Point::ORIGIN, Size::new(w, h), theme::PAPER);
+                f.fill_rectangle(Point::ORIGIN, Size::new(w, h), theme::p().paper);
+                if !theme::p().dark {
+                    f.stroke(&Path::rectangle(Point::new(0.5, 0.5), Size::new(w - 1.0, h - 1.0)), Stroke::default().with_color(theme::p().border).with_width(1.0));
+                }
                 let mut y = 24.0;
                 for _ in 0..6 {
                     f.stroke(&Path::line(Point::new(14.0, y), Point::new(w - 14.0, y)), Stroke::default().with_color(iced::color!(0xE3E7EE)).with_width(1.0));

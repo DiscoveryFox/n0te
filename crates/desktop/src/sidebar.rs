@@ -16,15 +16,15 @@ pub const WIDTH: f32 = 272.0;
 
 pub fn view<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32) -> Element<'a, Message> {
     let numbers: HashMap<&str, u32> = pages.pages.iter().filter(|p| p.placed.side == 0).map(|p| (p.placed.node.as_str(), p.placed.number)).collect();
-    let mut list = column![container(text("GLIEDERUNG").font(theme::MONO).size(theme::LABEL).color(theme::MUTED)).padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, ..Padding::ZERO })].spacing(1);
+    let mut list = column![container(text("GLIEDERUNG").font(theme::MONO).size(theme::LABEL).color(theme::p().muted)).padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, ..Padding::ZERO })].spacing(1);
     for r in rows {
         match r {
             OutlineRow::Group { node, depth, title, collapsed, count } => {
                 let content = row![
-                    text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::ACCENT).width(18),
+                    text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::p().accent).width(18),
                     text(fit(if title.trim().is_empty() { "Gruppe" } else { title }, 24)).font(theme::SANS_MEDIUM).size(13.5).wrapping(text::Wrapping::None),
                     Space::new().width(Length::Fill),
-                    text(count.to_string()).font(theme::MONO).size(10).color(theme::MUTED),
+                    text(count.to_string()).font(theme::MONO).size(10).color(theme::p().muted),
                 ]
                 .align_y(Alignment::Center);
                 list = list.push(
@@ -49,12 +49,12 @@ pub fn view<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32) -> Eleme
                 };
                 let sides = format!("{}{}", if left.is_empty() { String::new() } else { format!("‹{} ", left.len()) }, if right.is_empty() { String::new() } else { format!("{}›", right.len()) });
                 let content = row![
-                    text(format!("{n:02}")).font(theme::MONO).size(11).color(if n == current { theme::ACCENT } else { theme::MUTED }).width(28),
+                    text(format!("{n:02}")).font(theme::MONO).size(11).color(if n == current { theme::p().accent } else { theme::p().muted }).width(28),
                     text(fit(&name, 22)).font(theme::SANS).size(13).wrapping(text::Wrapping::None),
                     Space::new().width(Length::Fill),
-                    text(sides).font(theme::MONO).size(10).color(theme::ACCENT),
+                    text(sides).font(theme::MONO).size(10).color(theme::p().accent),
                     Space::new().width(6),
-                    text(paper_code(spec)).font(theme::MONO).size(9.5).color(theme::MUTED),
+                    text(paper_code(spec)).font(theme::MONO).size(9.5).color(theme::p().muted),
                 ]
                 .align_y(Alignment::Center);
                 list = list.push(

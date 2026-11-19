@@ -11,13 +11,15 @@ use iced::keyboard::{self, Key, key::Named};
 use iced::widget::{Space, button, column, container, mouse_area, pin, row, scrollable, stack, text, text_editor, text_input};
 use iced::{Alignment, Element, Length, Padding, Subscription, Task, Theme};
 
-use n0te_core::layout::{self as nl, Options};
+use n0te_core::layout as nl;
 use n0te_core::notebook::{Background, Notebook, OutlineRow, SheetSpec};
 use n0te_core::sheet::Sheet;
 use n0te_core::store::Library;
 
 use crate::pages::{self, Camera, Pages, SheetContent};
 use crate::pdf::{self, Pdf};
+use crate::palette::{self, Command};
+use crate::settings::Settings;
 use crate::{library, sidebar, theme};
 
 /// A notebook in the library list.
@@ -78,6 +80,16 @@ pub enum Message {
     Blocks(crate::blocks::Msg),
     NewTextPage,
     ToggleNotes,
+    /// Command palette, help, settings.
+    OpenPalette,
+    PaletteQuery(String),
+    PaletteMove(i32),
+    PaletteRun(Option<usize>),
+    ShowHelp(bool),
+    ShowSettings(bool),
+    SetTheme(&'static str),
+    SetRowGap(f32),
+    SetSideGap(f32),
     MoveText(iced::Vector),
     ResizeText(iced::Vector),
     PlaceText,
@@ -153,6 +165,13 @@ pub struct App {
     pub export_dir: PathBuf,
     pub editing: Option<Editing>,
     pub text_page: Option<TextPage>,
+    pub settings: Settings,
+    /// Only the real app writes the settings file (tests don't touch ~/.config).
+    pub persist_settings: bool,
+    /// Command palette: query and selected row.
+    pub palette: Option<(String, usize)>,
+    pub show_help: bool,
+    pub show_settings: bool,
     pub entries: Vec<Entry>,
     pub bundles: Vec<Bundle>,
     pub screen: Screen,
@@ -192,7 +211,13 @@ pub fn find_bundles(dirs: &[PathBuf]) -> Vec<Bundle> {
 }
 
 impl App {
+    /// The app with default settings (tests); the real app loads them ([`App::boot_with`]).
     pub fn new(root: impl AsRef<Path>) -> Self {
+        Self::with_settings(root, Settings::default())
+    }
+
+    pub fn with_settings(root: impl AsRef<Path>, settings: Settings) -> Self {
+        theme::set_theme(&settings.theme);
         let root = root.as_ref().to_path_buf();
         let lib = Rc::new(Library::open(&root).expect("library folder"));
         let pdf = match Pdf::start(&root) {
@@ -213,6 +238,11 @@ impl App {
             export_dir: downloads(),
             editing: None,
             text_page: None,
+            settings,
+            persist_settings: false,
+            palette: None,
+            show_help: false,
+            show_settings: false,
             entries: Vec::new(),
             bundles: Vec::new(),
             screen: Screen::Library,
@@ -227,7 +257,8 @@ impl App {
 
     /// Starts the app; `import` = a `.n0te` file given on the command line (opened after import).
     pub fn boot_with(root: PathBuf, import: Option<PathBuf>) -> (Self, Task<Message>) {
-        let app = Self::new(root);
+        let mut app = Self::with_settings(root, Settings::load());
+        app.persist_settings = true;
         let task = import.map(|p| Task::done(Message::Import(p))).unwrap_or_else(Task::none);
         (app, task)
     }
@@ -274,7 +305,7 @@ impl App {
     fn open(&mut self, id: &str) -> Result<(), String> {
         let nb = self.lib.load_notebook(id).map_err(|e| e.to_string())?;
         let rows = nb.outline(false);
-        let layout = nl::layout(&rows, &nb.outline(true), Options::default());
+        let layout = nl::layout(&rows, &nb.outline(true), self.settings.layout());
         let lib = self.lib.clone();
         let nid = id.to_string();
         let pages = Pages::new(
@@ -319,7 +350,7 @@ impl App {
                     if o.nb.set_collapsed(&node, !collapsed).is_ok() {
                         let _ = lib.save_notebook(&o.nb);
                         o.rows = o.nb.outline(false);
-                        o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), Options::default()));
+                        o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
                         o.camera = o.pages.clamp(o.camera);
                     }
                 }
@@ -486,6 +517,42 @@ impl App {
                     self.save_text_page();
                 }
             }
+            Message::OpenPalette => {
+                self.palette = Some((String::new(), 0));
+                return iced::widget::operation::focus(palette::input_id());
+            }
+            Message::PaletteQuery(q) => self.palette = Some((q, 0)),
+            Message::PaletteMove(d) => {
+                let n = self.palette_items().len().max(1) as i32;
+                if let Some((_, sel)) = &mut self.palette {
+                    *sel = ((*sel as i32 + d).rem_euclid(n)) as usize;
+                }
+            }
+            Message::PaletteRun(i) => {
+                let Some((_, sel)) = self.palette.clone() else { return Task::none() };
+                let items = self.palette_items();
+                let Some(it) = items.get(i.unwrap_or(sel)).cloned() else { return Task::none() };
+                self.palette = None;
+                return self.run(it.cmd);
+            }
+            Message::ShowHelp(on) => self.show_help = on,
+            Message::ShowSettings(on) => self.show_settings = on,
+            Message::SetTheme(id) => {
+                self.settings.theme = id.to_string();
+                if self.persist_settings { self.settings.save(); }
+                theme::set_theme(id);
+                self.reopen();
+            }
+            Message::SetRowGap(v) => {
+                self.settings.row_gap = v;
+                if self.persist_settings { self.settings.save(); }
+                self.relayout();
+            }
+            Message::SetSideGap(v) => {
+                self.settings.side_gap = v;
+                if self.persist_settings { self.settings.save(); }
+                self.relayout();
+            }
             Message::OpenTextPage(sheet, docked) => return self.open_text_page(&sheet, docked),
             Message::CloseTextPage => self.close_text_page(),
             Message::Blocks(m) => {
@@ -527,6 +594,54 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    fn palette_items(&self) -> Vec<palette::Item> {
+        palette::filter(palette::items(self), self.palette.as_ref().map(|(q, _)| q.as_str()).unwrap_or(""))
+    }
+
+    /// Runs a palette command.
+    fn run(&mut self, cmd: Command) -> Task<Message> {
+        match cmd {
+            Command::NewNotebook => self.update(Message::StartCreate),
+            Command::ImportPdf | Command::InsertPdf => self.update(Message::ShowPdfImport(true)),
+            Command::ImportBundle => self.update(Message::ShowImports(true)),
+            Command::OpenNotebook(id) => self.update(Message::Open(id)),
+            Command::Library => self.update(Message::Back),
+            Command::NewTextPage => self.update(Message::NewTextPage),
+            Command::Notes => self.update(Message::ToggleNotes),
+            Command::NewTextBox => {
+                let ev = keyboard::Event::KeyPressed {
+                    key: Key::Character("t".into()),
+                    modified_key: Key::Character("t".into()),
+                    physical_key: keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified),
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::CTRL,
+                    text: None,
+                    repeat: false,
+                };
+                self.update(Message::Key(ev))
+            }
+            Command::Export => self.update(Message::ShowExport(true)),
+            Command::SendToTablet => self.update(Message::SendToTablet),
+            Command::ToggleSidebar => self.update(Message::ToggleSidebar),
+            Command::Zoom(z) => self.update(Message::Zoom(z)),
+            Command::GoTo(sheet) => self.update(Message::Jump(sheet)),
+            Command::Theme(id) => self.update(Message::SetTheme(id)),
+            Command::Settings => self.update(Message::ShowSettings(true)),
+            Command::Help => self.update(Message::ShowHelp(true)),
+        }
+    }
+
+    /// Opens the current notebook again (new theme: paper caches), keeping the camera.
+    fn reopen(&mut self) {
+        let Screen::Notebook(o) = &self.screen else { return };
+        let (id, cam) = (o.id.clone(), o.camera);
+        if self.open(&id).is_ok()
+            && let Screen::Notebook(o) = &mut self.screen
+        {
+            o.camera = cam;
+        }
     }
 
     /// The current main page's notes sheet (a text side sheet on the right), if any.
@@ -819,7 +934,7 @@ impl App {
     fn relayout(&mut self) {
         if let Screen::Notebook(o) = &mut self.screen {
             o.rows = o.nb.outline(false);
-            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), Options::default()));
+            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
             o.camera = o.pages.clamp(o.camera);
         }
     }
@@ -901,6 +1016,32 @@ impl App {
 
     /// Global shortcuts (keys no focused widget consumed).
     fn shortcut(&mut self, key: Key, m: keyboard::Modifiers) -> Task<Message> {
+        // The palette takes the arrows and Esc while it is open.
+        if self.palette.is_some() {
+            return match key.as_ref() {
+                Key::Named(Named::ArrowDown) => self.update(Message::PaletteMove(1)),
+                Key::Named(Named::ArrowUp) => self.update(Message::PaletteMove(-1)),
+                Key::Named(Named::Escape) => {
+                    self.palette = None;
+                    Task::none()
+                }
+                _ => Task::none(),
+            };
+        }
+        if self.show_help || self.show_settings {
+            if let Key::Named(Named::Escape | Named::F1) = key.as_ref() {
+                self.show_help = false;
+                self.show_settings = false;
+            }
+            return Task::none();
+        }
+        match (m.command(), key.as_ref()) {
+            (true, Key::Character("k")) => return self.update(Message::OpenPalette),
+            (_, Key::Named(Named::F1)) => return self.update(Message::ShowHelp(true)),
+            (true, Key::Character(",")) => return self.update(Message::ShowSettings(true)),
+            (true, Key::Character("o")) => return self.update(Message::ShowPdfImport(true)),
+            _ => {}
+        }
         if let Key::Named(Named::Escape) = key.as_ref() {
             if self.editing.is_some() {
                 self.finish_text();
@@ -931,6 +1072,9 @@ impl App {
                 Key::Character("+" | "=") => self.update(Message::Zoom(c.zoom * 1.25)),
                 Key::Character("-") => self.update(Message::Zoom(c.zoom / 1.25)),
                 Key::Character("b") => self.update(Message::ToggleSidebar),
+                Key::Character("n") => self.update(Message::NewTextPage),
+                Key::Character("m") => self.update(Message::ToggleNotes),
+                Key::Character("e") => self.update(Message::ShowExport(true)),
                 Key::Character("t") => {
                     // A text box in the middle of the view, on the page there.
                     let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 3.0);
@@ -959,10 +1103,83 @@ impl App {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        match &self.screen {
+        let base = match &self.screen {
             Screen::Library => library::view(self),
             Screen::Notebook(o) => self.notebook_view(o),
+        };
+        let overlay: Option<Element<'_, Message>> = if let Some((q, sel)) = &self.palette {
+            Some(palette::view(q, &self.palette_items(), *sel))
+        } else if self.show_help {
+            Some(self.help_view())
+        } else if self.show_settings {
+            Some(self.settings_view())
+        } else {
+            None
+        };
+        match overlay {
+            Some(o) => stack![base, container(Space::new()).width(Length::Fill).height(Length::Fill).style(theme::scrim), o].into(),
+            None => base,
         }
+    }
+
+    fn help_view(&self) -> Element<'_, Message> {
+        let keys = [
+            ("Strg K", "Befehle, Seiten, Notizbücher suchen"),
+            ("Esc", "Zurück · Bearbeiten beenden · Bibliothek"),
+            ("Bild ↑ / ↓, ← / →", "Vorige / nächste Seite"),
+            ("Pos1 / Ende", "Erste / letzte Seite"),
+            ("Mausrad · Ziehen", "Verschieben"),
+            ("Strg + Mausrad, Strg + / −", "Zoomen, Strg 0: 100 %"),
+            ("Doppelklick · Strg T", "Textfeld"),
+            ("Strg N", "Neue Textseite (Bibliothek: neues Notizbuch)"),
+            ("Strg M", "Notizen neben der Seite"),
+            ("Strg O", "PDF einfügen / importieren (oder Datei ins Fenster ziehen)"),
+            ("Strg E", "PDF exportieren"),
+            ("Strg B", "Gliederung ein/aus"),
+            ("Strg I", "Vom Tablet übernehmen (.n0te)"),
+            ("Strg ,", "Einstellungen"),
+            ("F1", "Diese Übersicht"),
+        ];
+        let mut col = column![text("TASTENKÜRZEL").font(theme::MONO).size(theme::LABEL).color(theme::p().muted)].spacing(8);
+        for (k, what) in keys {
+            col = col.push(row![text(k).font(theme::MONO_BOLD).size(12).width(Length::Fixed(230.0)), text(what).size(14)].align_y(Alignment::Center));
+        }
+        col = col.push(button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowHelp(false)).style(theme::ghost));
+        container(container(col).padding(20).width(Length::Fixed(640.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
+    }
+
+    fn settings_view(&self) -> Element<'_, Message> {
+        let mut themes = row![].spacing(10);
+        for t in theme::PALETTES {
+            let on = t.id == theme::p().id;
+            let swatch = row![
+                container(Space::new().width(14).height(28)).style(move |_| container::Style { background: Some(t.chrome.into()), ..Default::default() }),
+                container(Space::new().width(22).height(28)).style(move |_| container::Style { background: Some(t.paper.into()), ..Default::default() }),
+                container(Space::new().width(8).height(28)).style(move |_| container::Style { background: Some(t.accent.into()), ..Default::default() }),
+            ];
+            themes = themes.push(button(column![swatch, text(t.name).size(12)].spacing(4).align_x(Alignment::Center)).padding(6).on_press(Message::SetTheme(t.id)).style(theme::tab(on)));
+        }
+        let slider = |label: &'static str, v: f32, f: fn(f32) -> Message| {
+            row![
+                text(label).size(14).width(Length::Fixed(220.0)),
+                iced::widget::slider(4.0..=160.0, v, f).width(Length::Fixed(260.0)),
+                text(format!("{v:.0} pt")).font(theme::MONO).size(12).width(Length::Fixed(60.0)),
+            ]
+            .spacing(12)
+            .align_y(Alignment::Center)
+        };
+        let col = column![
+            text("EINSTELLUNGEN").font(theme::MONO).size(theme::LABEL).color(theme::p().muted),
+            text("Design").size(14),
+            themes,
+            text("Abstände").size(14),
+            slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap),
+            slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap),
+            text("Exportierte PDFs bleiben weiß. Gespeichert in ~/.config/n0te/laptop.conf").size(12).color(theme::p().muted),
+            button(text("SCHLIESSEN").font(theme::MONO_BOLD).size(theme::LABEL)).padding([6, 12]).on_press(Message::ShowSettings(false)).style(theme::ghost),
+        ]
+        .spacing(12);
+        container(container(col).padding(20).width(Length::Fixed(720.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
     fn notebook_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
@@ -1010,7 +1227,7 @@ impl App {
             row![
                 button(text("‹ BIBLIOTHEK").font(theme::MONO_BOLD).size(theme::LABEL)).padding([5, 12]).on_press(Message::Back).style(theme::ghost),
                 Space::new().width(18),
-                text(o.nb.title().to_uppercase()).font(theme::MONO).size(theme::SMALL).color(theme::TEXT),
+                text(o.nb.title().to_uppercase()).font(theme::MONO).size(theme::SMALL).color(theme::p().text),
                 Space::new().width(Length::Fill),
                 chip(format!("{:>3.0} %", o.camera.zoom * 100.0)),
                 Space::new().width(8),
@@ -1038,7 +1255,7 @@ impl App {
     pub fn status_bar(&self) -> Element<'_, Message> {
         let left: Element<'_, Message> = match &self.status {
             Some(s) => row![
-                text(s.as_str()).font(theme::MONO).size(10.5).color(theme::TEXT),
+                text(s.as_str()).font(theme::MONO).size(10.5).color(theme::p().text),
                 Space::new().width(10),
                 match &self.last_export {
                     Some(p) => Element::from(button(text("ÖFFNEN").font(theme::MONO_BOLD).size(10)).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
@@ -1049,9 +1266,9 @@ impl App {
             ]
             .align_y(Alignment::Center)
             .into(),
-            None => text("ESC BIBLIOTHEK · BILD↑↓ SEITEN · STRG +/− ZOOM · STRG B GLIEDERUNG").font(theme::MONO).size(10.5).color(theme::MUTED).into(),
+            None => text("STRG K BEFEHLE · F1 TASTENKÜRZEL · ESC ZURÜCK · BILD↑↓ SEITEN · STRG +/− ZOOM").font(theme::MONO).size(10.5).color(theme::p().muted).into(),
         };
-        container(row![left, Space::new().width(Length::Fill), text(format!("N0TE {}", env!("CARGO_PKG_VERSION"))).font(theme::MONO).size(10.5).color(theme::MUTED)].align_y(Alignment::Center))
+        container(row![left, Space::new().width(Length::Fill), text(format!("N0TE {}", env!("CARGO_PKG_VERSION"))).font(theme::MONO).size(10.5).color(theme::p().muted)].align_y(Alignment::Center))
             .padding([4, 14])
             .height(26)
             .width(Length::Fill)
