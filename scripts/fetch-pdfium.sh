@@ -17,6 +17,8 @@ PDFIUM_TAG="chromium/8165" # PDFium 160.0.8165.0, released 2026-11-16
 declare -A SHA256=(
 	[linux-x64]="ba7865e16c0271daab75256790be06c26272190afe6e2a70eae0bb39bb99089c"
 	[android-arm64]="ce4f17fea8881cdf163950748ab90854cf33f296309fab68de9441a1d41ff6cc"
+	# The emulator (x86_64 test builds only; digest from the GitHub release's asset list).
+	[android-x64]="e5d8646165eff2f837e5d8fc356eda6b7e624cbfad5915e2500428e244a89b44"
 )
 BASE_URL="https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}"
 
