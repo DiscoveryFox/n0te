@@ -340,7 +340,11 @@ impl NotebookHandle {
         Ok(lock(&self.nb).set_collapsed(&group, collapsed)?)
     }
     pub fn delete_node(&self, node: String) -> R<()> {
-        Ok(lock(&self.nb).delete(&node)?)
+        Ok(lock(&self.nb).delete_undoable(&node)?)
+    }
+    /// Takes back the last delete_node (true if something came back).
+    pub fn undo_delete(&self) -> R<bool> {
+        Ok(lock(&self.nb).undo_delete()?)
     }
     pub fn save(&self) -> R<()> {
         Ok(self.lib.inner.save_notebook(&lock(&self.nb))?)

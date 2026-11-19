@@ -106,6 +106,8 @@ pub struct Notebook {
     doc: LoroDoc,
     tree: LoroTree,
     meta: LoroMap,
+    /// Records the last [`Notebook::delete_undoable`] so it can be taken back.
+    undo_delete: std::sync::Mutex<Option<loro::UndoManager>>,
 }
 
 const K_KIND: &str = "kind";
@@ -143,7 +145,7 @@ impl Notebook {
         let tree = doc.get_tree("pages");
         tree.enable_fractional_index(0);
         let meta = doc.get_map("meta");
-        Ok(Notebook { doc, tree, meta })
+        Ok(Notebook { doc, tree, meta, undo_delete: std::sync::Mutex::new(None) })
     }
 
     pub fn id(&self) -> String {
@@ -333,6 +335,26 @@ impl Notebook {
         self.tree.delete(id)?;
         self.doc.commit();
         Ok(())
+    }
+
+    /// Deletes like [`Notebook::delete`], and remembers it for [`Notebook::undo_delete`] (a page
+    /// comes back with its side sheets and content; the sheets' own documents are untouched).
+    pub fn delete_undoable(&self, node: &str) -> Result<()> {
+        let id = self.node(node)?;
+        let um = loro::UndoManager::new(&self.doc);
+        self.tree.delete(id)?;
+        self.doc.commit();
+        *self.undo_delete.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(um);
+        Ok(())
+    }
+
+    /// Takes back the last [`Notebook::delete_undoable`]; false when there is nothing to undo.
+    pub fn undo_delete(&self) -> Result<bool> {
+        let um = self.undo_delete.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+        let Some(mut um) = um else { return Ok(false) };
+        let done = um.undo()?;
+        self.doc.commit();
+        Ok(done)
     }
 
     /// The flattened outline: groups and main sheets in reading order with their depth;
@@ -565,6 +587,32 @@ mod tests {
         // A side sheet of a side sheet, or a sheet inside a sheet, is refused.
         assert!(nb.add_sheet(Some(&s1), 0, &SheetSpec::board()).is_err());
         assert!(nb.move_node(&weekly, Some(&w1), 0).is_err());
+    }
+
+    #[test]
+    fn a_deleted_page_comes_back_with_its_side_sheets() {
+        let nb = Notebook::create(1, "x").unwrap();
+        nb.add_sheet(None, 0, &SheetSpec::a4(Background::Grid)).unwrap();
+        let (s2, sheet2) = nb.add_sheet(None, 1, &SheetSpec::a4(Background::Lines)).unwrap();
+        nb.add_sheet(None, 2, &SheetSpec::a4(Background::Dots)).unwrap();
+        let (side, _) = nb.add_side_sheet(&s2, Side::Right, 0, &SheetSpec::a4(Background::Blank)).unwrap();
+        let before = titles(&nb, true);
+        // A side sheet alone.
+        nb.delete_undoable(&side).unwrap();
+        assert_eq!(titles(&nb, true)[1], "S[0|0]");
+        assert!(nb.undo_delete().unwrap());
+        assert_eq!(titles(&nb, true), before);
+        // A page with its side sheet, back in its place, with the same sheet.
+        nb.delete_undoable(&s2).unwrap();
+        assert_eq!(titles(&nb, true).len(), 2);
+        assert!(nb.undo_delete().unwrap());
+        assert_eq!(titles(&nb, true), before);
+        assert_eq!(nb.sheet_order()[1], sheet2);
+        // Only once.
+        assert!(!nb.undo_delete().unwrap());
+        // It survives a save and reload.
+        let again = Notebook::load(1, &nb.snapshot().unwrap()).unwrap();
+        assert_eq!(titles(&again, true), before);
     }
 
     #[test]
