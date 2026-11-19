@@ -17,6 +17,7 @@ use n0te_core::notebook::{self as nbm, Background, OutlineRow, SheetSpec, Side};
 uniffi::setup_scaffolding!();
 
 mod edit;
+pub mod sync;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum N0teError {

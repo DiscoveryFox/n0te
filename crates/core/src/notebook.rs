@@ -153,6 +153,13 @@ impl Notebook {
         Ok(())
     }
 
+    /// Gives a copy of a notebook its own identity (restoring an old version as a new notebook).
+    pub(crate) fn set_id(&self, id: &str) -> Result<()> {
+        self.meta.insert("id", id)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     /// The library folder this notebook is filed under ("" = top level), e.g. "WS26".
     pub fn folder(&self) -> String {
         self.meta_str("folder")
