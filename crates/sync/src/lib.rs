@@ -100,5 +100,7 @@ pub enum Event {
     GuestWaiting { invite: String, notebook: String, name: String, device: String, on: bool },
     /// Guest side, while joining: the owner has to let us in first.
     JoinWaiting { owner: String },
+    /// The owner (or an own device) brings this view to `viewport` on `sheet` (sheet points).
+    Summoned { device: String, notebook: String, sheet: String, viewport: [f32; 4] },
     SyncError { message: String },
 }

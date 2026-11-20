@@ -71,6 +71,7 @@ fn event_json(e: &Event) -> Option<String> {
         Event::AccessRevoked { notebook } => json!({ "t": "revoked", "notebook": notebook }),
         Event::GuestWaiting { invite, notebook, name, device, on } => json!({ "t": "waiting", "invite": invite, "notebook": notebook, "name": name, "device": device, "on": on }),
         Event::JoinWaiting { owner } => json!({ "t": "join_waiting", "owner": owner }),
+        Event::Summoned { device, notebook, sheet, viewport } => json!({ "t": "summoned", "device": device, "notebook": notebook, "sheet": sheet, "viewport": viewport }),
         Event::SyncError { message } => json!({ "t": "error", "message": message }),
         Event::BlobArrived { .. } => return None,
     };
@@ -157,6 +158,7 @@ fn describe(e: &Event) -> Option<String> {
         Event::GuestWaiting { name, notebook, device, on: true, .. } => format!("{name} wartet auf Einlass in {notebook} (n0te-sync admit {device})"),
         Event::GuestWaiting { name, on: false, .. } => format!("{name} wartet nicht mehr"),
         Event::JoinWaiting { owner } => format!("Warte, bis {owner} dich hereinlässt …"),
+        Event::Summoned { notebook, .. } => format!("Zum Besitzer geholt: {notebook}"),
         Event::AccessRevoked { notebook } => format!("Zugriff widerrufen: {notebook}"),
         Event::SyncError { message } => format!("Fehler: {message}"),
         Event::OpenRequest { notebook, .. } => format!("Öffnen angefragt: {notebook}"),
@@ -445,6 +447,12 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
         "allow-again" => {
             engine.allow_again(&arg(1, "Einladungs-ID")?, &arg(2, "Geräte-ID")?).map_err(e)?;
             "Darf wieder herein.".into()
+        }
+        // summon <notebook> <sheet> x0 y0 x1 y1 [device]: guests' views to this one
+        "summon" => {
+            let f = |i: usize| args.get(i).and_then(|v| v.parse::<f32>().ok()).unwrap_or(0.0);
+            let n = engine.summon(&arg(1, "Notizbuch")?, args.get(7).map(String::as_str), &arg(2, "Seite")?, [f(3), f(4), f(5), f(6)]).map_err(e)?;
+            if n == 1 { "Gast geholt.".into() } else { format!("{n} Gäste geholt.") }
         }
         "waiting-json" => serde_json::to_string(&engine.status().waiting.iter().map(|g| serde_json::json!({ "invite": g.invite, "notebook": g.notebook, "name": g.name, "device": g.device, "write": g.role == Role::ReadWrite })).collect::<Vec<_>>()).unwrap_or_default(),
         "join" => {

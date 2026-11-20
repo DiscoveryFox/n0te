@@ -76,6 +76,8 @@ pub enum Msg {
     LatexResult { id: u64, latex: String, engine: String, error: Option<String> },
     /// Owner to a new guest: "wait, the owner lets you in" (Welcome or Reject follows).
     Waiting { name: String },
+    /// "Come and look here": the owner brings a guest's view to its own (sheet points).
+    Summon { notebook: String, sheet: String, viewport: [f32; 4] },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

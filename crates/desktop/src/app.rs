@@ -105,6 +105,14 @@ pub enum Message {
     SetRole(String, bool),
     GuestFrames(bool),
     ShareView(bool),
+    /// Bring one guest (or all: None) to where this laptop looks.
+    Summon(Option<String>),
+    /// Look where a device looks (last view it showed).
+    JumpTo(String),
+    /// As a guest: follow the owner's view on / off.
+    FollowHost(bool),
+    /// Open / close an invite's settings in the share panel.
+    ToggleInvite(String),
     /// Waiting guest: let in (true) or turn away.
     Admit(String, bool),
     /// First click asks, the second removes the guest device.
@@ -251,6 +259,12 @@ pub struct App {
     pub removing: Option<String>,
     /// Joining an invite with a PIN: what's typed so far (Some: the field shows).
     pub join_pin: Option<String>,
+    /// As a guest: following the owner's view (its device id).
+    pub follow_host: Option<String>,
+    /// Last view each device showed: (sheet, viewport in sheet points) — jump there.
+    pub last_views: std::collections::HashMap<String, (String, [f32; 4])>,
+    /// The invite whose settings are open in the share panel.
+    pub invite_open: Option<String>,
     presence_at: Option<Instant>,
     pub pair_code: Option<String>,
     /// Share panel open, with the invites of the open notebook.
@@ -352,6 +366,9 @@ impl App {
             waiting: Vec::new(),
             removing: None,
             join_pin: None,
+            follow_host: None,
+            last_views: std::collections::HashMap::new(),
+            invite_open: None,
             presence_at: None,
             pair_code: None,
             share: None,
@@ -480,6 +497,10 @@ impl App {
             Message::Camera(c) => {
                 if let Screen::Notebook(o) = &mut self.screen {
                     o.camera = c;
+                }
+                // Moved by hand: following the owner ends (it would snap back).
+                if self.follow_host.take().is_some() {
+                    self.say("Folgen beendet");
                 }
                 self.follow_notes();
                 self.send_presence();
@@ -777,7 +798,8 @@ impl App {
                 } else {
                     None
                 };
-                self.share_qr = self.share.as_ref().and_then(|v| v.iter().rev().find(|i| !i.revoked)).and_then(|i| iced::widget::qr_code::Data::new(i.link.as_bytes()).ok());
+                // The open invite as a QR code (scan with the tablet / phone).
+                self.share_qr = self.share.as_ref().and_then(|v| v.iter().find(|i| Some(i.id.as_str()) == self.invite_open.as_deref() && !i.revoked)).and_then(|i| iced::widget::qr_code::Data::new(i.link.as_bytes()).ok());
             }
             Message::ShowHistory(on) => {
                 self.history = if on {
@@ -830,6 +852,8 @@ impl App {
                 match live::request(&args) {
                     Ok(link) => {
                         self.say("Einladung erstellt und kopiert");
+                        // The new link opens (its QR code shows).
+                        self.invite_open = live::invites().into_iter().find(|i| i.link == link).map(|i| i.id);
                         let _ = self.update(Message::ShowShare(true));
                         return iced::clipboard::write(link);
                     }
@@ -871,6 +895,43 @@ impl App {
                 } else {
                     self.say("Beigetreten — das Notizbuch kommt, sobald der Besitzer erreichbar ist");
                 }
+            }
+            Message::Summon(device) => {
+                let (Some(nb), Some((sheet, r))) = (self.notebook_id(), self.my_view()) else { return Task::none() };
+                let mut args: Vec<String> = vec!["summon".into(), nb, sheet];
+                args.extend(r.iter().map(|x| format!("{x:.1}")));
+                if let Some(d) = &device {
+                    args.push(d.clone());
+                }
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                match live::request(&refs) {
+                    Ok(_) => self.say(match &device {
+                        Some(d) => format!("{} kommt zu dir", self.guests.iter().find(|g| &g.device == d).map(|g| g.name.clone()).unwrap_or_else(|| "Der Gast".into())),
+                        None => "Alle Gäste kommen zu dir".into(),
+                    }),
+                    Err(e) => self.say(format!("Holen: {e}")),
+                }
+            }
+            Message::JumpTo(device) => {
+                if let Some((sheet, r)) = self.last_views.get(&device).cloned() {
+                    self.look_at(&sheet, r);
+                } else {
+                    self.say("Diese Ansicht ist gerade nicht bekannt");
+                }
+            }
+            Message::FollowHost(on) => {
+                let nb = self.notebook_id().unwrap_or_default();
+                let owner = self.joined.iter().find(|j| j.notebook == nb).map(|j| j.owner.clone());
+                self.follow_host = if on { owner } else { None };
+                if let Some(d) = self.follow_host.clone()
+                    && let Some((sheet, r)) = self.last_views.get(&d).cloned()
+                {
+                    self.look_at(&sheet, r);
+                }
+            }
+            Message::ToggleInvite(id) => {
+                self.invite_open = if self.invite_open.as_deref() == Some(id.as_str()) { None } else { Some(id) };
+                return self.update(Message::ShowShare(true));
             }
             Message::Admit(device, yes) => {
                 if let Err(e) = live::request(&[if yes { "admit" } else { "deny" }, &device]) {
@@ -1123,10 +1184,19 @@ impl App {
                 self.devices_at = Some(Instant::now());
             }
             LiveEvent::Presence { device, notebook, sheet, viewport, laser, .. } => {
-                let Screen::Notebook(o) = &mut self.screen else { return Task::none() };
-                if o.id != notebook {
+                if self.notebook_id().as_deref() != Some(notebook.as_str()) {
                     return Task::none();
                 }
+                if let Some(s) = &sheet {
+                    self.last_views.insert(device.clone(), (s.clone(), viewport));
+                }
+                if self.follow_host.as_deref() == Some(device.as_str())
+                    && let Some(s) = &sheet
+                {
+                    let s = s.clone();
+                    self.look_at(&s, viewport);
+                }
+                let Screen::Notebook(o) = &mut self.screen else { return Task::none() };
                 // Named: own device, guest or the owner; guests' frames only when wanted.
                 let guest = self.guests.iter().find(|g| g.device == device);
                 let host = self.joined.iter().any(|j| j.owner == device);
@@ -1213,6 +1283,11 @@ impl App {
                     }
                 }
                 self.refresh_guests();
+                // A new guest sees where this laptop looks right away (to jump there / follow).
+                if on {
+                    self.presence_at = None;
+                    self.send_presence();
+                }
                 if self.share.is_some() {
                     return self.update(Message::ShowShare(true));
                 }
@@ -1227,6 +1302,12 @@ impl App {
                 }
             }
             LiveEvent::JoinWaiting { owner } => self.say(format!("Warte, bis {owner} dich hereinlässt …")),
+            LiveEvent::Summoned { device, notebook, sheet, viewport } => {
+                if self.notebook_id().as_deref() == Some(notebook.as_str()) && self.look_at(&sheet, viewport) {
+                    let name = self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()).or_else(|| self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone())).unwrap_or_else(|| "Der Besitzer".into());
+                    self.say(format!("{name} hat dich zu sich geholt"));
+                }
+            }
             LiveEvent::Role { write, .. } => {
                 self.refresh_guests();
                 self.say(if write { "Du darfst jetzt mitschreiben" } else { "Ab jetzt nur noch lesen" });
@@ -1277,6 +1358,30 @@ impl App {
             self.joined = live::joined();
             self.waiting = live::waiting();
         }
+    }
+
+    /// Where this laptop looks: the sheet nearest the middle and the window in its points.
+    fn my_view(&self) -> Option<(String, [f32; 4])> {
+        let Screen::Notebook(o) = &self.screen else { return None };
+        let c = o.camera;
+        let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
+        let p = o.pages.sheet_at(cx, cy).or_else(|| o.pages.pages.iter().map(|p| &p.placed).min_by(|a, b| (a.rect.y0 - cy).abs().total_cmp(&(b.rect.y0 - cy).abs())))?;
+        let v = c.view_rect();
+        Some((p.sheet_id.clone(), [v.x0 - p.rect.x0, v.y0 - p.rect.y0, v.x1 - p.rect.x0, v.y1 - p.rect.y0]))
+    }
+
+    /// Shows `r` (sheet points) of `sheet` (jump to / follow / summoned).
+    fn look_at(&mut self, sheet: &str, r: [f32; 4]) -> bool {
+        let Screen::Notebook(o) = &mut self.screen else { return false };
+        let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).map(|p| p.placed.rect) else { return false };
+        if r[2] - r[0] <= 1.0 {
+            return false;
+        }
+        let c = o.camera;
+        let zoom = (c.viewport.width / (r[2] - r[0])).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
+        let (cx, cy) = (page.x0 + (r[0] + r[2]) / 2.0, page.y0 + (r[1] + r[3]) / 2.0);
+        o.camera = o.pages.clamp(Camera { x: cx - c.viewport.width / zoom / 2.0, y: cy - c.viewport.height / zoom / 2.0, zoom, ..c });
+        true
     }
 
     fn send_presence(&mut self) {
@@ -1909,157 +2014,177 @@ impl App {
     }
 
     /// Share with guests: invite links (read / read-write), active invites with revoke.
+    /// The share panel. Owner: who waits / is here (jump, bring to me, remove), invites as
+    /// one line each (click opens rights, validity, approval, one device, PIN, QR, revoke),
+    /// a new link, the two view switches. Guest: jump to / follow the owner, its frame.
     fn share_panel<'a>(&'a self, invites: &'a [live::Invite]) -> Element<'a, Message> {
-        let mut col = column![
-            row![theme::heading("Teilen", 20.0), Space::new().width(12), text("Gäste verbinden sich direkt, ohne Server.").size(12).color(theme::p().muted)].align_y(Alignment::Center),
-            row![
-                button(theme::btn("Nur lesen · 7 Tage")).padding(theme::pad()).on_press(Message::Invite(false, 7)).style(theme::secondary),
-                Space::new().width(8),
-                button(theme::btn("Lesen & schreiben · 7 Tage")).padding(theme::pad()).on_press(Message::Invite(true, 7)).style(theme::secondary),
-                Space::new().width(8),
-                button(theme::btn("Ohne Ablauf")).padding(theme::pad()).on_press(Message::Invite(false, 0)).style(theme::ghost),
-                Space::new().width(Length::Fill),
-                button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowShare(false)).style(theme::ghost),
+        let nb = self.notebook_id().unwrap_or_default();
+        let small = |t: &str, m: Message| button(theme::btn_small(t)).padding(theme::pad()).on_press(m).style(theme::ghost);
+        let muted = |t: String| text(t).size(12).color(theme::p().muted);
+        let close = button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowShare(false)).style(theme::ghost);
+
+        // As a guest: the owner's view.
+        if let Some(j) = self.joined.iter().find(|j| j.notebook == nb) {
+            let following = self.follow_host.is_some();
+            let col = column![
+                row![theme::heading("Gast", 20.0), Space::new().width(Length::Fill), close].align_y(Alignment::Center),
+                text(format!("bei {} · {}", j.owner_name, if j.write { "du darfst mitschreiben" } else { "nur lesen" })).size(14).color(theme::p().text),
+                row![
+                    button(theme::btn(&format!("Zu {} springen", j.owner_name))).padding(theme::pad()).on_press(Message::JumpTo(j.owner.clone())).style(theme::secondary),
+                    button(theme::btn(&format!("{} folgen", j.owner_name))).padding(theme::pad()).on_press(Message::FollowHost(!following)).style(theme::tab(following)),
+                ]
+                .spacing(8),
+                muted("Folgen endet, sobald du selbst verschiebst.".into()),
+                iced::widget::toggler(self.settings.guest_frames).label(format!("Rahmen von {} zeigen", j.owner_name)).on_toggle(Message::GuestFrames).size(18).text_size(13).spacing(10).style(theme::switch),
             ]
-            .align_y(Alignment::Center),
+            .spacing(12);
+            return container(col).padding(20).width(Length::Fill).max_width(620).style(theme::panel).into();
+        }
+
+        let mut col = column![
+            row![theme::heading("Teilen", 20.0), Space::new().width(12), muted("Direkt von hier, ohne Server.".into()), Space::new().width(Length::Fill), close].align_y(Alignment::Center),
         ]
         .spacing(10);
         if self.sync.is_none() {
             col = col.push(text("Der Sync-Dienst läuft nicht (systemctl --user enable --now n0te-sync).").size(13).color(theme::p().accent));
         }
-        if invites.is_empty() {
-            col = col.push(text("Noch keine Einladungen. Der Link wird beim Erstellen kopiert; Gäste öffnen ihn in n0te (EINLADUNG).").size(13).color(theme::p().muted));
+        // At the door, then who is here.
+        for g in self.waiting.iter().filter(|g| g.notebook == nb) {
+            col = col.push(
+                row![
+                    text(format!("{} möchte herein", g.name)).size(14).color(theme::p().text),
+                    Space::new().width(Length::Fill),
+                    small("Nein", Message::Admit(g.device.clone(), false)),
+                    button(theme::btn_small("Herein")).padding(theme::pad()).on_press(Message::Admit(g.device.clone(), true)).style(theme::accent_button),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
         }
-        let nb = self.notebook_id().unwrap_or_default();
-        let small = |t: &str, m: Message| button(theme::btn_small(t)).padding(theme::pad()).on_press(m).style(theme::ghost);
-        // At the door (invites with approval): let in or turn away.
-        let knocking: Vec<&live::Guest> = self.waiting.iter().filter(|g| g.notebook == nb).collect();
-        if !knocking.is_empty() {
-            col = col.push(theme::caption("Wartet auf Einlass"));
-            for g in knocking {
-                col = col.push(
-                    row![
-                        text(g.name.clone()).size(14).color(theme::p().text),
-                        text(if g.write { "möchte herein · lesen & schreiben" } else { "möchte herein · nur lesen" }).size(12).color(theme::p().muted),
-                        Space::new().width(Length::Fill),
-                        small("Ablehnen", Message::Admit(g.device.clone(), false)),
-                        button(theme::btn_small("Hereinlassen")).padding(theme::pad()).on_press(Message::Admit(g.device.clone(), true)).style(theme::accent_button),
-                    ]
-                    .spacing(10)
-                    .align_y(Alignment::Center),
-                );
-            }
-        }
-        // Who is here right now, with their rights; one can be removed (second click confirms).
         let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
-        col = col.push(theme::caption("Jetzt da"));
         if here.is_empty() {
-            col = col.push(text("Gerade ist kein Gast verbunden.").size(13).color(theme::p().muted));
+            col = col.push(muted("Gerade ist niemand da.".into()));
         }
-        for g in here {
+        for g in &here {
             let sure = self.removing.as_deref() == Some(g.device.as_str());
             col = col.push(
                 row![
                     container(Space::new().width(8).height(8)).style(|_| container::Style { background: Some(theme::p().accent.into()), border: iced::Border { radius: 4.0.into(), ..Default::default() }, ..Default::default() }),
                     text(g.name.clone()).size(14).color(theme::p().text),
-                    text(if g.write { "lesen & schreiben" } else { "nur lesen" }).size(12).color(theme::p().muted),
+                    muted(if g.write { "schreibt".into() } else { "liest".into() }),
                     Space::new().width(Length::Fill),
+                    small("Hinschauen", Message::JumpTo(g.device.clone())),
+                    small("Zu mir holen", Message::Summon(Some(g.device.clone()))),
                     if sure {
                         button(theme::btn_small("Wirklich entfernen?")).padding(theme::pad()).on_press(Message::RemoveGuest(g.device.clone())).style(theme::accent_button)
                     } else {
                         small("Entfernen", Message::RemoveGuest(g.device.clone()))
                     },
                 ]
-                .spacing(10)
+                .spacing(8)
                 .align_y(Alignment::Center),
             );
         }
-        col = col.push(theme::caption("Einladungen"));
+        if here.len() > 1 {
+            col = col.push(row![Space::new().width(Length::Fill), button(theme::btn_small("Alle zu mir holen")).padding(theme::pad()).on_press(Message::Summon(None)).style(theme::secondary)]);
+        }
+        col = col.push(container(Space::new().height(1)).width(Length::Fill).style(theme::hairline));
+        // Invites: one line each; the open one shows its settings.
         let now = unix_now();
         for i in invites.iter().rev().filter(|i| !i.revoked) {
-            let mut state = if i.online > 0 { format!("{} verbunden", i.online) } else { "niemand verbunden".to_string() };
-            if i.members > 0 {
-                state.push_str(&format!(" · {} dabei gewesen", i.members));
-            }
+            let open = self.invite_open.as_deref() == Some(i.id.as_str());
             let until = match i.expires {
                 0 => "ohne Ablauf".to_string(),
                 e if e < now => "abgelaufen".to_string(),
                 e => remaining(e - now),
             };
+            let mut facts = vec![until];
+            if i.online > 0 {
+                facts.push(format!("{} da", i.online));
+            }
+            if i.approve {
+                facts.push("bestätigen".into());
+            }
+            if i.single {
+                facts.push("ein Gerät".into());
+            }
+            if let Some(p) = &i.pin {
+                facts.push(format!("PIN {p}"));
+            }
             let mut card = column![
                 row![
-                    // The rights, switchable: guests reconnect with them at once.
-                    button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
-                    button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
-                    text(state).size(12).color(theme::p().muted),
+                    column![text(format!("Link · {}", if i.rw { "lesen & schreiben" } else { "nur lesen" })).size(14).color(theme::p().text), muted(facts.join(" · "))].spacing(2),
                     Space::new().width(Length::Fill),
                     small("Link kopieren", Message::CopyText(i.link.clone())),
-                    small("Widerrufen", Message::Revoke(i.id.clone())),
-                ]
-                .align_y(Alignment::Center)
-                .spacing(6),
-                // How long it works — also for links already sent (the owner checks).
-                row![
-                    text(format!("Gültig ({until})")).size(12).color(theme::p().muted).width(Length::Fixed(190.0)),
-                    button(theme::btn_small("1 Tag")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 1)).style(theme::tab(false)),
-                    button(theme::btn_small("7 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 7)).style(theme::tab(false)),
-                    button(theme::btn_small("30 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 30)).style(theme::tab(false)),
-                    button(theme::btn_small("Ohne Ablauf")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 0)).style(theme::tab(i.expires == 0)),
+                    small(if open { "Weniger" } else { "Einstellungen" }, Message::ToggleInvite(i.id.clone())),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
-                // Who gets in (new devices; those already in stay).
-                row![
-                    iced::widget::toggler(i.approve).label("Beitritt bestätigen").on_toggle({
-                        let (id, single) = (i.id.clone(), i.single);
-                        move |on| Message::SetInviteOptions(id.clone(), on, single)
-                    }).size(16).text_size(12).spacing(8).style(theme::switch),
-                    Space::new().width(18),
-                    iced::widget::toggler(i.single).label("Nur ein Gerät").on_toggle({
-                        let (id, approve) = (i.id.clone(), i.approve);
-                        move |on| Message::SetInviteOptions(id.clone(), approve, on)
-                    }).size(16).text_size(12).spacing(8).style(theme::switch),
-                    Space::new().width(18),
-                    iced::widget::toggler(i.pin.is_some()).label("PIN").on_toggle({
-                        let id = i.id.clone();
-                        move |on| Message::SetPin(id.clone(), on)
-                    }).size(16).text_size(12).spacing(8).style(theme::switch),
-                ]
-                .align_y(Alignment::Center),
             ]
-            .spacing(8);
-            if let Some(pin) = &i.pin {
+            .spacing(10);
+            if open {
                 card = card.push(
                     row![
-                        text(pin.clone()).font(theme::MONO_BOLD).size(22).color(theme::p().text),
-                        text("Neue Gäste geben sie ein · getrennt vom Link sagen").size(12).color(theme::p().muted),
-                        Space::new().width(Length::Fill),
-                        small("Neue PIN", Message::SetPin(i.id.clone(), true)),
+                        button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
+                        button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
+                        Space::new().width(18),
+                        button(theme::btn_small("1 Tag")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 1)).style(theme::tab(false)),
+                        button(theme::btn_small("7 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 7)).style(theme::tab(false)),
+                        button(theme::btn_small("30 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 30)).style(theme::tab(false)),
+                        button(theme::btn_small("Unbegrenzt")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 0)).style(theme::tab(i.expires == 0)),
                     ]
-                    .spacing(12)
+                    .spacing(6)
                     .align_y(Alignment::Center),
                 );
-            }
-            for (device, name) in &i.banned {
+                let (id1, id2, id3) = (i.id.clone(), i.id.clone(), i.id.clone());
+                let (approve, single) = (i.approve, i.single);
                 card = card.push(
-                    row![text(format!("Entfernt: {name}")).size(12).color(theme::p().muted), Space::new().width(Length::Fill), small("Wieder zulassen", Message::AllowAgain(i.id.clone(), device.clone()))]
-                        .align_y(Alignment::Center),
+                    row![
+                        iced::widget::toggler(i.approve).label("Neue Gäste erst bestätigen").on_toggle(move |on| Message::SetInviteOptions(id1.clone(), on, single)).size(16).text_size(12).spacing(8).style(theme::switch),
+                        Space::new().width(16),
+                        iced::widget::toggler(i.single).label("Nur ein Gerät").on_toggle(move |on| Message::SetInviteOptions(id2.clone(), approve, on)).size(16).text_size(12).spacing(8).style(theme::switch),
+                        Space::new().width(16),
+                        iced::widget::toggler(i.pin.is_some()).label("PIN").on_toggle(move |on| Message::SetPin(id3.clone(), on)).size(16).text_size(12).spacing(8).style(theme::switch),
+                    ]
+                    .align_y(Alignment::Center),
                 );
+                if let Some(pin) = &i.pin {
+                    card = card.push(
+                        row![text(pin.clone()).font(theme::MONO_BOLD).size(20).color(theme::p().text), muted("getrennt vom Link sagen".into()), Space::new().width(Length::Fill), small("Neue PIN", Message::SetPin(i.id.clone(), true))]
+                            .spacing(12)
+                            .align_y(Alignment::Center),
+                    );
+                }
+                for (device, name) in &i.banned {
+                    card = card.push(row![muted(format!("Entfernt: {name}")), Space::new().width(Length::Fill), small("Wieder zulassen", Message::AllowAgain(i.id.clone(), device.clone()))].align_y(Alignment::Center));
+                }
+                let qr: Element<'a, Message> = match &self.share_qr {
+                    Some(data) => row![scannable_qr(data, 3.0), muted("Mit dem Tablet scannen".into())].spacing(12).align_y(Alignment::Center).into(),
+                    None => Space::new().into(),
+                };
+                card = card.push(row![qr, Space::new().width(Length::Fill), small("Link widerrufen", Message::Revoke(i.id.clone()))].align_y(Alignment::End));
             }
             col = col.push(container(card).padding(12).width(Length::Fill).style(theme::group));
         }
         col = col.push(
             row![
-                iced::widget::toggler(self.settings.guest_frames).label("Ansicht der Gäste zeigen").on_toggle(Message::GuestFrames).size(18).text_size(13).spacing(10).style(theme::switch),
+                muted("Einladen:".into()),
+                button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::Invite(false, 7)).style(theme::secondary),
+                button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::Invite(true, 7)).style(theme::secondary),
+                muted("· 7 Tage, änderbar".into()),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        col = col.push(container(Space::new().height(1)).width(Length::Fill).style(theme::hairline));
+        col = col.push(
+            row![
+                iced::widget::toggler(self.settings.guest_frames).label("Zeigen, wo Gäste hinschauen").on_toggle(Message::GuestFrames).size(16).text_size(12).spacing(8).style(theme::switch),
                 Space::new().width(24),
-                iced::widget::toggler(self.settings.share_view).label("Gäste sehen meine Ansicht").on_toggle(Message::ShareView).size(18).text_size(13).spacing(10).style(theme::switch),
+                iced::widget::toggler(self.settings.share_view).label("Gäste sehen, wo ich hinschaue").on_toggle(Message::ShareView).size(16).text_size(12).spacing(8).style(theme::switch),
             ]
             .align_y(Alignment::Center),
         );
-        // The newest invite as a QR code (scan with the tablet/phone).
-        if let Some(data) = &self.share_qr {
-            col = col.push(row![scannable_qr(data, 3.0), text("Neueste Einladung als QR-Code").size(12).color(theme::p().muted)].spacing(12).align_y(Alignment::Center));
-        }
         // Long with several invites: scrolls inside the window.
         container(iced::widget::scrollable(container(col).padding(20)).height(Length::Shrink)).width(Length::Fill).max_width(820).max_height(760).style(theme::panel).into()
     }

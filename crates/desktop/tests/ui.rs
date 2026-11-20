@@ -542,3 +542,58 @@ fn guests_are_named_their_frames_can_be_hidden_and_the_share_panel_lists_them() 
         h.screenshot(std::path::Path::new(&dir).join("share-guests.png"));
     }
 }
+
+#[test]
+fn as_a_guest_jump_follow_and_get_summoned_and_the_panels_draw() {
+    use n0te_desktop::live::{Guest, Invite, Joined, LiveEvent};
+    let mut h = opened("guestview");
+    let (nb, sheet) = {
+        let o = open(&h);
+        (o.id.clone(), o.pages.pages[3].placed.sheet_id.clone())
+    };
+    h.app.joined = vec![Joined { notebook: nb.clone(), owner: "dev-owner".into(), owner_name: "Flinn".into(), write: false, online: true }];
+    let cam = |h: &Harness| open(h).camera;
+    let presence = |r: [f32; 4]| LiveEvent::Presence { device: "dev-owner".into(), notebook: nb.clone(), sheet: Some(sheet.clone()), viewport: r, zoom: 1.0, laser: None };
+
+    // The owner looks somewhere: jump there once.
+    let before = cam(&h);
+    h.message(Message::Live(presence([20.0, 30.0, 320.0, 230.0])));
+    assert_eq!(cam(&h).y, before.y, "showing a view doesn't move this one");
+    h.message(Message::JumpTo("dev-owner".into()));
+    let jumped = cam(&h);
+    assert!(jumped.y != before.y, "jumped to the owner's page");
+
+    // Follow: the next view moves along; moving by hand ends it.
+    h.message(Message::FollowHost(true));
+    assert_eq!(h.app.follow_host.as_deref(), Some("dev-owner"));
+    h.message(Message::Live(presence([20.0, 400.0, 320.0, 600.0])));
+    let followed = cam(&h);
+    assert!(followed.y > jumped.y, "followed further down");
+    h.message(Message::Camera(followed));
+    assert!(h.app.follow_host.is_none(), "moving by hand stops following");
+    h.message(Message::Live(presence([20.0, 30.0, 320.0, 230.0])));
+    assert_eq!(cam(&h).y, followed.y, "not following any more");
+
+    // Summoned by the owner: brought to its view.
+    h.message(Message::Live(LiveEvent::Summoned { device: "dev-owner".into(), notebook: nb.clone(), sheet: sheet.clone(), viewport: [20.0, 700.0, 320.0, 800.0] }));
+    assert!(cam(&h).y > followed.y, "summoned there");
+
+    // The guest's panel, then the owner's (calm: one line per invite).
+    h.message(Message::ShowShare(true));
+    h.events(&[]);
+    if let Some(dir) = std::env::var_os("N0TE_UI_SHOTS") {
+        h.screenshot(std::path::Path::new(&dir).join("share-guest-side.png"));
+    }
+    h.app.joined.clear();
+    h.app.guests = vec![
+        Guest { invite: "inv1".into(), notebook: nb.clone(), name: "Mia".into(), device: "dev-mia".into(), write: false },
+        Guest { invite: "inv1".into(), notebook: nb.clone(), name: "Ben".into(), device: "dev-ben".into(), write: true },
+    ];
+    let inv = |id: &str, rw: bool, pin: Option<&str>| Invite { id: id.into(), notebook: nb.clone(), rw, revoked: false, online: 1, link: format!("n0te://invite/{id}"), expires: 0, approve: pin.is_some(), single: false, pin: pin.map(Into::into), members: 1, banned: vec![] };
+    h.app.share = Some(vec![inv("inv1", false, None), inv("inv2", true, Some("4821"))]);
+    h.app.invite_open = Some("inv2".into());
+    h.events(&[]);
+    if let Some(dir) = std::env::var_os("N0TE_UI_SHOTS") {
+        h.screenshot(std::path::Path::new(&dir).join("share-owner-side.png"));
+    }
+}

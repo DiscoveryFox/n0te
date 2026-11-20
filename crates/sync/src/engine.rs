@@ -296,7 +296,20 @@ impl Engine {
         for id in devices {
             spawn_dial(&rt, &inner, id, None);
         }
-        let joined: Vec<String> = inner.state.lock().expect("state").joined.iter().filter(|j| !j.revoked).map(|j| j.invite.clone()).collect();
+        let joined: Vec<String> = {
+            let mut st = inner.state.lock().expect("state");
+            // One membership per notebook and owner (0.12.0 could keep two; they blocked each
+            // other as duplicate connections): the newest — the last joined — stays.
+            let before = st.joined.len();
+            let mut seen = HashSet::new();
+            let mut keep: Vec<JoinedRecord> = st.joined.drain(..).rev().filter(|j| seen.insert((j.notebook.clone(), j.owner.clone()))).collect();
+            keep.reverse();
+            st.joined = keep;
+            if st.joined.len() != before {
+                let _ = st.save_joined();
+            }
+            st.joined.iter().filter(|j| !j.revoked).map(|j| j.invite.clone()).collect()
+        };
         for invite in joined {
             rt.spawn(host_loop(inner.clone(), invite, None));
         }
@@ -530,6 +543,27 @@ impl Engine {
     }
 
     /// Asks an own device to follow (or stop following) this device's view.
+    /// Brings guests' views to ours: one guest (`device`) or all guests of `notebook`. Returns
+    /// how many were reached. Their app jumps there ([`Event::Summoned`]).
+    pub fn summon(&self, notebook: &str, device: Option<&str>, sheet: &str, viewport: [f32; 4]) -> Result<usize> {
+        let only = device.map(parse_id).transpose()?;
+        let msg = Msg::Summon { notebook: notebook.into(), sheet: sheet.into(), viewport };
+        let targets: Vec<Arc<Session>> = self
+            .inner
+            .sessions_for(notebook)
+            .into_iter()
+            .filter(|s| matches!(s.kind, Kind::Guest { .. }) || (only.is_some() && s.kind == Kind::Own))
+            .filter(|s| only.is_none_or(|d| s.peer == d))
+            .collect();
+        if targets.is_empty() {
+            return Err(Error::Net(if only.is_some() { "Gast ist nicht verbunden".into() } else { "Kein Gast verbunden".into() }));
+        }
+        for s in &targets {
+            s.send(msg.clone());
+        }
+        Ok(targets.len())
+    }
+
     pub fn set_follow(&self, device: &str, on: bool) -> Result<()> {
         self.own_session(device)?.send(Msg::Follow { on });
         Ok(())
@@ -1516,6 +1550,10 @@ impl Inner {
             }
             Msg::Open { notebook } if s.kind == Kind::Own => (self.emit)(Event::OpenRequest { device: s.id(), notebook }),
             Msg::Follow { on } if s.kind == Kind::Own => (self.emit)(Event::FollowRequest { device: s.id(), on }),
+            // Only the owner (or an own device) may move this view, and only in its notebook.
+            Msg::Summon { notebook, sheet, viewport } if (s.kind == Kind::Own || matches!(s.kind, Kind::Host { .. })) && s.kind.covers(&notebook) => {
+                (self.emit)(Event::Summoned { device: s.id(), notebook, sheet, viewport })
+            }
             Msg::Shot if s.kind == Kind::Own => (self.emit)(Event::ScreenshotRequest { device: s.id() }),
             Msg::LatexRequest { id, png } if s.kind == Kind::Own => (self.emit)(Event::LatexRequest { device: s.id(), id, png }),
             Msg::LatexResult { id, latex, engine, error } if s.kind == Kind::Own => (self.emit)(Event::LatexResult { device: s.id(), id, latex, engine, error }),

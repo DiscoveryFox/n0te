@@ -68,6 +68,8 @@ pub enum FfiSyncEvent {
     GuestWaiting { invite: String, notebook: String, name: String, device: String, on: bool },
     /// Guest side, while joining: the owner lets us in by hand.
     JoinWaiting { owner: String },
+    /// The owner brings this view to `viewport` (sheet points) on `sheet`.
+    Summoned { device: String, notebook: String, sheet: String, viewport: Vec<f32> },
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -198,6 +200,7 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::SyncError { message } => FfiSyncEvent::SyncError { message },
         Event::GuestWaiting { invite, notebook, name, device, on } => FfiSyncEvent::GuestWaiting { invite, notebook, name, device, on },
         Event::JoinWaiting { owner } => FfiSyncEvent::JoinWaiting { owner },
+        Event::Summoned { device, notebook, sheet, viewport } => FfiSyncEvent::Summoned { device, notebook, sheet, viewport: viewport.to_vec() },
     }
 }
 
@@ -312,6 +315,11 @@ impl SyncEngine {
     /// An invite with approval, single use and / or a PIN.
     pub fn create_invite_with(&self, notebook: String, role: FfiRole, expires: u64, approve: bool, single: bool, pin: Option<String>) -> R<String> {
         self.with(|e| Ok(e.create_invite_with(&notebook, if role == FfiRole::ReadWrite { Role::ReadWrite } else { Role::Read }, expires, n0te_sync::InviteOptions { approve, single, pin })?))
+    }
+    /// Brings one guest's (`device`) or all guests' views to ours; how many were reached.
+    pub fn summon(&self, notebook: String, device: Option<String>, sheet: String, viewport: Vec<f32>) -> R<u32> {
+        let v = |i: usize| viewport.get(i).copied().unwrap_or(0.0);
+        self.with(|e| Ok(e.summon(&notebook, device.as_deref(), &sheet, [v(0), v(1), v(2), v(3)])? as u32))
     }
     /// Lets a waiting guest in (`yes`) or turns it away.
     pub fn admit(&self, device: String, yes: bool) -> R<()> {

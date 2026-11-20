@@ -39,6 +39,8 @@ pub enum LiveEvent {
     Waiting { name: String, notebook: String, device: String, on: bool },
     /// Joining: the owner lets us in by hand.
     JoinWaiting { owner: String },
+    /// As a guest: the owner brings this view to `viewport` on `sheet` (sheet points).
+    Summoned { device: String, notebook: String, sheet: String, viewport: [f32; 4] },
     Revoked { notebook: String },
     Error { message: String },
     Disconnected,
@@ -98,6 +100,7 @@ fn parse(line: &str) -> Option<LiveEvent> {
         "role" => LiveEvent::Role { notebook: s("notebook"), write: v["write"].as_bool().unwrap_or(false) },
         "waiting" => LiveEvent::Waiting { name: s("name"), notebook: s("notebook"), device: s("device"), on: v["on"].as_bool().unwrap_or(false) },
         "join_waiting" => LiveEvent::JoinWaiting { owner: s("owner") },
+        "summoned" => LiveEvent::Summoned { device: s("device"), notebook: s("notebook"), sheet: s("sheet"), viewport: f4("viewport").unwrap_or_default() },
         "revoked" => LiveEvent::Revoked { notebook: s("notebook") },
         "error" => LiveEvent::Error { message: s("message") },
         _ => return None,

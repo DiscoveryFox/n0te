@@ -355,6 +355,52 @@ fn a_new_invite_to_the_same_notebook_replaces_the_old_membership() {
     assert_eq!(strokes(&rg, &nb, &s1), 1);
 }
 
+#[test]
+fn the_owner_summons_guests_to_its_view_but_not_the_other_way() {
+    let (ro, ra, rb) = (root("smo"), root("sma"), root("smb"));
+    let owner = engine(&ro, "Laptop");
+    let (nb, s1) = notebook_with_strokes(&ro, "Holen", 1);
+    let (mia, ben) = (engine(&ra, "Mia"), engine(&rb, "Ben"));
+    let owner_events = owner.events().unwrap();
+    let (mia_events, ben_events) = (mia.events().unwrap(), ben.events().unwrap());
+    let link = owner.create_invite(&nb, Role::Read, 0).unwrap();
+    mia.join(&link).unwrap();
+    ben.join(&link).unwrap();
+    wait("both in", || owner.status().guests.len() == 2);
+    let mia_dev = owner.status().guests.iter().find(|g| g.name == "Mia").unwrap().device.clone();
+
+    // One guest: only Mia comes.
+    assert_eq!(owner.summon(&nb, Some(&mia_dev), &s1, [10.0, 20.0, 310.0, 420.0]).unwrap(), 1);
+    match wait_event(&mia_events, "mia summoned", |e| matches!(e, Event::Summoned { .. })) {
+        Event::Summoned { notebook, sheet, viewport, .. } => assert_eq!((notebook, sheet, viewport), (nb.clone(), s1.clone(), [10.0, 20.0, 310.0, 420.0])),
+        _ => unreachable!(),
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(ben_events.try_iter().all(|e| !matches!(e, Event::Summoned { .. })), "ben stays where he is");
+
+    // Everyone.
+    assert_eq!(owner.summon(&nb, None, &s1, [0.0, 0.0, 100.0, 100.0]).unwrap(), 2);
+    wait_event(&ben_events, "ben summoned", |e| matches!(e, Event::Summoned { .. }));
+    wait_event(&mia_events, "mia summoned again", |e| matches!(e, Event::Summoned { .. }));
+
+    // A guest has no one to summon (its only session is the owner, who isn't its guest).
+    assert!(mia.summon(&nb, None, &s1, [0.0, 0.0, 1.0, 1.0]).is_err());
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(owner_events.try_iter().all(|e| !matches!(e, Event::Summoned { .. })));
+}
+
+#[test]
+fn two_memberships_of_one_notebook_left_by_an_older_version_become_one() {
+    let r = root("dup");
+    std::fs::create_dir_all(r.join("sync")).unwrap();
+    let rec = |invite: &str, role: &str| serde_json::json!({ "link": "n0te://invite/x", "invite": invite, "notebook": "nb1", "title": "T", "role": role, "owner": "own1", "owner_name": "Flinn", "revoked": false });
+    let other = serde_json::json!({ "link": "n0te://invite/y", "invite": "c", "notebook": "nb2", "title": "U", "role": "Read", "owner": "own1", "owner_name": "Flinn", "revoked": false });
+    std::fs::write(r.join("sync/joined.json"), serde_json::to_vec(&vec![rec("a", "Read"), other, rec("b", "ReadWrite")]).unwrap()).unwrap();
+    let e = engine(&r, "Tablet");
+    let j: Vec<(String, String)> = e.joined().into_iter().map(|j| (j.invite, j.notebook)).collect();
+    assert_eq!(j, vec![("c".to_string(), "nb2".to_string()), ("b".to_string(), "nb1".to_string())], "the newest of nb1 stays, nb2 untouched");
+}
+
 fn wait_event(rx: &Receiver<Event>, what: &str, f: impl Fn(&Event) -> bool) -> Event {
     let deadline = Instant::now() + Duration::from_secs(20);
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {
