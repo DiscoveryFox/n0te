@@ -597,3 +597,120 @@ fn as_a_guest_jump_follow_and_get_summoned_and_the_panels_draw() {
         h.screenshot(std::path::Path::new(&dir).join("share-owner-side.png"));
     }
 }
+
+#[test]
+fn pinching_zooms_around_the_fingers_and_a_swipe_glides_until_touched() {
+    use n0te_desktop::gestures::Gesture;
+    let mut h = opened("pinch");
+    let c0 = open(&h).camera;
+    assert!(c0.origin.x > 0.0, "the view knows where it sits (right of the outline): {c0:?}");
+    let fingers = Point::new(c0.origin.x + 300.0, c0.origin.y + 200.0);
+    let page_at = |c: n0te_desktop::pages::Camera, p: Point| Point::new(c.x + (p.x - c.origin.x) / c.zoom, c.y + (p.y - c.origin.y) / c.zoom);
+    let before = page_at(c0, fingers);
+    h.message(Message::Gesture(Gesture::PinchBegin { x: fingers.x, y: fingers.y }));
+    h.message(Message::Gesture(Gesture::Pinch { scale: 1.5, dx: 0.0, dy: 0.0 }));
+    h.message(Message::Gesture(Gesture::Pinch { scale: 2.0, dx: 0.0, dy: 0.0 }));
+    let c1 = open(&h).camera;
+    assert!((c1.zoom - c0.zoom * 2.0).abs() < 1e-3, "{} -> {}", c0.zoom, c1.zoom);
+    let after = page_at(c1, fingers);
+    assert!((before.x - after.x).abs() < 0.5 && (before.y - after.y).abs() < 0.5, "the page stays under the fingers: {before:?} vs {after:?}");
+    // Moving both fingers drags the page along.
+    h.message(Message::Gesture(Gesture::Pinch { scale: 2.0, dx: 0.0, dy: 40.0 }));
+    let c2 = open(&h).camera;
+    assert!((c2.y - (c1.y - 40.0 / c1.zoom)).abs() < 0.01, "{c1:?} -> {c2:?}");
+    h.message(Message::Gesture(Gesture::PinchEnd));
+    // A pinch over the outline does nothing.
+    h.message(Message::Gesture(Gesture::PinchBegin { x: 20.0, y: 300.0 }));
+    h.message(Message::Gesture(Gesture::Pinch { scale: 3.0, dx: 0.0, dy: 0.0 }));
+    assert_eq!(open(&h).camera, c2);
+    h.message(Message::Gesture(Gesture::PinchEnd));
+
+    // A swipe that ends in motion glides on, slower and slower; fingers on the pad stop it.
+    h.message(Message::Gesture(Gesture::Fling { vx: 0.0, vy: 1200.0 }));
+    assert!(h.app.glide.is_some());
+    let t0 = std::time::Instant::now();
+    h.message(Message::Glide(t0 + std::time::Duration::from_millis(16)));
+    h.message(Message::Glide(t0 + std::time::Duration::from_millis(32)));
+    let c3 = open(&h).camera;
+    assert!(c3.y > c2.y, "glided down: {} -> {}", c2.y, c3.y);
+    let (_, v, _) = h.app.glide.unwrap();
+    assert!(v < 1200.0 && v > 0.0, "slows down: {v}");
+    h.message(Message::Gesture(Gesture::Touch));
+    assert!(h.app.glide.is_none());
+    // Switched off in the settings: no glide.
+    h.message(Message::Momentum(false));
+    h.message(Message::Gesture(Gesture::Fling { vx: 0.0, vy: 1200.0 }));
+    assert!(h.app.glide.is_none());
+}
+
+#[test]
+fn a_page_turns_takes_a_format_or_its_own_size_and_passes_it_on() {
+    let (mut h, root, nb) = blank_notebook("format");
+    let spec = |h: &Harness| h.app.page_in_view().unwrap().1;
+    assert_eq!((spec(&h).width, spec(&h).height), (595.0, 842.0));
+    h.message(Message::RotatePage);
+    assert_eq!((spec(&h).width, spec(&h).height), (842.0, 595.0));
+    // The page panel: A5 keeps the page lying down, then a size of its own in mm.
+    h.message(Message::ShowPage(true));
+    h.events(&[]);
+    h.message(Message::PageSize(595.0, 420.0));
+    assert_eq!(n0te_core::format::describe(spec(&h).width, spec(&h).height), "A5 quer");
+    h.message(Message::CustomSize(true));
+    assert_eq!(h.app.size_text, Some(("210".into(), "148".into())));
+    h.message(Message::SizeWidth("200".into()));
+    h.message(Message::SizeHeight("100".into()));
+    h.events(&[]);
+    h.message(Message::PageSize(n0te_core::format::mm_to_pt(200.0), n0te_core::format::mm_to_pt(100.0)));
+    assert_eq!(n0te_core::format::describe(spec(&h).width, spec(&h).height), "200 × 100 mm");
+    assert_eq!(h.app.size_text, None, "applying closes the fields");
+    // Saved: the library on disk has the new size.
+    let lib = Library::open(&root).unwrap();
+    let stored = lib.load_notebook(&nb).unwrap().sheet_specs();
+    assert!(stored.values().any(|s| (s.width - n0te_core::format::mm_to_pt(200.0)).abs() < 0.01));
+    // The notebook gets a second page, then "für alle" gives it this size and paper too.
+    h.message(Message::NewTextPage);
+    h.message(Message::CloseTextPage);
+    // Page 1 is short now: zoom in on it, so it is the page in the middle of the view.
+    let o = open(&h);
+    let r = o.pages.pages[o.pages.mains()[0]].placed.rect;
+    let cam = n0te_desktop::pages::Camera { x: r.x0, y: r.y0, zoom: 4.0, ..o.camera };
+    h.message(Message::Camera(cam));
+    assert_eq!(n0te_core::format::describe(spec(&h).width, spec(&h).height), "200 × 100 mm");
+    h.message(Message::PagePaper(n0te_core::notebook::Background::Dots));
+    h.message(Message::PageToAll);
+    let o = open(&h);
+    assert!(o.pages.pages.iter().all(|p| (p.placed.spec.width - n0te_core::format::mm_to_pt(200.0)).abs() < 0.01), "every page took the size");
+    // The text page kept being a text page; the other page took the dots.
+    let kinds: Vec<_> = o.pages.pages.iter().map(|p| p.placed.spec.background).collect();
+    assert!(kinds.contains(&n0te_core::notebook::Background::Text) && kinds.contains(&n0te_core::notebook::Background::Dots), "{kinds:?}");
+}
+
+#[test]
+fn turning_a_page_warns_when_content_would_be_cut_off() {
+    let (mut h, root, nb) = blank_notebook("cutoff");
+    // A stroke low on the portrait page: it would stick out of a landscape one.
+    let lib = Library::open(&root).unwrap();
+    let book = lib.load_notebook(&nb).unwrap();
+    let sheet_id = book.sheet_order()[0].clone();
+    let sheet = lib.load_sheet(&nb, &sheet_id).unwrap();
+    let p = |x: f32, y: f32| n0te_core::ink::InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+    sheet.add_stroke(n0te_core::ink::Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 }, &[p(100.0, 700.0), p(300.0, 760.0)]).unwrap();
+    lib.save_sheet(&nb, &sheet_id, &sheet).unwrap();
+    let spec = |h: &Harness| h.app.page_in_view().unwrap().1;
+    h.message(Message::RotatePage);
+    let w = h.app.size_warning.clone().expect("a warning instead of turning");
+    assert_eq!((w.what.as_str(), w.pages), ("1 Strich", 1));
+    assert_eq!(spec(&h).width, 595.0, "not turned yet");
+    h.events(&[]);
+    // Leave it: nothing changes. Then turn anyway.
+    h.message(Message::ConfirmSize(false));
+    assert!(h.app.size_warning.is_none());
+    assert_eq!(spec(&h).width, 595.0);
+    h.message(Message::RotatePage);
+    h.message(Message::ConfirmSize(true));
+    assert_eq!((spec(&h).width, spec(&h).height), (842.0, 595.0));
+    // Turning back needs no warning: everything fits again.
+    h.message(Message::RotatePage);
+    assert!(h.app.size_warning.is_none());
+    assert_eq!(spec(&h).width, 595.0);
+}

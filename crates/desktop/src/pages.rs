@@ -28,7 +28,7 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Theme, Transfo
 
 use n0te_core::ink::{self, KIND_PENCIL, Rect};
 use n0te_core::layout::{self as nl, Header, Placed};
-use n0te_core::notebook::{Background, SheetSpec};
+use n0te_core::notebook::Background;
 use n0te_core::sheet::{Stroke, TextBox};
 
 use crate::pdf::{self, Pdf};
@@ -570,7 +570,7 @@ impl Pages {
     pub fn initial_camera(&self, viewport: Size) -> Camera {
         let w = self.pages.first().map(|p| p.placed.rect.width()).unwrap_or(nl::A4_W);
         let zoom = (viewport.width * 0.8 / w).clamp(0.25, 1.0);
-        let cam = Camera { x: 0.0, y: 0.0, zoom, viewport };
+        let cam = Camera { x: 0.0, y: 0.0, zoom, viewport, origin: Point::ORIGIN };
         if self.pages.is_empty() { cam } else { self.camera_for(0, &cam) }
     }
 
@@ -622,11 +622,13 @@ pub struct Camera {
     pub y: f32,
     pub zoom: f32,
     pub viewport: Size,
+    /// Where the view sits in the window (touchpad gestures come in window coordinates).
+    pub origin: Point,
 }
 
 impl Default for Camera {
     fn default() -> Self {
-        Camera { x: 0.0, y: 0.0, zoom: 1.0, viewport: Size::ZERO }
+        Camera { x: 0.0, y: 0.0, zoom: 1.0, viewport: Size::ZERO, origin: Point::ORIGIN }
     }
 }
 
@@ -710,9 +712,10 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             Some((id, seen, published)) if id == self.pages.id && seen == self.camera => published,
             _ => self.camera,
         };
-        // Tell the app our size (first frame, resizes); it owns the camera.
-        if cam.viewport != bounds.size() {
+        // Tell the app our size and place (first frame, resizes, sidebar); it owns the camera.
+        if cam.viewport != bounds.size() || cam.origin != bounds.position() {
             let next = if cam.viewport.width <= 0.0 { self.pages.initial_camera(bounds.size()) } else { self.pages.clamp(Camera { viewport: bounds.size(), ..cam }) };
+            let next = Camera { origin: bounds.position(), ..next };
             state.pending = Some((self.pages.id, self.camera, next));
             shell.publish((self.on_camera)(next));
             return;
@@ -816,7 +819,11 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         let cam = self.camera;
         let frame_no = pages.frame.get() + 1;
         pages.frame.set(frame_no);
-        renderer.fill_quad(renderer::Quad { bounds, ..Default::default() }, theme::p().surface);
+        // Light designs: the desk is the chrome tone (pages are white, as is their surface), and
+        // each page gets a hairline, so white paper never melts into it (no shadow: the software
+        // renderer draws shadows past the view's clip).
+        let light = !theme::p().dark;
+        renderer.fill_quad(renderer::Quad { bounds, ..Default::default() }, if light { theme::p().chrome } else { theme::p().surface });
         if cam.viewport.width <= 0.0 {
             return;
         }
@@ -850,6 +857,17 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let geometry = page.background(r, lod);
                 let rect = page.rect();
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
+                if light {
+                    let edge = Rectangle::new(at, Size::new(rect.width() * cam.zoom, rect.height() * cam.zoom));
+                    r.fill_quad(
+                        renderer::Quad {
+                            bounds: edge,
+                            border: iced::Border { color: theme::p().border, width: 1.0, radius: 0.0.into() },
+                            ..Default::default()
+                        },
+                        theme::p().paper,
+                    );
+                }
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
                 });
@@ -942,24 +960,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
 impl<'a, Message: 'a> From<PageView<'a, Message>> for Element<'a, Message> {
     fn from(v: PageView<'a, Message>) -> Self {
         Element::new(v)
-    }
-}
-
-/// The sheet spec's paper as a short code (outline sidebar).
-pub fn paper_code(spec: &SheetSpec) -> &'static str {
-    if spec.is_board() {
-        return "BRD";
-    }
-    if spec.pdf.is_some() {
-        return "PDF";
-    }
-    match spec.background {
-        Background::Blank => "LEER",
-        Background::Lines => "LIN",
-        Background::Grid => "KAR",
-        Background::Dots => "PKT",
-        Background::Cornell => "COR",
-        Background::Text => "TXT",
     }
 }
 

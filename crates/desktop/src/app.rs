@@ -9,13 +9,15 @@ use std::time::{Instant, SystemTime};
 
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::{Space, button, column, container, mouse_area, pin, row, scrollable, stack, text, text_editor, text_input};
-use iced::{Alignment, Element, Length, Padding, Subscription, Task, Theme};
+use iced::{Alignment, Element, Length, Padding, Point, Subscription, Task, Theme};
 
+use n0te_core::format;
 use n0te_core::layout as nl;
 use n0te_core::notebook::{Background, Notebook, OutlineRow, SheetSpec};
 use n0te_core::sheet::Sheet;
 use n0te_core::store::Library;
 
+use crate::gestures::Gesture;
 use crate::pages::{self, Camera, Pages, SheetContent};
 use crate::pdf::{self, Pdf};
 use crate::live::{self, LiveEvent};
@@ -60,7 +62,8 @@ pub enum Message {
     StartCreate,
     NewPaper(Background),
     NewSpacing(f32),
-    NewFormat(usize),
+    /// Page size (pt) for the notebook being created (also remembered for the next).
+    NewSize(f32, f32),
     NewTitle(String),
     Create,
     CancelCreate,
@@ -157,6 +160,26 @@ pub enum Message {
     DeleteText,
     DoneText,
     Tick,
+    /// The page panel (paper and format of the page in view): open/close, paper, size, both for
+    /// every page; turn the page in view (portrait ↔ landscape).
+    ShowPage(bool),
+    PagePaper(Background),
+    PageSize(f32, f32),
+    PageToAll,
+    RotatePage,
+    /// The warning before content would be cut off: change anyway (true) or leave it.
+    ConfirmSize(bool),
+    /// A size of its own, typed in mm: the fields open/closed, width, height.
+    CustomSize(bool),
+    SizeWidth(String),
+    SizeHeight(String),
+    /// Touchpad gestures (Wayland): the window to listen on, its display, a gesture, the frame
+    /// clock while the page glides, gliding on/off.
+    WindowOpened(iced::window::Id),
+    WaylandDisplay(Option<usize>),
+    Gesture(Gesture),
+    Glide(Instant),
+    Momentum(bool),
 }
 
 /// The text box being edited: its sheet stays open while typing.
@@ -199,6 +222,20 @@ pub struct TextPage {
 
 pub fn editor_id() -> iced::widget::Id {
     iced::widget::Id::new("n0te-text-box")
+}
+
+/// A page size change held back because content would stick out: the sheets (nodes), the new
+/// size, what sticks out ("3 Striche und 1 Bild", how many objects, on how many pages), and the
+/// line to show once it's done.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SizeWarning {
+    pub nodes: Vec<String>,
+    pub w: f32,
+    pub h: f32,
+    pub what: String,
+    pub count: usize,
+    pub pages: usize,
+    pub done: Option<String>,
 }
 
 /// What to export as PDF.
@@ -285,10 +322,19 @@ pub struct App {
     pub screen: Screen,
     pub status: Option<String>,
     pub creating: Option<String>,
-    /// Paper, spacing (pt) and format (index into [`FORMATS`]) of the notebook being created.
+    /// Paper and spacing (pt) of the notebook being created; its size is in the settings.
     pub new_paper: Background,
     pub new_spacing: f32,
-    pub new_format: usize,
+    /// Page panel open.
+    pub page_panel: bool,
+    /// A size of its own being typed (mm): Some while those fields are open.
+    pub size_text: Option<(String, String)>,
+    /// Touchpad: a pinch under way (zoom at its start, the fingers' centre in the view), and the
+    /// page gliding after a swipe (velocity px/s, last frame).
+    pub pinch: Option<(f32, Point)>,
+    /// A size change that would cut content off, waiting for "Trotzdem ändern".
+    pub size_warning: Option<SizeWarning>,
+    pub glide: Option<(f32, f32, Instant)>,
     pub show_imports: bool,
     pub sidebar: bool,
 }
@@ -385,7 +431,11 @@ impl App {
             creating: None,
             new_paper: Background::Grid,
             new_spacing: 17.0,
-            new_format: 0,
+            page_panel: false,
+            size_text: None,
+            pinch: None,
+            glide: None,
+            size_warning: None,
             show_imports: false,
             sidebar: true,
         };
@@ -400,7 +450,10 @@ impl App {
         app.offline = false;
         app.connect_sync();
         let task = import.map(|p| Task::done(Message::Import(p))).unwrap_or_else(Task::none);
-        (app, task)
+        // Touchpad gestures listen on the main window's Wayland display (its "opened" event
+        // comes before subscriptions run).
+        let gestures = iced::window::latest().and_then(|id| iced::window::run(id, crate::gestures::wayland_display)).map(Message::WaylandDisplay);
+        (app, Task::batch([task, gestures]))
     }
 
     pub fn theme(&self) -> Theme {
@@ -423,8 +476,13 @@ impl App {
             live::subscription().map(Message::Live),
             iced::event::listen_with(|e, _, _| match e {
                 iced::Event::Window(iced::window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
+                // A click catches a gliding page.
+                iced::Event::Mouse(iced::mouse::Event::ButtonPressed(_)) => Some(Message::Gesture(Gesture::Touch)),
                 _ => None,
             }),
+            iced::window::open_events().map(Message::WindowOpened),
+            crate::gestures::subscription().map(Message::Gesture),
+            if self.glide.is_some() { iced::window::frames().map(Message::Glide) } else { Subscription::none() },
         ])
     }
 
@@ -585,14 +643,24 @@ impl App {
                 }
             }
             Message::NewSpacing(v) => self.new_spacing = v,
-            Message::NewFormat(i) => self.new_format = i.min(FORMATS.len() - 1),
+            Message::NewSize(w, h) => {
+                self.settings.new_w = w;
+                self.settings.new_h = h;
+                self.size_text = None;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+            }
             Message::NewTitle(t) => self.creating = Some(t),
-            Message::CancelCreate => self.creating = None,
+            Message::CancelCreate => {
+                self.creating = None;
+                self.size_text = None;
+            }
             Message::Create => {
                 let title = self.creating.take().unwrap_or_default();
                 let title = if title.trim().is_empty() { "Neues Notizbuch".to_string() } else { title.trim().to_string() };
                 let made = self.lib.create_notebook(&title).and_then(|nb| {
-                    let (_, w, h) = FORMATS[self.new_format];
+                    let (w, h) = (self.settings.new_w, self.settings.new_h);
                     nb.add_sheet(None, 0, &SheetSpec { width: w, height: h, background: self.new_paper, spacing: self.new_spacing, pdf: None })?;
                     self.lib.save_notebook(&nb)?;
                     Ok(nb.id())
@@ -606,6 +674,96 @@ impl App {
                 }
             }
             Message::DismissStatus => self.status = None,
+            Message::ShowPage(on) => {
+                self.page_panel = on;
+                self.size_text = None;
+                if on {
+                    self.share = None;
+                    self.history = None;
+                    self.show_pdf_import = false;
+                }
+            }
+            Message::PagePaper(b) => {
+                if let Some((node, spec)) = self.page_in_view() {
+                    let spacing = if spec.background == b && spec.spacing >= 4.0 { spec.spacing } else { default_spacing(b) };
+                    self.edit_notebook(|nb| nb.set_paper(&node, b, spacing));
+                }
+            }
+            Message::PageSize(w, h) => {
+                self.size_text = None;
+                if let Some((node, _)) = self.page_in_view() {
+                    self.resize(vec![node], w, h, None);
+                }
+            }
+            Message::RotatePage => match self.page_in_view() {
+                Some((node, spec)) if spec.pdf.is_none() && !spec.is_board() => {
+                    let (w, h) = format::oriented(spec.width, spec.height, spec.width <= spec.height);
+                    self.resize(vec![node], w, h, Some(format!("Seite gedreht: {}", format::describe(w, h))));
+                }
+                Some(_) => self.say("PDF-Seiten und Boards lassen sich nicht drehen"),
+                None => {}
+            },
+            Message::PageToAll => {
+                if let (Some((_, spec)), Screen::Notebook(o)) = (self.page_in_view(), &self.screen) {
+                    let sheets = plain_sheets(&o.nb);
+                    let nodes: Vec<String> = sheets.iter().map(|(n, _)| n.clone()).collect();
+                    // Paper first (nothing is cut off by it); the size may need a warning.
+                    if spec.background != Background::Text {
+                        self.edit_notebook(|nb| {
+                            for (node, s) in &sheets {
+                                // A text page keeps being one, and a text page passes on its size only.
+                                if s.background != Background::Text {
+                                    nb.set_paper(node, spec.background, spec.spacing)?;
+                                }
+                            }
+                            Ok(())
+                        });
+                    }
+                    let done = format!("{} für {} Seiten übernommen", format::describe(spec.width, spec.height), nodes.len());
+                    self.resize(nodes, spec.width, spec.height, Some(done));
+                }
+            }
+            Message::ConfirmSize(go) => {
+                if let Some(w) = self.size_warning.take()
+                    && go
+                {
+                    self.apply_size(&w.nodes, w.w, w.h, w.done);
+                }
+            }
+            Message::CustomSize(open) => {
+                self.size_text = open.then(|| {
+                    let (w, h) = match (&self.screen, self.page_in_view()) {
+                        (Screen::Notebook(_), Some((_, s))) if self.page_panel => (s.width, s.height),
+                        _ => (self.settings.new_w, self.settings.new_h),
+                    };
+                    (format!("{:.0}", format::pt_to_mm(w)), format!("{:.0}", format::pt_to_mm(h)))
+                });
+            }
+            Message::SizeWidth(t) => {
+                if let Some((w, _)) = &mut self.size_text {
+                    *w = t;
+                }
+            }
+            Message::SizeHeight(t) => {
+                if let Some((_, h)) = &mut self.size_text {
+                    *h = t;
+                }
+            }
+            Message::WindowOpened(id) => return iced::window::run(id, crate::gestures::wayland_display).map(Message::WaylandDisplay),
+            Message::WaylandDisplay(display) => {
+                if let Some(d) = display {
+                    crate::gestures::start(d);
+                }
+            }
+            Message::Gesture(g) => return self.gesture(g),
+            Message::Glide(now) => return self.glide_step(now),
+            Message::Momentum(on) => {
+                self.settings.momentum = on;
+                self.glide = None;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+            }
             Message::TileReady => {}
             Message::FileDropped(p) => {
                 let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
@@ -1444,6 +1602,8 @@ impl App {
             Command::History => self.update(Message::ShowHistory(true)),
             Command::Share => self.update(Message::ShowShare(true)),
             Command::Live => self.update(Message::StartLive),
+            Command::RotatePage => self.update(Message::RotatePage),
+            Command::PageSetup => self.update(Message::ShowPage(true)),
         }
     }
 
@@ -1647,6 +1807,178 @@ impl App {
             Screen::Notebook(o) => Some(o.id.clone()),
             Screen::Library => None,
         }
+    }
+
+    /// The main page in the middle of the view: its node and spec.
+    pub fn page_in_view(&self) -> Option<(String, SheetSpec)> {
+        let Screen::Notebook(o) = &self.screen else { return None };
+        let i = o.pages.index_of_number(o.pages.current_number(&o.camera))?;
+        let p = &o.pages.pages[i].placed;
+        Some((p.node.clone(), p.spec.clone()))
+    }
+
+    /// The open notebook is someone else's and we may only read it.
+    pub fn read_only(&self) -> bool {
+        let Some(id) = self.notebook_id() else { return false };
+        self.joined.iter().any(|j| j.notebook == id && !j.write)
+    }
+
+    /// Changes the open notebook, saves it and lays the pages out again.
+    fn edit_notebook(&mut self, f: impl FnOnce(&Notebook) -> n0te_core::Result<()>) {
+        if self.read_only() {
+            self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
+            return;
+        }
+        let lib = self.lib.clone();
+        let layout = self.settings.layout();
+        let Screen::Notebook(o) = &mut self.screen else { return };
+        let done = f(&o.nb);
+        let _ = lib.save_notebook(&o.nb);
+        o.rows = o.nb.outline(false);
+        o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
+        o.camera = o.pages.clamp(o.camera);
+        if let Err(e) = done {
+            self.say(format!("Nicht geändert: {e}"));
+        }
+    }
+
+    /// Gives `nodes` the size `w` × `h`; first asks when strokes, images or text would end up past
+    /// the edge (they stay stored, but are cut off on screen and in the PDF).
+    fn resize(&mut self, nodes: Vec<String>, w: f32, h: f32, done: Option<String>) {
+        if self.read_only() {
+            self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
+            return;
+        }
+        let Screen::Notebook(o) = &self.screen else { return };
+        let mut sheet_of = std::collections::HashMap::new();
+        for row in o.nb.outline(true) {
+            if let OutlineRow::Sheet { node, sheet_id, left, right, .. } = row {
+                sheet_of.insert(node, sheet_id);
+                sheet_of.extend(left.into_iter().chain(right).map(|s| (s.node, s.sheet_id)));
+            }
+        }
+        let mut total = n0te_core::sheet::Outside::default();
+        let mut pages = 0;
+        for n in &nodes {
+            let Some(sheet) = sheet_of.get(n).and_then(|sid| self.lib.load_sheet(&o.id, sid).ok()) else { continue };
+            let out = sheet.outside(w, h);
+            if !out.is_empty() {
+                pages += 1;
+                total.add(out);
+            }
+        }
+        if total.is_empty() {
+            self.apply_size(&nodes, w, h, done);
+        } else {
+            self.size_warning = Some(SizeWarning { nodes, w, h, what: total.describe(), count: total.strokes + total.images + total.texts, pages, done });
+        }
+    }
+
+    fn apply_size(&mut self, nodes: &[String], w: f32, h: f32, done: Option<String>) {
+        self.edit_notebook(|nb| {
+            for n in nodes {
+                nb.set_size(n, w, h)?;
+            }
+            Ok(())
+        });
+        if let Some(d) = done {
+            self.say(d);
+        }
+    }
+
+    /// The warning before a size change cuts content off.
+    fn size_warning_view<'a>(&'a self, w: &'a SizeWarning) -> Element<'a, Message> {
+        let one = w.count == 1;
+        let where_ = if w.pages > 1 { format!(" (auf {} Seiten)", w.pages) } else { String::new() };
+        let col = column![
+            theme::heading("Nicht alles passt auf die Seite", 20.0),
+            text(format!(
+                "{} {} dann über den Rand{where_} und {} abgeschnitten, auch im PDF.",
+                w.what,
+                if one { "ragt" } else { "ragen" },
+                if one { "wird" } else { "werden" }
+            ))
+            .size(15),
+            text("Gelöscht wird nichts: wird die Seite wieder größer, ist alles wieder da.").size(13).color(theme::p().muted),
+            row![
+                Space::new().width(Length::Fill),
+                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::ConfirmSize(false)).style(theme::ghost),
+                Space::new().width(8),
+                button(theme::btn("Trotzdem ändern")).padding(theme::pad()).on_press(Message::ConfirmSize(true)).style(theme::accent_button),
+            ]
+            .align_y(Alignment::Center),
+        ]
+        .spacing(12);
+        container(container(col).padding(24).width(Length::Fixed(520.0)).style(theme::panel)).padding(Padding { top: 120.0, ..Padding::ZERO }).center_x(Length::Fill).into()
+    }
+
+    /// A touchpad gesture: a pinch zooms around the fingers (and pans as they move), a swipe
+    /// that ends in motion lets the page glide on, fingers on the touchpad catch it.
+    fn gesture(&mut self, g: Gesture) -> Task<Message> {
+        let Screen::Notebook(o) = &self.screen else {
+            self.pinch = None;
+            self.glide = None;
+            return Task::none();
+        };
+        let c = o.camera;
+        match g {
+            Gesture::PinchBegin { x, y } => {
+                self.glide = None;
+                let p = Point::new(x - c.origin.x, y - c.origin.y);
+                // Only over the pages (not the sidebar, the bars or a panel).
+                let over = p.x >= 0.0 && p.y >= 0.0 && p.x <= c.viewport.width && p.y <= c.viewport.height;
+                let panel = self.page_panel || self.share.is_some() || self.history.is_some() || self.export.is_some() || self.show_settings;
+                self.pinch = (over && !panel).then_some((c.zoom, p));
+                Task::none()
+            }
+            Gesture::Pinch { scale, dx, dy } => {
+                let Some((z0, p)) = self.pinch else { return Task::none() };
+                // The page point under the fingers stays under them while they move and spread.
+                let anchor = Point::new(c.x + p.x / c.zoom, c.y + p.y / c.zoom);
+                let p = Point::new(p.x + dx, p.y + dy);
+                self.pinch = Some((z0, p));
+                let zoom = (z0 * scale).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
+                let next = o.pages.clamp(Camera { x: anchor.x - p.x / zoom, y: anchor.y - p.y / zoom, zoom, ..c });
+                self.update(Message::Camera(next))
+            }
+            Gesture::PinchEnd => {
+                self.pinch = None;
+                Task::none()
+            }
+            Gesture::Fling { vx, vy } => {
+                if self.settings.momentum && self.pinch.is_none() {
+                    self.glide = Some((vx, vy, Instant::now()));
+                }
+                Task::none()
+            }
+            Gesture::Touch => {
+                self.glide = None;
+                Task::none()
+            }
+        }
+    }
+
+    /// One frame of a gliding page: it slows down like on paper (time constant 0.35 s) and stops
+    /// at the notebook's edge.
+    fn glide_step(&mut self, now: Instant) -> Task<Message> {
+        let Some((vx, vy, last)) = self.glide else { return Task::none() };
+        let Screen::Notebook(o) = &self.screen else {
+            self.glide = None;
+            return Task::none();
+        };
+        let dt = now.saturating_duration_since(last).as_secs_f32().min(0.05);
+        let c = o.camera;
+        let want = Camera { x: c.x + vx * dt / c.zoom, y: c.y + vy * dt / c.zoom, ..c };
+        let next = o.pages.clamp(want);
+        let decay = (-dt / 0.35).exp();
+        // An axis that hit the edge stops; the other glides on.
+        let vx = if (next.x - want.x).abs() > 0.01 { 0.0 } else { vx * decay };
+        let vy = if (next.y - want.y).abs() > 0.01 { 0.0 } else { vy * decay };
+        self.glide = (vx.hypot(vy) > 20.0).then_some((vx, vy, now));
+        if next == c {
+            return Task::none();
+        }
+        self.update(Message::Camera(next))
     }
 
     /// Writes a sheet and makes the canvas read it again.
@@ -1873,6 +2205,13 @@ impl App {
                 _ => Task::none(),
             };
         }
+        if self.size_warning.is_some() {
+            return match key.as_ref() {
+                Key::Named(Named::Escape) => self.update(Message::ConfirmSize(false)),
+                Key::Named(Named::Enter) => self.update(Message::ConfirmSize(true)),
+                _ => Task::none(),
+            };
+        }
         if self.show_help || self.show_settings {
             if let Key::Named(Named::Escape | Named::F1) = key.as_ref() {
                 self.show_help = false;
@@ -1934,6 +2273,7 @@ impl App {
                 Key::Character("m") => self.update(Message::ToggleNotes),
                 Key::Character("e") => self.update(Message::ShowExport(true)),
                 Key::Character("h") => self.update(Message::ShowHistory(true)),
+                Key::Character("r") => self.update(Message::RotatePage),
                 Key::Character("t") => {
                     // A text box in the middle of the view, on the page there.
                     let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 3.0);
@@ -1966,7 +2306,9 @@ impl App {
             Screen::Library => library::view(self),
             Screen::Notebook(o) => self.notebook_view(o),
         };
-        let overlay: Option<Element<'_, Message>> = if let Some((q, sel)) = &self.palette {
+        let overlay: Option<Element<'_, Message>> = if let Some(w) = &self.size_warning {
+            Some(self.size_warning_view(w))
+        } else if let Some((q, sel)) = &self.palette {
             Some(palette::view(q, &self.palette_items(), *sel))
         } else if self.show_help {
             Some(self.help_view())
@@ -2196,7 +2538,9 @@ impl App {
             ("Bild ↑ / ↓, ← / →", "Vorige / nächste Seite"),
             ("Pos1 / Ende", "Erste / letzte Seite"),
             ("Mausrad · Ziehen", "Verschieben"),
+            ("Touchpad: zwei Finger", "Verschieben, auseinander / zusammen: zoomen"),
             ("Strg + Mausrad, Strg + / −", "Zoomen, Strg 0: 100 %"),
+            ("Strg R", "Seite drehen (hoch ↔ quer)"),
             ("Doppelklick · Strg T", "Textfeld"),
             ("Strg N", "Neue Textseite (Bibliothek: neues Notizbuch)"),
             ("Strg M", "Notizen neben der Seite"),
@@ -2298,7 +2642,7 @@ impl App {
             row![
                 text(label).size(14).width(Length::Fixed(170.0)),
                 iced::widget::slider(4.0..=160.0, v, f).style(theme::slider_style).width(Length::Fill),
-                text(format!("{v:.0} pt")).font(theme::MONO).size(12).width(Length::Fixed(56.0)).align_x(iced::alignment::Horizontal::Right),
+                text(format!("{:.0} mm", v * 0.3528)).font(theme::meta_font()).size(12).width(Length::Fixed(56.0)).align_x(iced::alignment::Horizontal::Right),
             ]
             .spacing(12)
             .align_y(Alignment::Center)
@@ -2309,6 +2653,19 @@ impl App {
             section("Design", "Farben, Formen und Schrift. Exportierte PDFs bleiben weiß.", designs.into()),
             rule(),
             section("Abstände", "Zwischen den Seiten im Notizbuch.", column![slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap), slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap)].spacing(8).into()),
+            rule(),
+            section(
+                "Touchpad",
+                "Zwei Finger verschieben, auseinander und zusammen zoomt.",
+                iced::widget::toggler(self.settings.momentum)
+                    .label("Schwung: die Seite gleitet nach dem Wischen weiter (Finger auflegen hält sie an)")
+                    .on_toggle(Message::Momentum)
+                    .size(20)
+                    .text_size(14)
+                    .spacing(12)
+                    .style(theme::switch)
+                    .into(),
+            ),
             rule(),
             section(
                 "Text",
@@ -2345,6 +2702,8 @@ impl App {
             Some(self.share_panel(invites))
         } else if self.show_pdf_import {
             Some(library::pdf_panel(&self.pdfs, "PDF einfügen: nach der aktuellen Seite"))
+        } else if self.page_panel {
+            Some(self.page_panel_view(o))
         } else {
             None
         };
@@ -2394,16 +2753,20 @@ impl App {
     }
 
     fn top_bar<'a>(&'a self, o: &'a Open, current: u32) -> Element<'a, Message> {
-        let chip = |s: String| container(text(s).font(theme::MONO).size(theme::LABEL)).padding([3, 10]).style(theme::chip);
+        let chip = |s: String| container(text(s).font(theme::meta_font()).size(theme::SMALL)).padding([3, 10]).style(theme::chip);
         container(
             row![
                 button(theme::btn("‹ Bibliothek")).padding(theme::pad()).on_press(Message::Back).style(theme::ghost),
                 Space::new().width(18),
-                text(o.nb.title().to_uppercase()).font(theme::MONO).size(theme::SMALL).color(theme::p().text),
+                text(theme::cased(&o.nb.title())).font(theme::title_font()).size(14).color(theme::p().text),
                 Space::new().width(Length::Fill),
                 chip(format!("{:>3.0} %", o.camera.zoom * 100.0)),
                 Space::new().width(8),
-                chip(format!("{current:02} / {:02}", o.pages.total_pages)),
+                // The page number opens the page's paper and format (like on the tablet).
+                button(text(format!("{current} / {}", o.pages.total_pages)).font(theme::meta_font()).size(theme::SMALL))
+                    .padding([3, 10])
+                    .on_press(Message::ShowPage(!self.page_panel))
+                    .style(theme::tab(self.page_panel)),
                 Space::new().width(14),
                 button(theme::btn("+ Textseite")).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
                 Space::new().width(6),
@@ -2449,7 +2812,7 @@ impl App {
     pub fn status_bar(&self) -> Element<'_, Message> {
         let left: Element<'_, Message> = match &self.status {
             Some(s) => row![
-                text(s.as_str()).font(theme::MONO).size(10.5).color(theme::p().text),
+                text(s.as_str()).font(theme::meta_font()).size(12).color(theme::p().text),
                 Space::new().width(10),
                 match &self.last_export {
                     Some(p) => Element::from(button(theme::btn_small("Öffnen")).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
@@ -2460,9 +2823,9 @@ impl App {
             ]
             .align_y(Alignment::Center)
             .into(),
-            None => text("STRG K BEFEHLE · F1 TASTENKÜRZEL · ESC ZURÜCK · BILD↑↓ SEITEN · STRG +/− ZOOM").font(theme::MONO).size(10.5).color(theme::p().muted).into(),
+            None => text(theme::cased("Strg K: Befehle · F1: Tastenkürzel")).font(theme::meta_font()).size(11.5).color(theme::p().muted).into(),
         };
-        container(row![left, Space::new().width(Length::Fill), text(format!("N0TE {}", env!("CARGO_PKG_VERSION"))).font(theme::MONO).size(10.5).color(theme::p().muted)].align_y(Alignment::Center))
+        container(row![left, Space::new().width(Length::Fill)].align_y(Alignment::Center))
             .padding([4, 14])
             .height(26)
             .width(Length::Fill)
@@ -2477,10 +2840,6 @@ impl App {
         let mut papers = row![].spacing(6);
         for (b, label) in [(Background::Blank, "Leer"), (Background::Lines, "Linien"), (Background::Grid, "Kästchen"), (Background::Dots, "Punkte"), (Background::Cornell, "Cornell")] {
             papers = papers.push(choice(label, self.new_paper == b, Message::NewPaper(b)));
-        }
-        let mut formats = row![].spacing(6);
-        for (i, (label, _, _)) in FORMATS.iter().enumerate() {
-            formats = formats.push(choice(label, self.new_format == i, Message::NewFormat(i)));
         }
         let label = |s: &str| container(theme::caption(s)).width(Length::Fixed(130.0));
         let mut col = column![
@@ -2515,14 +2874,106 @@ impl App {
                     iced::widget::slider(8.0..=40.0, self.new_spacing, Message::NewSpacing).step(0.5_f32).style(theme::slider_style).width(Length::Fixed(220.0)),
                     Space::new().width(12),
                     // 1 pt = 0.3528 mm: what you'd measure on paper.
-                    text(format!("{:.0} pt · {:.1} mm", self.new_spacing, self.new_spacing * 0.3528)).font(theme::MONO).size(12).width(Length::Fixed(120.0)),
+                    text(format!("{:.1} mm", self.new_spacing * 0.3528).replace('.', ",")).font(theme::meta_font()).size(12).width(Length::Fixed(70.0)),
                     quick,
                 ]
                 .align_y(Alignment::Center),
             );
         }
-        col = col.push(row![label("Format"), formats].align_y(Alignment::Center));
+        col = col.push(row![label("Format"), self.format_picker(self.settings.new_w, self.settings.new_h, Message::NewSize)].align_y(Alignment::Start));
         Some(container(col).padding(20).width(Length::Fill).max_width(960).style(theme::panel).into())
+    }
+
+    /// Picks a page size: upright or landscape, a format (A4, A5, …), or a size of its own in mm
+    /// (typed, then applied: "2" on the way to "210" must not resize the page). `on` gets points.
+    fn format_picker<'a>(&'a self, w: f32, h: f32, on: fn(f32, f32) -> Message) -> Element<'a, Message> {
+        let choice = |label: &str, active: bool, m: Option<Message>| button(theme::btn_small(label)).padding(theme::pad()).on_press_maybe(m).style(theme::tab(active));
+        let landscape = w > h;
+        let square = (w - h).abs() < 1.0;
+        let found = format::find(w, h).map(|(f, _)| f.id);
+        let upright = format::oriented(w, h, false);
+        let turned = format::oriented(w, h, true);
+        let mut turns = row![
+            choice("Hoch", !landscape, (!square && landscape).then(|| on(upright.0, upright.1))),
+            choice("Quer", landscape, (!square && !landscape).then(|| on(turned.0, turned.1))),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center);
+        turns = turns.push(Space::new().width(10));
+        turns = turns.push(text(format!("{:.0} × {:.0} mm", format::pt_to_mm(w), format::pt_to_mm(h))).font(theme::meta_font()).size(12).color(theme::p().muted));
+        let mut names = row![].spacing(6);
+        for f in format::FORMATS {
+            // A slide lies in landscape by nature; the others keep the page's way round.
+            let (a, b) = format::oriented(f.width, f.height, f.id == "slide" || landscape);
+            names = names.push(choice(f.name, self.size_text.is_none() && found == Some(f.id), Some(on(a, b))));
+        }
+        let custom = self.size_text.is_some() || found.is_none();
+        names = names.push(choice("Eigene …", custom, Some(Message::CustomSize(self.size_text.is_none()))));
+        let mut col = column![turns, names].spacing(8);
+        if let Some((tw, th)) = &self.size_text {
+            let mm = |t: &str| t.trim().replace(',', ".").parse::<f32>().ok().filter(|v| (25.4..=1400.0).contains(v));
+            let apply = match (mm(tw), mm(th)) {
+                (Some(a), Some(b)) => Some(on(format::mm_to_pt(a), format::mm_to_pt(b))),
+                _ => None,
+            };
+            let ok = apply.is_some();
+            col = col.push(
+                row![
+                    text_input("Breite", tw).on_input(Message::SizeWidth).padding(8).size(14).width(Length::Fixed(90.0)).style(theme::field),
+                    text("×").size(14).color(theme::p().muted),
+                    text_input("Höhe", th).on_input(Message::SizeHeight).padding(8).size(14).width(Length::Fixed(90.0)).style(theme::field),
+                    text("mm").size(13).color(theme::p().muted),
+                    Space::new().width(6),
+                    button(theme::btn_small("Übernehmen")).padding(theme::pad()).on_press_maybe(apply).style(theme::secondary),
+                    Space::new().width(10),
+                    text(if ok { "" } else { "Jede Seite zwischen 25 mm und 1,4 m" }).size(12).color(theme::p().muted),
+                ]
+                .spacing(8)
+                .align_y(Alignment::Center),
+            );
+        }
+        col.into()
+    }
+
+    /// Paper and format of the page in view; "für alle" passes both on to every page.
+    fn page_panel_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
+        let current = o.pages.current_number(&o.camera);
+        let head = row![
+            theme::heading(&format!("Seite {current}"), 20.0),
+            Space::new().width(Length::Fill),
+            button(theme::btn_small("Schließen")).padding(theme::pad()).on_press(Message::ShowPage(false)).style(theme::ghost),
+        ]
+        .align_y(Alignment::Center);
+        let label = |s: &str| container(theme::caption(s)).width(Length::Fixed(110.0));
+        let note = |s: String| text(s).size(13).color(theme::p().muted);
+        let mut col = column![head].spacing(14);
+        match self.page_in_view() {
+            None => {}
+            Some(_) if self.read_only() => col = col.push(note("Nur lesen: Papier und Format ändert, wer dich eingeladen hat.".into())),
+            Some((_, spec)) if spec.pdf.is_some() => col = col.push(note(format!("PDF-Seite: Hintergrund und Format ({}) kommen aus der PDF.", format::describe(spec.width, spec.height)))),
+            Some((_, spec)) if spec.is_board() => col = col.push(note("Ein Board ist unendlich groß, mit Punktraster.".into())),
+            Some((_, spec)) => {
+                let text_page = spec.background == Background::Text;
+                if !text_page {
+                    let mut papers = row![].spacing(6);
+                    for (b, l) in [(Background::Blank, "Leer"), (Background::Lines, "Linien"), (Background::Grid, "Kästchen"), (Background::Dots, "Punkte"), (Background::Cornell, "Cornell")] {
+                        papers = papers.push(button(theme::btn_small(l)).padding(theme::pad()).on_press(Message::PagePaper(b)).style(theme::tab(spec.background == b)));
+                    }
+                    col = col.push(row![label("Papier"), papers].align_y(Alignment::Center));
+                }
+                col = col.push(row![label("Format"), self.format_picker(spec.width, spec.height, Message::PageSize)].align_y(Alignment::Start));
+                col = col.push(
+                    row![
+                        Space::new().width(110),
+                        button(theme::btn_small("Für alle Seiten übernehmen")).padding(theme::pad()).on_press(Message::PageToAll).style(theme::secondary),
+                        Space::new().width(10),
+                        note(if text_page { "Dieses Format für jede Seite (keine PDF-Seiten)".into() } else { "Papier und Format für jede Seite (keine PDF-Seiten)".into() }),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+            }
+        }
+        container(col).padding(20).width(Length::Fill).max_width(820).style(theme::panel).into()
     }
 
     pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
@@ -2530,8 +2981,18 @@ impl App {
     }
 }
 
-/// Page formats for a new notebook: name, width, height (pt).
-pub const FORMATS: [(&str, f32, f32); 4] = [("A4 hoch", 595.0, 842.0), ("A4 quer", 842.0, 595.0), ("A5 hoch", 420.0, 595.0), ("Letter", 612.0, 792.0)];
+/// Every plain page of a notebook (main and side sheets; no PDF pages, no boards): (node, spec).
+fn plain_sheets(nb: &Notebook) -> Vec<(String, SheetSpec)> {
+    let mut out = Vec::new();
+    for row in nb.outline(true) {
+        if let OutlineRow::Sheet { node, spec, left, right, .. } = row {
+            out.push((node, spec));
+            out.extend(left.into_iter().chain(right).map(|s| (s.node, s.spec)));
+        }
+    }
+    out.retain(|(_, s)| s.pdf.is_none() && !s.is_board());
+    out
+}
 
 /// The usual spacing of a paper (pt): 6 mm boxes, 7.8 mm lines, 7 mm dots.
 fn default_spacing(b: Background) -> f32 {

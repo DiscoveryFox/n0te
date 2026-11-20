@@ -1,5 +1,5 @@
 //! Headless screenshots of the screens outside the editor in every design (never opens a
-//! window): library, settings, export, sharing.
+//! window): library, settings, export, the page panel, a turned page.
 //!
 //!   cargo run --profile fast -p n0te-desktop --example styles -- <out-dir> [theme ids…]
 
@@ -52,6 +52,18 @@ fn main() {
         h.events(&[]);
         h.screenshot(out.join(format!("{}-3-export.png", t.id)));
         h.message(Message::ShowExport(false));
+        // The page panel, with a size of its own being typed; then the page turned.
+        h.message(Message::ShowPage(true));
+        h.events(&[]);
+        h.screenshot(out.join(format!("{}-4-page.png", t.id)));
+        h.message(Message::CustomSize(true));
+        h.events(&[]);
+        h.screenshot(out.join(format!("{}-4b-custom.png", t.id)));
+        h.message(Message::ShowPage(false));
+        h.message(Message::RotatePage);
+        h.events(&[]);
+        h.screenshot(out.join(format!("{}-5-turned.png", t.id)));
+        h.message(Message::RotatePage);
     }
     let _ = std::fs::remove_dir_all(root);
 }

@@ -29,6 +29,9 @@ pub enum Command {
     History,
     Share,
     Live,
+    /// The page in view: turn it (portrait ↔ landscape); its paper and format.
+    RotatePage,
+    PageSetup,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +63,8 @@ pub fn items(app: &App) -> Vec<Item> {
             v.push(item("Notizen neben der Seite", "Strg M", Command::Notes));
             v.push(item("Textfeld", "Strg T · oder Doppelklick auf die Seite", Command::NewTextBox));
             v.push(item("PDF einfügen", "Strg O · nach der aktuellen Seite", Command::InsertPdf));
+            v.push(item("Seite drehen", "Strg R · hoch ↔ quer", Command::RotatePage));
+            v.push(item("Papier und Format der Seite", "A4, A5, eigene Größe · oder oben auf die Seitenzahl", Command::PageSetup));
             v.push(item("PDF exportieren", "Strg E", Command::Export));
             v.push(item("An das Tablet senden", "über n0bridge (.n0te)", Command::SendToTablet));
             v.push(item("Live mit dem Tablet", "es öffnet das Notizbuch, Folgen, Laserpointer", Command::Live));

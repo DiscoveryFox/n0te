@@ -329,6 +329,29 @@ impl Notebook {
         Ok(())
     }
 
+    /// Changes a sheet's size (turned to landscape, A5, a size of its own). What is on the page
+    /// keeps its place (page points from the top-left corner), so turning it back brings
+    /// everything back where it was. PDF pages keep the PDF's size and boards stay infinite.
+    pub fn set_size(&self, node: &str, width: f32, height: f32) -> Result<()> {
+        let id = self.node(node)?;
+        if self.kind(id) != "sheet" {
+            return Err(Error::Invalid("only sheets have a size".into()));
+        }
+        let spec = self.spec(id);
+        if spec.pdf.is_some() || spec.is_board() {
+            return Err(Error::Invalid("PDF pages and boards keep their size".into()));
+        }
+        let ok = |v: f32| v.is_finite() && (crate::format::MIN_PT..=crate::format::MAX_PT).contains(&v);
+        if !ok(width) || !ok(height) {
+            return Err(Error::Invalid(format!("page size {width}×{height} pt is out of range")));
+        }
+        let m = self.tree.get_meta(id)?;
+        m.insert(K_W, width as f64)?;
+        m.insert(K_H, height as f64)?;
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Deletes a node with everything under it (a sheet takes its side sheets along).
     pub fn delete(&self, node: &str) -> Result<()> {
         let id = self.node(node)?;
@@ -552,6 +575,29 @@ mod tests {
                 OutlineRow::Sheet { depth, left, right, .. } => format!("{}S[{}|{}]", "  ".repeat(depth as usize), left.len(), right.len()),
             })
             .collect()
+    }
+
+    #[test]
+    fn a_page_turns_to_landscape_or_takes_any_size_but_pdf_pages_and_boards_keep_theirs() {
+        let nb = Notebook::create(1, "Formate").unwrap();
+        let (s1, _) = nb.add_sheet(None, 0, &SheetSpec::a4(Background::Grid)).unwrap();
+        let (side, _) = nb.add_side_sheet(&s1, Side::Right, 0, &SheetSpec::a4(Background::Blank)).unwrap();
+        nb.set_size(&s1, 842.0, 595.0).unwrap();
+        nb.set_size(&side, 300.0, 400.0).unwrap();
+        let specs: Vec<_> = nb.sheet_specs().into_values().map(|s| (s.width, s.height, s.background)).collect();
+        assert!(specs.contains(&(842.0, 595.0, Background::Grid)), "paper stays: {specs:?}");
+        assert!(specs.contains(&(300.0, 400.0, Background::Blank)));
+        assert!(nb.set_size(&s1, 10.0, 595.0).is_err(), "too small");
+        assert!(nb.set_size(&s1, f32::NAN, 595.0).is_err());
+        let (pdf, _) = nb.add_sheet(None, 1, &SheetSpec { pdf: Some(("b".repeat(64), 0)), ..SheetSpec::a4(Background::Blank) }).unwrap();
+        let (board, _) = nb.add_sheet(None, 2, &SheetSpec::board()).unwrap();
+        assert!(nb.set_size(&pdf, 842.0, 595.0).is_err());
+        assert!(nb.set_size(&board, 842.0, 595.0).is_err());
+        let g = nb.add_group(None, 3, "G").unwrap();
+        assert!(nb.set_size(&g, 842.0, 595.0).is_err());
+        // It syncs like every other change.
+        let other = Notebook::load(2, &nb.snapshot().unwrap()).unwrap();
+        assert!(other.sheet_specs().values().any(|s| (s.width, s.height) == (842.0, 595.0)));
     }
 
     #[test]

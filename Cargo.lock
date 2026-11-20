@@ -3799,7 +3799,11 @@ dependencies = [
  "n0te-core",
  "n0te-pdf",
  "png 0.18.1",
+ "raw-window-handle",
  "serde_json",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
 ]
 
 [[package]]

@@ -46,6 +46,39 @@ pub struct TextBox {
     pub text: String,
 }
 
+/// What sticks out of a page of a given size ([`Sheet::outside`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Outside {
+    pub strokes: usize,
+    pub images: usize,
+    pub texts: usize,
+}
+
+impl Outside {
+    pub fn is_empty(&self) -> bool {
+        self.strokes + self.images + self.texts == 0
+    }
+    pub fn add(&mut self, o: Outside) {
+        self.strokes += o.strokes;
+        self.images += o.images;
+        self.texts += o.texts;
+    }
+    /// "3 Striche, 1 Bild und 2 Textfelder" (empty when nothing sticks out).
+    pub fn describe(&self) -> String {
+        let n = |k: usize, one: &str, many: &str| match k {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            k => Some(format!("{k} {many}")),
+        };
+        let parts: Vec<String> = [n(self.strokes, "Strich", "Striche"), n(self.images, "Bild", "Bilder"), n(self.texts, "Textfeld", "Textfelder")].into_iter().flatten().collect();
+        match parts.len() {
+            0 => String::new(),
+            1 => parts[0].clone(),
+            _ => format!("{} und {}", parts[..parts.len() - 1].join(", "), parts[parts.len() - 1]),
+        }
+    }
+}
+
 /// Id of the text page body when it is handed out as a [`TextBox`].
 pub const BODY_ID: &str = "__body";
 
@@ -441,6 +474,35 @@ impl Sheet {
         out
     }
 
+    /// What would stick out of a `width` × `height` page (top-left at 0, 0): strokes, images
+    /// and text boxes reaching past its edges (a little slack for the stroke's own width).
+    /// Used to warn before a page is turned or made smaller.
+    pub fn outside(&self, width: f32, height: f32) -> Outside {
+        const SLACK: f32 = 2.0;
+        let out_of = |x0: f32, y0: f32, x1: f32, y1: f32| x0 < -SLACK || y0 < -SLACK || x1 > width + SLACK || y1 > height + SLACK;
+        let mut o = Outside::default();
+        self.objects.for_each(|_, v| {
+            if let ValueOrContainer::Value(LoroValue::Binary(b)) = v
+                && let Some(r) = stroke_bounds(&b)
+                && out_of(r.x0, r.y0, r.x1, r.y1)
+            {
+                o.strokes += 1;
+            }
+        });
+        o.images = self.images().iter().filter(|i| out_of(i.x, i.y, i.x + i.w, i.y + i.h)).count();
+        // A text box's height follows its text: estimated from its lines and their length.
+        o.texts = self
+            .text_boxes()
+            .iter()
+            .filter(|t| {
+                let per_line = (t.w / (t.size * 0.5)).max(1.0);
+                let lines: f32 = t.text.lines().map(|l| (l.chars().count() as f32 / per_line).ceil().max(1.0)).sum::<f32>().max(1.0);
+                out_of(t.x, t.y, t.x + t.w, t.y + lines * t.size * 1.4)
+            })
+            .count();
+        o
+    }
+
     pub fn len(&self) -> usize {
         self.objects.len()
     }
@@ -636,6 +698,26 @@ fn decode_stroke(id: &str, b: &[u8]) -> Result<Stroke> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_sticks_out_of_a_turned_page_is_counted() {
+        use crate::ink::{Brush, InkPoint};
+        let s = super::Sheet::create(1).unwrap();
+        let p = |x: f32, y: f32| InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
+        // Near the top: fits portrait and landscape A4. Low on the page: only portrait.
+        s.add_stroke(brush, &[p(100.0, 100.0), p(200.0, 120.0)]).unwrap();
+        s.add_stroke(brush, &[p(100.0, 700.0), p(300.0, 760.0)]).unwrap();
+        s.add_image("b", 400.0, 650.0, 100.0, 80.0).unwrap();
+        s.add_text_box(56.0, 620.0, 200.0, 12.0, "Unten").unwrap();
+        assert!(s.outside(595.0, 842.0).is_empty(), "everything is on the portrait page");
+        let o = s.outside(842.0, 595.0);
+        assert_eq!((o.strokes, o.images, o.texts), (1, 1, 1));
+        assert_eq!(o.describe(), "1 Strich, 1 Bild und 1 Textfeld");
+        let mut sum = o;
+        sum.add(o);
+        assert_eq!(sum.describe(), "2 Striche, 2 Bilder und 2 Textfelder");
+    }
+
     use super::*;
 
     fn pts(x: f32, n: usize) -> Vec<InkPoint> {

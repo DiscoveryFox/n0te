@@ -5,6 +5,7 @@
 //! so every device keeps a full copy and concurrent edits merge without conflicts.
 
 pub mod error;
+pub mod format;
 pub mod ids;
 pub mod ink;
 pub mod layout;

@@ -239,6 +239,44 @@ fn to_ffi(s: n0te_core::sheet::Stroke) -> FfiStroke {
 }
 
 /// Outline of a stroke being drawn (no storage), for the live pen layer. Packed LE f32 in/out.
+/// What would stick out of pages made smaller or turned: counts, pages, and a sentence
+/// ("3 Striche und 1 Bild").
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiOutside {
+    pub strokes: u32,
+    pub images: u32,
+    pub texts: u32,
+    pub pages: u32,
+    pub text: String,
+}
+
+/// A named paper size, upright (width ≤ height), in page points.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiPageFormat {
+    pub id: String,
+    pub name: String,
+    pub width: f32,
+    pub height: f32,
+}
+
+/// The paper sizes every device offers (A4, A5, …), upright.
+#[uniffi::export]
+pub fn page_formats() -> Vec<FfiPageFormat> {
+    n0te_core::format::FORMATS.iter().map(|f| FfiPageFormat { id: f.id.into(), name: f.name.into(), width: f.width, height: f.height }).collect()
+}
+
+/// "A4 hoch", "A5 quer", "Quadrat", or "200 × 150 mm".
+#[uniffi::export]
+pub fn describe_page_size(width: f32, height: f32) -> String {
+    n0te_core::format::describe(width, height)
+}
+
+/// The id of the format a page has (either way round), or "" for a size of its own.
+#[uniffi::export]
+pub fn page_format_id(width: f32, height: f32) -> String {
+    n0te_core::format::find(width, height).map(|(f, _)| f.id.to_string()).unwrap_or_default()
+}
+
 #[uniffi::export]
 pub fn stroke_outline(brush: FfiBrush, samples: Vec<u8>) -> Vec<u8> {
     pack(&ink::outline(&points(&samples), &brush.into()))

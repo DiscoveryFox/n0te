@@ -17,6 +17,11 @@ pub struct Settings {
     pub share_view: bool,
     /// Display formulas ($$…$$, formula blocks) centred.
     pub formula_center: bool,
+    /// Touchpad: the page glides on after a two-finger swipe (stops when fingers rest again).
+    pub momentum: bool,
+    /// Page size (pt) for new notebooks.
+    pub new_w: f32,
+    pub new_h: f32,
 }
 
 /// The current `formula_center` (read while drawing text; set from the settings).
@@ -29,7 +34,18 @@ pub fn formula_center() -> bool {
 impl Default for Settings {
     fn default() -> Self {
         let o = Options::default();
-        Settings { theme: "nothing".into(), row_gap: o.row_gap, side_gap: o.side_gap, remote_frame: true, formula_center: true, guest_frames: true, share_view: true }
+        Settings {
+            theme: "nothing".into(),
+            row_gap: o.row_gap,
+            side_gap: o.side_gap,
+            remote_frame: true,
+            formula_center: true,
+            guest_frames: true,
+            share_view: true,
+            momentum: true,
+            new_w: 595.0,
+            new_h: 842.0,
+        }
     }
 }
 
@@ -55,6 +71,9 @@ impl Settings {
                 "formula_center" => s.formula_center = v != "0",
                 "guest_frames" => s.guest_frames = v != "0",
                 "share_view" => s.share_view = v != "0",
+                "momentum" => s.momentum = v != "0",
+                "new_w" => s.new_w = v.parse().unwrap_or(s.new_w).clamp(n0te_core::format::MIN_PT, n0te_core::format::MAX_PT),
+                "new_h" => s.new_h = v.parse().unwrap_or(s.new_h).clamp(n0te_core::format::MIN_PT, n0te_core::format::MAX_PT),
                 _ => {}
             }
         }
@@ -76,14 +95,17 @@ impl Settings {
     /// The settings file's text (what [`Settings::parse`] reads back).
     pub fn text(&self) -> String {
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
             if self.remote_frame { 1 } else { 0 },
             if self.formula_center { 1 } else { 0 },
             if self.guest_frames { 1 } else { 0 },
-            if self.share_view { 1 } else { 0 }
+            if self.share_view { 1 } else { 0 },
+            if self.momentum { 1 } else { 0 },
+            self.new_w,
+            self.new_h
         )
     }
 
@@ -111,5 +133,13 @@ mod tests {
         let back = Settings::parse(&s.text());
         assert_eq!(back, s);
         assert!(!back.guest_frames && back.share_view);
+    }
+
+    #[test]
+    fn momentum_and_the_new_notebook_size_survive_a_save() {
+        let s = Settings { momentum: false, new_w: 842.0, new_h: 595.0, ..Settings::default() };
+        assert_eq!(Settings::parse(&s.text()), s);
+        assert!(Settings::default().momentum);
+        assert_eq!(Settings::parse("new_w=1\n").new_w, n0te_core::format::MIN_PT, "clamped");
     }
 }

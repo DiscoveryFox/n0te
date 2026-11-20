@@ -139,6 +139,43 @@ impl NotebookHandle {
     pub fn set_paper(&self, node: String, background: crate::FfiBackground, spacing: f32) -> R<()> {
         Ok(lock(&self.nb).set_paper(&node, background.into(), spacing)?)
     }
+    /// What would stick out if the sheets of `nodes` had `width` × `height` (before turning or
+    /// shrinking them): counts over all of them, and on how many pages. Open sheets count with
+    /// their unsaved strokes.
+    pub fn outside(&self, nodes: Vec<String>, width: f32, height: f32) -> R<crate::FfiOutside> {
+        let ids: Vec<String> = {
+            let nb = lock(&self.nb);
+            let mut by_node = std::collections::HashMap::new();
+            for row in nb.outline(true) {
+                if let n0te_core::notebook::OutlineRow::Sheet { node, sheet_id, left, right, .. } = row {
+                    by_node.insert(node, sheet_id);
+                    for s in left.into_iter().chain(right) {
+                        by_node.insert(s.node, s.sheet_id);
+                    }
+                }
+            }
+            nodes.iter().filter_map(|n| by_node.get(n).cloned()).collect()
+        };
+        let mut total = n0te_core::sheet::Outside::default();
+        let mut pages = 0;
+        for id in ids {
+            let o = match self.open_sheet_handle(&id) {
+                Some(h) => lock(&h.sheet).outside(width, height),
+                None => self.lib.inner.load_sheet(&self.id(), &id)?.outside(width, height),
+            };
+            if !o.is_empty() {
+                pages += 1;
+                total.add(o);
+            }
+        }
+        Ok(crate::FfiOutside { strokes: total.strokes as u32, images: total.images as u32, texts: total.texts as u32, pages, text: total.describe() })
+    }
+
+    /// Changes a sheet's size in page points (landscape, another format, a size of its own).
+    /// Content keeps its place; PDF pages and boards refuse.
+    pub fn set_size(&self, node: String, width: f32, height: f32) -> R<()> {
+        Ok(lock(&self.nb).set_size(&node, width, height)?)
+    }
     pub fn folder(&self) -> String {
         lock(&self.nb).folder()
     }
@@ -189,6 +226,10 @@ mod tests {
         assert_eq!(sheet.stroke_count(), 1);
         nb.set_title("Analysis".into()).unwrap();
         assert_eq!(nb.title(), "Analysis");
+        assert_eq!(nb.outside(vec![ids[0].clone()], 842.0, 595.0).unwrap().pages, 0, "the stroke at the top fits");
+        assert_eq!(nb.outside(vec![ids[0].clone()], 15.0, 15.0).unwrap().text, "1 Strich");
+        nb.set_size(ids[0].clone(), 842.0, 595.0).unwrap();
+        assert!(nb.set_size(ids[0].clone(), 1.0, 595.0).is_err());
         assert_eq!(nb.sheet_order(), vec![ids[1].clone()]);
         std::fs::remove_dir_all(dir).unwrap();
     }
