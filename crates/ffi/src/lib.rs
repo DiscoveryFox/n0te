@@ -70,6 +70,50 @@ pub struct FfiStroke {
     pub outline: Vec<u8>,
     /// Pencil only: the middle band and the core (same packing), drawn translucent on top.
     pub layers: Vec<Vec<u8>>,
+    /// Where the stroke starts and ends, each with the way it runs there (unit, pointing back
+    /// into the stroke): x0, y0, dx0, dy0, x1, y1, dx1, dy1, then its length. For attaching
+    /// arrowheads; empty for a dot.
+    #[uniffi(default)]
+    pub ends: Vec<f32>,
+}
+
+/// A stroke's ends and the way it runs there (see [`FfiStroke::ends`]), read over its last
+/// stretch (12 pt or a sixth of it) so a wobble at the very end doesn't turn it.
+fn stroke_ends(pts: &[ink::InkPoint]) -> Vec<f32> {
+    let n = pts.len();
+    if n < 2 {
+        return Vec::new();
+    }
+    let seg: Vec<f32> = pts.windows(2).map(|w| (w[1].x - w[0].x).hypot(w[1].y - w[0].y)).collect();
+    let len: f32 = seg.iter().sum();
+    if len < 1.0 {
+        return Vec::new();
+    }
+    let reach = 12f32.min(len / 6.0).max(0.5);
+    // The point `reach` along the stroke from one end.
+    let along = |from_end: bool| -> (f32, f32) {
+        let mut acc = 0.0;
+        for k in 0..seg.len() {
+            let i = if from_end { seg.len() - 1 - k } else { k };
+            acc += seg[i];
+            if acc >= reach {
+                let p = if from_end { pts[i] } else { pts[i + 1] };
+                return (p.x, p.y);
+            }
+        }
+        let p = if from_end { pts[0] } else { pts[n - 1] };
+        (p.x, p.y)
+    };
+    let unit = |x: f32, y: f32| {
+        let l = x.hypot(y).max(1e-6);
+        (x / l, y / l)
+    };
+    let (a, b) = (pts[0], pts[n - 1]);
+    let (sx, sy) = along(false);
+    let (ex, ey) = along(true);
+    let (d0x, d0y) = unit(sx - a.x, sy - a.y);
+    let (d1x, d1y) = unit(ex - b.x, ey - b.y);
+    vec![a.x, a.y, d0x, d0y, b.x, b.y, d1x, d1y, len]
 }
 
 /// Typed text on a page (Markdown), position and width in page points.
@@ -285,6 +329,7 @@ fn to_ffi(s: n0te_core::sheet::Stroke) -> FfiStroke {
         outline: pack(&ink::outline(&s.points, &s.brush)),
         layers: ink::pencil_layers(&s.points, &s.brush).iter().map(|l| pack(l)).collect(),
         bounds: vec![s.bounds.x0, s.bounds.y0, s.bounds.x1, s.bounds.y1],
+        ends: stroke_ends(&s.points),
         brush: s.brush.into(),
         id: s.id,
     }
