@@ -77,8 +77,10 @@ pub struct FfiStroke {
     pub ends: Vec<f32>,
 }
 
-/// A stroke's ends and the way it runs there (see [`FfiStroke::ends`]), read over its last
-/// stretch (12 pt or a sixth of it) so a wobble at the very end doesn't turn it.
+/// A stroke's ends and the way it runs there (see [`FfiStroke::ends`]): the tangent at each
+/// end, read from 1.5 to 8 pt in (a curving end still points the way it ends, not the way it
+/// went a while before). A little flick as the pen lifted (its last few points turning off
+/// sharply) is left out: the end is where it began, the way is the stroke's own.
 fn stroke_ends(pts: &[ink::InkPoint]) -> Vec<f32> {
     let n = pts.len();
     if n < 2 {
@@ -89,17 +91,17 @@ fn stroke_ends(pts: &[ink::InkPoint]) -> Vec<f32> {
     if len < 1.0 {
         return Vec::new();
     }
-    let reach = 12f32.min(len / 6.0).max(0.5);
-    // The point `reach` along the stroke from one end.
-    let along = |from_end: bool| -> (f32, f32) {
+    // The point `d` along the stroke from one end (interpolated).
+    let along = |from_end: bool, d: f32| -> (f32, f32) {
         let mut acc = 0.0;
         for k in 0..seg.len() {
             let i = if from_end { seg.len() - 1 - k } else { k };
-            acc += seg[i];
-            if acc >= reach {
-                let p = if from_end { pts[i] } else { pts[i + 1] };
-                return (p.x, p.y);
+            if acc + seg[i] >= d && seg[i] > 0.0 {
+                let f = (d - acc) / seg[i];
+                let (p, q) = if from_end { (pts[i + 1], pts[i]) } else { (pts[i], pts[i + 1]) };
+                return (p.x + (q.x - p.x) * f, p.y + (q.y - p.y) * f);
             }
+            acc += seg[i];
         }
         let p = if from_end { pts[0] } else { pts[n - 1] };
         (p.x, p.y)
@@ -108,12 +110,26 @@ fn stroke_ends(pts: &[ink::InkPoint]) -> Vec<f32> {
         let l = x.hypot(y).max(1e-6);
         (x / l, y / l)
     };
-    let (a, b) = (pts[0], pts[n - 1]);
-    let (sx, sy) = along(false);
-    let (ex, ey) = along(true);
-    let (d0x, d0y) = unit(sx - a.x, sy - a.y);
-    let (d1x, d1y) = unit(ex - b.x, ey - b.y);
-    vec![a.x, a.y, d0x, d0y, b.x, b.y, d1x, d1y, len]
+    let end = |from_end: bool| -> [f32; 4] {
+        let tip = if from_end { pts[n - 1] } else { pts[0] };
+        let (near, far) = (1.5f32.min(len / 8.0), 8f32.min(len / 3.0));
+        let (ax, ay) = along(from_end, near);
+        let (bx, by) = along(from_end, far);
+        let (dx, dy) = unit(bx - ax, by - ay);
+        // A flick: the last 4 pt run off at a sharp angle to the 4–12 pt before them.
+        let (h0, h1) = (4f32.min(len / 6.0), 12f32.min(len / 2.0));
+        let (px, py) = along(from_end, h0);
+        let (qx, qy) = along(from_end, h1);
+        let (fx, fy) = unit(px - tip.x, py - tip.y);
+        let (gx, gy) = unit(qx - px, qy - py);
+        if len > 20.0 && fx * gx + fy * gy < 0.5 {
+            return [px, py, gx, gy];
+        }
+        [tip.x, tip.y, dx, dy]
+    };
+    let a = end(false);
+    let b = end(true);
+    vec![a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3], len]
 }
 
 /// Typed text on a page (Markdown), position and width in page points.
