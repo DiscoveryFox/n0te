@@ -485,7 +485,7 @@ mod tests {
         // The laptop app draws; the tablet's open sheet refreshes into the stroke.
         let lib_a = NoteLibrary::open(ra.clone()).unwrap();
         let nb = lib_a.clone().create_notebook("Mathe".into()).unwrap();
-        let ids = nb.add_sheet(None, 0, FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Grid, spacing: 17.0, pdf_blob: None, pdf_page: 0 }).unwrap();
+        let ids = nb.add_sheet(None, 0, FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Grid, spacing: 17.0, pdf_blob: None, pdf_page: 0, gaps: vec![] }).unwrap();
         nb.save().unwrap();
         let id = nb.id();
         laptop.notify_local_change(id.clone()).unwrap();

@@ -3,7 +3,8 @@
 //!
 //! Objects are parsed zero-copy. Tokens that are written back unchanged (numbers, strings, names)
 //! keep their raw bytes, so a dictionary we rewrite keeps every value exactly as it was without
-//! decoding strings or reformatting numbers. Stream data is never read.
+//! decoding strings or reformatting numbers. Stream data is only read where a page's content
+//! has to be moved (see [`File::stream`]).
 //!
 //! Only classic cross-reference tables are supported (what pdfium's `FPDF_SaveAsCopy` writes);
 //! cross-reference streams and object streams are refused with an error.
@@ -417,6 +418,29 @@ impl<'a> File<'a> {
         }
     }
 
+    /// Reads stream object `num`: its dictionary and its data as stored (still encoded).
+    pub(crate) fn stream(&self, num: u32) -> Result<(Dict<'a>, &'a [u8])> {
+        let (off, _) = self.offsets.get(num as usize).copied().flatten().ok_or_else(|| bad(format!("object {num} missing")))?;
+        let mut lx = Lexer::at(self.bytes, off);
+        if !matches!((lx.uint(), lx.uint(), lx.keyword(b"obj")), (Some(n), Some(_), true) if n == num as u64) {
+            return Err(bad(format!("object {num} not found at its offset")));
+        }
+        let dict = lx.object(0)?.into_dict().ok_or_else(|| bad(format!("object {num} is not a stream")))?;
+        if !lx.keyword(b"stream") {
+            return Err(bad(format!("object {num} is not a stream")));
+        }
+        // The keyword ends with CR LF or LF (a lone CR is tolerated).
+        let mut at = lx.i;
+        if self.bytes[at..].starts_with(b"\r\n") {
+            at += 2;
+        } else if matches!(self.bytes.get(at), Some(b'\n' | b'\r')) {
+            at += 1;
+        }
+        let len = dict.get("Length").map(|l| self.resolve(l)).transpose()?.and_then(|l| l.as_f64()).filter(|l| *l >= 0.0);
+        let end = len.map(|l| at.saturating_add(l as usize)).filter(|&e| e <= self.bytes.len()).ok_or_else(|| bad(format!("stream {num} has a bad /Length")))?;
+        Ok((dict, &self.bytes[at..end]))
+    }
+
     /// Follows references (a missing object is `null`, as the PDF spec says).
     pub(crate) fn resolve(&self, o: &Obj<'a>) -> Result<Obj<'a>> {
         let mut cur = o.clone();
@@ -581,6 +605,28 @@ mod tests {
         assert!(cat.get("Type").unwrap().is_name("Catalog"));
         assert!(f.object(3).is_err());
         assert_eq!(f.resolve(&Obj::Ref(9, 0)).unwrap(), Obj::Null);
+    }
+
+    #[test]
+    fn reads_stream_data_with_direct_and_indirect_lengths() {
+        let mut pdf = b"%PDF-1.7\n".to_vec();
+        let mut offs = Vec::new();
+        for o in ["<</Length 5>>stream\r\nhello\r\nendstream", "<</Length 3 0 R>>\nstream\nab\ncd\nendstream", "5", "<</Type/Page>>", "<</Length 99999>>stream\nshort\nendstream"] {
+            offs.push(pdf.len());
+            pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", offs.len()).as_bytes());
+        }
+        let x = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 6\n0000000000 65535 f\r\n");
+        for o in &offs {
+            pdf.extend_from_slice(format!("{o:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(format!("trailer\n<</Size 6>>\nstartxref\n{x}\n%%EOF\n").as_bytes());
+        let f = File::parse(&pdf).unwrap();
+        assert_eq!(f.stream(1).unwrap().1, b"hello");
+        assert_eq!(f.stream(2).unwrap().1, b"ab\ncd");
+        assert!(f.stream(4).is_err(), "a plain dictionary is no stream");
+        assert!(f.stream(5).is_err(), "/Length past the end of the file");
+        assert!(f.stream(9).is_err());
     }
 
     #[test]

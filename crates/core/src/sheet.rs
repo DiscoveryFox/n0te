@@ -420,6 +420,36 @@ impl Sheet {
         Ok(())
     }
 
+    /// Stretches strokes and images about (ax, ay): across by `kx`, down by `ky` (a side of a
+    /// selection dragged). The pen's width stays, so a stretched rectangle keeps its line.
+    pub fn stretch(&self, ids: &[String], ax: f32, ay: f32, kx: f32, ky: f32) -> Result<()> {
+        let ok = |k: f32| k.is_finite() && k.abs() > 1e-3;
+        if !ok(kx) || !ok(ky) {
+            return Err(Error::Invalid("bad stretch".into()));
+        }
+        for id in ids {
+            if let Some(m) = self.image_map(id) {
+                let f = |key: &str| map_f64(&m, key).unwrap_or(0.0) as f32;
+                let (x0, x1) = (ax + (f("x") - ax) * kx, ax + (f("x") + f("w") - ax) * kx);
+                let (y0, y1) = (ay + (f("y") - ay) * ky, ay + (f("y") + f("h") - ay) * ky);
+                m.insert("x", x0.min(x1) as f64)?;
+                m.insert("y", y0.min(y1) as f64)?;
+                m.insert("w", (x1 - x0).abs().max(1.0) as f64)?;
+                m.insert("h", (y1 - y0).abs().max(1.0) as f64)?;
+                continue;
+            }
+            if let Some(mut s) = self.stroke(id)? {
+                for p in &mut s.points {
+                    p.x = ax + (p.x - ax) * kx;
+                    p.y = ay + (p.y - ay) * ky;
+                }
+                self.objects.insert(id, LoroValue::Binary(encode_stroke(&s.brush, &s.points).into()))?;
+            }
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Turns and stretches strokes about the anchor (ax, ay): every point p becomes
     /// a + (re + i·im)·(p − a) in complex terms (angle and length of (re, im) are the rotation
     /// and the stretch). The width stays: dragging a line's end changes its length and angle,
@@ -474,6 +504,78 @@ impl Sheet {
         out
     }
 
+    /// Top and bottom of everything that lies below the line at `y` (its middle under it):
+    /// strokes, images and text boxes, what [`Sheet::shift_below`] moves.
+    pub fn below(&self, y: f32) -> crate::notebook::Below {
+        let mut b = crate::notebook::Below::default();
+        let mut take = |y0: f32, y1: f32| {
+            if (y0 + y1) / 2.0 >= y {
+                b.top = Some(b.top.map_or(y0, |t: f32| t.min(y0)));
+                b.bottom = Some(b.bottom.map_or(y1, |t: f32| t.max(y1)));
+            }
+        };
+        self.objects.for_each(|_, v| {
+            if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
+                && let Some(r) = stroke_bounds(&bytes)
+            {
+                take(r.y0, r.y1);
+            }
+        });
+        for i in self.images() {
+            take(i.y, i.y + i.h);
+        }
+        for t in self.text_boxes() {
+            take(t.y, t.y + text_box_height(&t));
+        }
+        b
+    }
+
+    /// Moves everything below the line at `y` (its middle under it) down by `dy` (up when
+    /// negative), in one step to undo: space inserted into or taken out of the page. Returns
+    /// how many objects moved.
+    pub fn shift_below(&self, y: f32, dy: f32) -> Result<usize> {
+        if !dy.is_finite() {
+            return Err(Error::Invalid("bad shift".into()));
+        }
+        let mut strokes = Vec::new();
+        self.objects.for_each(|k, v| {
+            if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
+                && let Some(r) = stroke_bounds(&bytes)
+                && (r.y0 + r.y1) / 2.0 >= y
+            {
+                strokes.push(k.to_string());
+            }
+        });
+        let mut n = 0;
+        for id in &strokes {
+            if let Some(mut s) = self.stroke(id)? {
+                for p in &mut s.points {
+                    p.y += dy;
+                }
+                self.objects.insert(id, LoroValue::Binary(encode_stroke(&s.brush, &s.points).into()))?;
+                n += 1;
+            }
+        }
+        for i in self.images() {
+            if i.y + i.h / 2.0 >= y
+                && let Some(m) = self.image_map(&i.id)
+            {
+                m.insert("y", (i.y + dy) as f64)?;
+                n += 1;
+            }
+        }
+        for t in self.text_boxes() {
+            if t.y + text_box_height(&t) / 2.0 >= y
+                && let Some(m) = self.text_map(&t.id)
+            {
+                m.insert("y", (t.y + dy) as f64)?;
+                n += 1;
+            }
+        }
+        self.doc.commit();
+        Ok(n)
+    }
+
     /// What would stick out of a `width` × `height` page (top-left at 0, 0): strokes, images
     /// and text boxes reaching past its edges (a little slack for the stroke's own width).
     /// Used to warn before a page is turned or made smaller.
@@ -490,15 +592,10 @@ impl Sheet {
             }
         });
         o.images = self.images().iter().filter(|i| out_of(i.x, i.y, i.x + i.w, i.y + i.h)).count();
-        // A text box's height follows its text: estimated from its lines and their length.
         o.texts = self
             .text_boxes()
             .iter()
-            .filter(|t| {
-                let per_line = (t.w / (t.size * 0.5)).max(1.0);
-                let lines: f32 = t.text.lines().map(|l| (l.chars().count() as f32 / per_line).ceil().max(1.0)).sum::<f32>().max(1.0);
-                out_of(t.x, t.y, t.x + t.w, t.y + lines * t.size * 1.4)
-            })
+            .filter(|t| out_of(t.x, t.y, t.x + t.w, t.y + text_box_height(t)))
             .count();
         o
     }
@@ -683,6 +780,13 @@ fn known(b: &[u8]) -> bool {
     (b.len() >= HEADER && b[0] == STROKE_V1) || (b.len() > HEADER && b[0] == STROKE_V2)
 }
 
+/// A text box's height follows its text: estimated from its lines and their length.
+fn text_box_height(t: &TextBox) -> f32 {
+    let per_line = (t.w / (t.size * 0.5)).max(1.0);
+    let lines: f32 = t.text.lines().map(|l| (l.chars().count() as f32 / per_line).ceil().max(1.0)).sum::<f32>().max(1.0);
+    lines * t.size * 1.4
+}
+
 fn stroke_bounds(b: &[u8]) -> Option<Rect> {
     known(b).then(|| Rect { x0: f32_at(b, 13), y0: f32_at(b, 17), x1: f32_at(b, 21), y1: f32_at(b, 25) })
 }
@@ -719,6 +823,49 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn stretching_keeps_the_pen_width_and_one_side() {
+        let s = Sheet::create(1).unwrap();
+        let p = |x: f32, y: f32| InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
+        let r = s.add_stroke(brush, &[p(100.0, 100.0), p(200.0, 100.0), p(200.0, 150.0), p(100.0, 150.0), p(100.0, 100.0)]).unwrap();
+        let img = s.add_image("b", 100.0, 200.0, 100.0, 50.0).unwrap();
+        // The right side pulled out: twice as wide, the left side stays.
+        s.stretch(&[r.clone(), img.clone()], 100.0, 0.0, 2.0, 1.0).unwrap();
+        let st = s.stroke(&r).unwrap().unwrap();
+        assert_eq!(st.points[1].x, 300.0);
+        assert_eq!(st.points[0].x, 100.0);
+        assert_eq!(st.points[2].y, 150.0);
+        assert_eq!(st.brush.width, 2.0);
+        let i = s.images().into_iter().find(|i| i.id == img).unwrap();
+        assert_eq!((i.x, i.w, i.h), (100.0, 200.0, 50.0));
+        assert!(s.stretch(&[r], 0.0, 0.0, 0.0, 1.0).is_err());
+    }
+
+    #[test]
+    fn space_below_a_line_moves_everything_under_it_in_one_step() {
+        let s = Sheet::create(1).unwrap();
+        let p = |x: f32, y: f32| InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
+        let above = s.add_stroke(brush, &[p(100.0, 100.0), p(200.0, 120.0)]).unwrap();
+        let under = s.add_stroke(brush, &[p(100.0, 400.0), p(200.0, 420.0)]).unwrap();
+        // Mostly above the line: stays (its middle is above).
+        let across = s.add_stroke(brush, &[p(300.0, 240.0), p(300.0, 310.0)]).unwrap();
+        let img = s.add_image("b", 50.0, 500.0, 100.0, 80.0).unwrap();
+        let txt = s.add_text_box(56.0, 600.0, 200.0, 12.0, "Unten").unwrap();
+        let b = s.below(300.0);
+        assert!((395.0..400.0).contains(&b.top.unwrap()), "top of the stroke under the line (with its width): {b:?}");
+        assert!(b.bottom.unwrap() > 600.0);
+        assert_eq!(s.shift_below(300.0, 50.0).unwrap(), 3);
+        let y0 = |id: &str| s.stroke(id).unwrap().unwrap().points[0].y;
+        assert_eq!((y0(&above), y0(&under), y0(&across)), (100.0, 450.0, 240.0));
+        assert_eq!(s.images().iter().find(|i| i.id == img).unwrap().y, 550.0);
+        assert_eq!(s.text_boxes().iter().find(|t| t.id == txt).unwrap().y, 650.0);
+        // One undo puts it all back.
+        assert!(s.undo().unwrap());
+        assert_eq!((y0(&under), s.images()[0].y, s.text_boxes()[0].y), (400.0, 500.0, 600.0));
+    }
 
     fn pts(x: f32, n: usize) -> Vec<InkPoint> {
         (0..n).map(|i| InkPoint { x: x + i as f32, y: 10.0 + i as f32 * 0.5, pressure: 0.5, t_ms: i as u32 * 5 }).collect()

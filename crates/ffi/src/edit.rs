@@ -50,6 +50,20 @@ impl SheetHandle {
             .map(|t| crate::FfiTextBox { id: t.id, x: t.x, y: t.y, w: t.w, size: t.size, text: t.text })
             .collect()
     }
+    /// Stretches strokes and images about (ax, ay) by kx across and ky down (pen width kept).
+    pub fn stretch(&self, ids: Vec<String>, ax: f32, ay: f32, kx: f32, ky: f32) -> R<()> {
+        Ok(lock(&self.sheet).stretch(&ids, ax, ay, kx, ky)?)
+    }
+    /// Top and bottom of what lies below the line at `y` (what [`SheetHandle::shift_below`] moves).
+    pub fn below(&self, y: f32) -> crate::FfiBelow {
+        let b = lock(&self.sheet).below(y);
+        crate::FfiBelow { top: b.top, bottom: b.bottom }
+    }
+    /// Moves everything below the line at `y` down by `dy` (up if negative), one undo step;
+    /// returns how many objects moved.
+    pub fn shift_below(&self, y: f32, dy: f32) -> R<u32> {
+        Ok(lock(&self.sheet).shift_below(y, dy)? as u32)
+    }
     /// Places a stored blob as an image; returns its object id.
     pub fn add_image(&self, blob: String, x: f32, y: f32, w: f32, h: f32) -> R<String> {
         Ok(lock(&self.sheet).add_image(&blob, x, y, w, h)?)
@@ -176,6 +190,11 @@ impl NotebookHandle {
     pub fn set_size(&self, node: String, width: f32, height: f32) -> R<()> {
         Ok(lock(&self.nb).set_size(&node, width, height)?)
     }
+    /// A sheet's height and gaps after space went in or out (also to undo that): `gaps` pairs.
+    pub fn reshape(&self, node: String, height: f32, gaps: Vec<f32>) -> R<()> {
+        let g: Vec<(f32, f32)> = gaps.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        Ok(lock(&self.nb).reshape(&node, height, &g)?)
+    }
     pub fn folder(&self) -> String {
         lock(&self.nb).folder()
     }
@@ -213,7 +232,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("n0te-ffi-edit-{}", n0te_core::ids::new_id(5)));
         let lib = NoteLibrary::open(dir.to_string_lossy().into_owned()).unwrap();
         let nb = lib.create_notebook("x".into()).unwrap();
-        let spec = crate::FfiSheetSpec { width: 595.0, height: 842.0, background: crate::FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0 };
+        let spec = crate::FfiSheetSpec { width: 595.0, height: 842.0, background: crate::FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0, gaps: vec![] };
         let ids = nb.add_sheet(None, 0, spec).unwrap();
         let sheet: Arc<SheetHandle> = nb.clone().open_sheet(ids[1].clone()).unwrap();
         let pack = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
@@ -244,7 +263,7 @@ mod kind_tests {
         let dir = std::env::temp_dir().join(format!("n0te-ffi-kind-{}", n0te_core::ids::new_id(6)));
         let lib = NoteLibrary::open(dir.to_string_lossy().into_owned()).unwrap();
         let nb = lib.create_notebook("k".into()).unwrap();
-        let ids = nb.add_sheet(None, 0, FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0 }).unwrap();
+        let ids = nb.add_sheet(None, 0, FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0, gaps: vec![] }).unwrap();
         let sheet = nb.open_sheet(ids[1].clone()).unwrap();
         let pack = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
         let s = sheet.add_stroke(FfiBrush { width: 2.0, thinning: 0.3, color: 0xC8333333, kind: 1 }, pack(&[1.0, 1.0, 0.5, 0.0, 9.0, 9.0, 0.5, 4.0])).unwrap();

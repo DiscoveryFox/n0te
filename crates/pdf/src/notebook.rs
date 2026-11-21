@@ -57,7 +57,7 @@ pub fn store_pdf(lib: &Library, worker: &PdfWorker, bytes: Vec<u8>) -> Result<St
 pub fn add_pdf_sheets(nb: &Notebook, pdf: &StoredPdf, parent: Option<&str>, index: usize) -> Result<Vec<ImportedSheet>> {
     let mut out = Vec::with_capacity(pdf.pages.len());
     for (i, &size) in pdf.pages.iter().enumerate() {
-        let spec = SheetSpec { width: size.width, height: size.height, background: Background::Blank, spacing: 20.0, pdf: Some((pdf.blob.clone(), i as u32)) };
+        let spec = SheetSpec { width: size.width, height: size.height, background: Background::Blank, spacing: 20.0, pdf: Some((pdf.blob.clone(), i as u32)), gaps: Vec::new() };
         let (node, sheet_id) = nb.add_sheet(parent, index.saturating_add(i), &spec)?;
         out.push(ImportedSheet { node, sheet_id, page: i as u32, size });
     }
@@ -68,8 +68,9 @@ pub fn add_pdf_sheets(nb: &Notebook, pdf: &StoredPdf, parent: Option<&str>, inde
 /// its left side sheets outermost first, the sheet, its right side sheets), or only the
 /// `selected` sheet ids, still in reading order (an id not in the notebook is an error).
 ///
-/// PDF sheets become their PDF page, fixed-size sheets blank pages of their size, boards a page
-/// around their strokes ([`BOARD_MARGIN`]); empty boards are left out. `strokes` returns a
+/// PDF sheets become their PDF page (split at space inserted into it, `SheetSpec::gaps`),
+/// fixed-size sheets blank pages of their size, boards a page around their strokes
+/// ([`BOARD_MARGIN`]); empty boards are left out. `strokes` returns a
 /// sheet's strokes (apps prefer an open, possibly unsaved sheet over the stored one).
 pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: impl FnMut(&str) -> Result<Vec<sheet::Stroke>>) -> Result<Vec<ExportSheet>> {
     export_sheets_with_text(nb, selected, |id| Ok((strokes(id)?, Vec::new())))
@@ -125,7 +126,9 @@ pub fn export_sheets_with_images(
             },
         };
         let paper = (spec.pdf.is_none() && !spec.is_board()).then_some(crate::ink_writer::Paper { background: spec.background, spacing: spec.spacing });
-        out.push(ExportSheet { source, strokes: ink, paper, texts, images });
+        // Space inserted into a PDF page splits its PDF; other pages are simply as long as they are.
+        let gaps = if spec.pdf.is_some() { spec.gaps.clone() } else { Vec::new() };
+        out.push(ExportSheet { source, strokes: ink, paper, texts, images, gaps });
     }
     Ok(out)
 }

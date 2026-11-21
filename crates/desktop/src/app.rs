@@ -661,7 +661,7 @@ impl App {
                 let title = if title.trim().is_empty() { "Neues Notizbuch".to_string() } else { title.trim().to_string() };
                 let made = self.lib.create_notebook(&title).and_then(|nb| {
                     let (w, h) = (self.settings.new_w, self.settings.new_h);
-                    nb.add_sheet(None, 0, &SheetSpec { width: w, height: h, background: self.new_paper, spacing: self.new_spacing, pdf: None })?;
+                    nb.add_sheet(None, 0, &SheetSpec { width: w, height: h, background: self.new_paper, spacing: self.new_spacing, pdf: None, gaps: Vec::new() })?;
                     self.lib.save_notebook(&nb)?;
                     Ok(nb.id())
                 });

@@ -173,9 +173,9 @@ fn export_through_the_worker() {
     let line: Vec<InkPoint> = (0..=40).map(|i| InkPoint { x: 100.0 + i as f32 * 7.5, y: 300.0, pressure: 0.5, t_ms: i * 8 }).collect();
     let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000, kind: 0 };
     let sheets = vec![
-        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)], paper: None, texts: vec![], images: vec![] },
-        ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)], paper: None, texts: vec![], images: vec![] },
-        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![], images: vec![] },
+        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 2 }, strokes: vec![(line.clone(), black)], paper: None, texts: vec![], images: vec![], gaps: vec![] },
+        ExportSheet { source: SheetSource::Blank { width: 400.0, height: 400.0 }, strokes: vec![(line, black)], paper: None, texts: vec![], images: vec![], gaps: vec![] },
+        ExportSheet { source: SheetSource::Pdf { doc: "0".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![], images: vec![], gaps: vec![] },
     ];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     assert_eq!(out.page_count(), 3);
@@ -185,7 +185,7 @@ fn export_through_the_worker() {
         let img = out.render_page(p, out.page_size(p).unwrap().width as u32).unwrap();
         assert_eq!(pixel(&img, 250, 300), [0, 0, 0, 255], "ink on page {p}");
     }
-    let missing = [ExportSheet { source: SheetSource::Pdf { doc: "7".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![], images: vec![] }];
+    let missing = [ExportSheet { source: SheetSource::Pdf { doc: "7".into(), page: 0 }, strokes: vec![], paper: None, texts: vec![], images: vec![], gaps: vec![] }];
     assert!(w.export(0, &missing).is_err());
 }
 
@@ -199,6 +199,7 @@ fn export_draws_paper_ruling_under_no_ink() {
         paper: Some(n0te_pdf::Paper { background: Background::Grid, spacing: 20.0 }),
         texts: vec![],
         images: vec![],
+        gaps: vec![],
     }];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     let img = out.render_page(0, 400).unwrap(); // 2 px per point
@@ -219,6 +220,7 @@ fn export_typesets_text_boxes_that_pdf_readers_can_read() {
         paper: None,
         texts: vec![n0te_pdf::PdfText { x: 60.0, y: 80.0, w: 300.0, size: 14.0, text: text.into() }],
         images: vec![],
+        gaps: vec![],
     }];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     let read = out.page_text(0).unwrap().text();
@@ -292,6 +294,7 @@ fn export_embeds_images_upright_where_they_are_placed() {
         paper: None,
         texts: vec![],
         images: vec![n0te_pdf::PdfImage { jpeg: RED_JPEG.to_vec(), x: 20.0, y: 30.0, w: 100.0, h: 50.0 }],
+        gaps: vec![],
     }];
     let out = e.open(w.export(priority::INTERACTIVE, &sheets).unwrap()).unwrap();
     let img = out.render_page(0, 200).unwrap(); // 1 px per point
@@ -299,4 +302,231 @@ fn export_embeds_images_upright_where_they_are_placed() {
     assert!(inside[0] > 180 && inside[1] < 80 && inside[2] < 80, "image drawn at (20, 30) 100 × 50: {inside:?}");
     assert_eq!(pixel(&img, 70, 90), [255, 255, 255, 255], "below it the page stays white");
     assert_eq!(pixel(&img, 10, 55), [255, 255, 255, 255], "left of it too");
+}
+
+/// One A4 page: a full-width blue band at page y 200..400, a red box at y 600..700 (x 100..300),
+/// "Oben" near the top, "Unten" near the bottom, and two links (y 50..90 and y 600..700).
+fn striped_pdf(e: &PdfEngine) -> Vec<u8> {
+    e.with_raw(|pdfium| {
+        let mut doc = pdfium.create_new_pdf().unwrap();
+        let font = doc.fonts_mut().helvetica();
+        let mut page = doc.pages_mut().create_page_at_end(PdfPagePaperSize::from_points(PdfPoints::new(595.0), PdfPoints::new(842.0))).unwrap();
+        let h = 842.0;
+        // PdfRect::new_from_values(bottom, left, top, right), in PDF user space (y up).
+        page.objects_mut().create_path_object_rect(PdfRect::new_from_values(h - 400.0, 0.0, h - 200.0, 595.0), None, None, Some(PdfColor::new(30, 90, 200, 255))).unwrap();
+        page.objects_mut().create_path_object_rect(PdfRect::new_from_values(h - 700.0, 100.0, h - 600.0, 300.0), None, None, Some(PdfColor::new(215, 25, 33, 255))).unwrap();
+        page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(h - 100.0), "Oben", font, PdfPoints::new(24.0)).unwrap();
+        page.objects_mut().create_text_object(PdfPoints::new(72.0), PdfPoints::new(h - 780.0), "Unten", font, PdfPoints::new(24.0)).unwrap();
+        for (y0, y1) in [(50.0, 90.0), (600.0, 700.0)] {
+            let mut link = page.annotations_mut().create_link_annotation("https://example.org/n0te").unwrap();
+            link.set_bounds(PdfRect::new_from_values(h - y1, 350.0, h - y0, 500.0)).unwrap();
+        }
+        doc.save_to_bytes().unwrap()
+    })
+}
+
+const BLUE: [u8; 4] = [30, 90, 200, 255];
+const RED: [u8; 4] = [215, 25, 33, 255];
+const WHITE: [u8; 4] = [255, 255, 255, 255];
+
+fn pdf_sheet(doc: &str, strokes: Vec<(Vec<InkPoint>, Brush)>, gaps: Vec<(f32, f32)>) -> ExportSheet {
+    ExportSheet { source: SheetSource::Pdf { doc: doc.into(), page: 0 }, strokes, paper: None, texts: vec![], images: vec![], gaps }
+}
+
+fn hline(y: f32) -> Vec<InkPoint> {
+    (0..=40).map(|i| InkPoint { x: 100.0 + i as f32 * 7.5, y, pressure: 0.5, t_ms: i * 8 }).collect()
+}
+
+/// Page objects of one type on page `p` of `bytes`.
+fn count_objects(e: &PdfEngine, bytes: &[u8], p: i32, kind: PdfPageObjectType) -> usize {
+    e.with_raw(|pdfium| pdfium.load_pdf_from_byte_slice(bytes, None).unwrap().pages().get(p).unwrap().objects().iter().filter(|o| o.object_type() == kind).count())
+}
+
+#[test]
+fn export_splits_a_pdf_page_where_space_was_inserted() {
+    let e = engine();
+    let (w, _rx, _) = worker(e, vec![striped_pdf(&e)], 4);
+    let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000, kind: 0 };
+    // 150 pt inserted at y 300 (through the blue band); ink in the new space at y 380 and on
+    // the moved red box (y 650 + 150).
+    let sheets = vec![
+        pdf_sheet("0", vec![(hline(380.0), black), (hline(800.0), black)], vec![(300.0, 150.0)]),
+        pdf_sheet("0", vec![], vec![]),
+    ];
+    let bytes = w.export(priority::INTERACTIVE, &sheets).unwrap();
+    let out = e.open(bytes.clone()).unwrap();
+    let size = out.page_size(0).unwrap();
+    assert_eq!((size.width, size.height), (595.0, 992.0), "the page got 150 pt longer");
+    assert_eq!(out.page_size(1).unwrap(), n0te_pdf::PageSize { width: 595.0, height: 842.0 }, "a page without gaps keeps its size");
+
+    let img = out.render_page(0, 595).unwrap(); // 1 px per point
+    assert_eq!((img.width, img.height), (595, 992));
+    assert_eq!(pixel(&img, 300, 250), BLUE, "blue band above the line stays");
+    assert_eq!(pixel(&img, 300, 296), BLUE);
+    assert_eq!(pixel(&img, 300, 304), WHITE, "the inserted space is blank paper");
+    assert_eq!(pixel(&img, 300, 360), WHITE, "where the band was before");
+    assert_eq!(pixel(&img, 300, 380), [0, 0, 0, 255], "ink in the inserted space");
+    assert_eq!(pixel(&img, 50, 380), WHITE);
+    assert_eq!(pixel(&img, 300, 446), WHITE);
+    assert_eq!(pixel(&img, 300, 454), BLUE, "the rest of the band, 150 pt down");
+    assert_eq!(pixel(&img, 300, 546), BLUE);
+    assert_eq!(pixel(&img, 300, 556), WHITE, "the band ends 150 pt lower too");
+    assert_eq!(pixel(&img, 200, 680), WHITE, "the red box moved away");
+    assert_eq!(pixel(&img, 200, 760), RED, "the red box, 150 pt down");
+    assert_eq!(pixel(&img, 150, 800), [0, 0, 0, 255], "ink drawn on the moved box");
+    assert_eq!(pixel(&img, 590, 250), BLUE, "bands span the whole width");
+    assert_eq!(pixel(&img, 590, 500), BLUE);
+    // The unsplit copy of the page renders as before.
+    let plain = out.render_page(1, 595).unwrap();
+    assert_eq!((pixel(&plain, 300, 380), pixel(&plain, 200, 650), pixel(&plain, 300, 470)), (BLUE, RED, WHITE));
+
+    // Still vector: text stays text, the PDF is a form drawn once per band. Text extraction sees
+    // each band's whole form, so every text comes once per band: the visible copy where it is
+    // drawn, the other one under the other band's clip (invisible, but found by text search).
+    let text = out.page_text(0).unwrap();
+    let hits = |word: &str| text.find(word).into_iter().map(|h| h[0]).collect::<Vec<_>>();
+    let (oben, unten) = (hits("Oben"), hits("Unten"));
+    assert_eq!((oben.len(), unten.len()), (2, 2), "{:?}", text.text());
+    assert!(oben.iter().any(|r| r.y0 > 70.0 && r.y1 < 110.0), "Oben where it was: {oben:?}");
+    assert!(unten.iter().any(|r| r.y0 > 750.0 + 150.0 && r.y1 < 790.0 + 150.0), "Unten 150 pt lower: {unten:?}");
+    assert_eq!(count_objects(&e, &bytes, 0, PdfPageObjectType::XObjectForm), 2, "the PDF once per band");
+    assert_eq!(count_objects(&e, &bytes, 0, PdfPageObjectType::Image), 0, "nothing rasterized");
+    assert_eq!(count_objects(&e, &bytes, 1, PdfPageObjectType::XObjectForm), 0);
+
+    // Links move with their part of the page (user space: y up, the page now reaches y = -150).
+    let links: Vec<(f32, f32)> = e.with_raw(|pdfium| {
+        let doc = pdfium.load_pdf_from_byte_slice(&bytes, None).unwrap();
+        let page = doc.pages().get(0).unwrap();
+        page.annotations().iter().map(|a| a.bounds().unwrap()).map(|r| (r.bottom().value, r.top().value)).collect()
+    });
+    assert_eq!(links.len(), 2, "{links:?}");
+    assert!(links.contains(&(752.0, 792.0)), "the link above the line stays: {links:?}");
+    assert!(links.contains(&(-8.0, 92.0)), "the link below it moves 150 pt down: {links:?}");
+
+    // The file is well-formed.
+    let path = std::env::temp_dir().join(format!("n0te-gaps-{}-{}.pdf", std::process::id(), n0te_core::ids::new_id(6)));
+    std::fs::write(&path, &bytes).unwrap();
+    match std::process::Command::new("qpdf").arg("--check").arg(&path).output() {
+        Ok(o) => assert!(o.status.success(), "qpdf --check:\n{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+        Err(_) => eprintln!("qpdf not installed, skipping the qpdf check"),
+    }
+    std::fs::remove_file(path).unwrap();
+}
+
+/// One page of `media` points with a crop box (left, bottom, right, top), a rotation and a blue
+/// square near the middle of the crop box.
+fn cropped_pdf(e: &PdfEngine, rot: PdfPageRenderRotation) -> Vec<u8> {
+    e.with_raw(|pdfium| {
+        let mut doc = pdfium.create_new_pdf().unwrap();
+        let mut page = doc.pages_mut().create_page_at_end(PdfPagePaperSize::from_points(PdfPoints::new(600.0), PdfPoints::new(800.0))).unwrap();
+        page.objects_mut().create_path_object_rect(PdfRect::new_from_values(250.0, 350.0, 300.0, 400.0), None, None, Some(PdfColor::new(30, 90, 200, 255))).unwrap();
+        page.boundaries_mut().set_crop(PdfRect::new_from_values(100.0, 50.0, 700.0, 500.0)).unwrap();
+        page.set_rotation(rot);
+        doc.save_to_bytes().unwrap()
+    })
+}
+
+/// First and last pixel row with blue in it.
+fn blue_rows(img: &Rgba) -> Option<(u32, u32)> {
+    let rows: Vec<u32> = (0..img.height).filter(|&y| (0..img.width).any(|x| pixel(img, x, y) == BLUE)).collect();
+    Some((*rows.first()?, *rows.last()?))
+}
+
+fn row(img: &Rgba, y: u32) -> &[u8] {
+    &img.data[(y * img.width * 4) as usize..((y + 1) * img.width * 4) as usize]
+}
+
+#[test]
+fn split_pages_grow_downwards_on_screen_for_every_rotation_and_crop_box() {
+    use PdfPageRenderRotation::*;
+    let e = engine();
+    let rotations = [None, Degrees90, Degrees180, Degrees270];
+    let (w, _rx, _) = worker(e, rotations.iter().map(|&r| cropped_pdf(&e, r)).collect(), 4);
+    for (k, rot) in rotations.iter().enumerate() {
+        let doc = k.to_string();
+        let plain_bytes = w.export(priority::INTERACTIVE, &[pdf_sheet(&doc, vec![], vec![])]).unwrap();
+        let plain = e.open(plain_bytes).unwrap();
+        let size = plain.page_size(0).unwrap();
+        let before = plain.render_page(0, size.width as u32).unwrap();
+        let (top, bottom) = blue_rows(&before).unwrap();
+        assert!(bottom - top > 40, "{rot:?}: the square is {top}..{bottom}");
+        // 100 pt inserted through the middle of the square.
+        let cut = (top + bottom) / 2;
+        let bytes = w.export(priority::INTERACTIVE, &[pdf_sheet(&doc, vec![], vec![(cut as f32, 100.0)])]).unwrap();
+        let split = e.open(bytes.clone()).unwrap();
+        let grown = split.page_size(0).unwrap();
+        assert_eq!((grown.width, grown.height), (size.width, size.height + 100.0), "{rot:?}");
+        let after = split.render_page(0, size.width as u32).unwrap();
+        assert_eq!(after.height, before.height + 100, "{rot:?}");
+        for y in [top.saturating_sub(5), top + 2, cut - 3] {
+            assert_eq!(row(&after, y), row(&before, y), "{rot:?}: row {y} above the cut stays");
+        }
+        for y in [cut + 3, bottom - 2, bottom + 5] {
+            assert_eq!(row(&after, y + 100), row(&before, y), "{rot:?}: row {y} below the cut moves 100 down");
+        }
+        for y in cut + 3..cut + 97 {
+            assert!(row(&after, y).chunks_exact(4).all(|p| p == WHITE), "{rot:?}: row {y} is inserted space");
+        }
+        assert_eq!(count_objects(&e, &bytes, 0, PdfPageObjectType::XObjectForm), 2, "{rot:?}");
+    }
+}
+
+/// A handmade one-page A4 PDF whose content is split over two streams, the first one
+/// hex-encoded (a filter the writer does not decode): the fill colour, then a full-width band
+/// at page y 200..400.
+fn two_stream_pdf() -> Vec<u8> {
+    let colour: String = b"0.1176 0.3529 0.7843 rg".iter().map(|b| format!("{b:02x}")).collect::<String>() + ">";
+    let band = "0 442 595 200 re f";
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R]/Count 1/MediaBox[0 0 595 842]>>".to_string(),
+        "<</Type/Page/Parent 2 0 R/Contents[4 0 R 5 0 R]/Resources<<>>>>".to_string(),
+        format!("<</Length {}/Filter/ASCIIHexDecode>>stream\n{colour}\nendstream", colour.len()),
+        format!("<</Length {}>>stream\n{band}\nendstream", band.len()),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f\r\n", objs.len() + 1).as_bytes());
+    for o in offs {
+        pdf.extend_from_slice(format!("{o:010} 00000 n\r\n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+#[test]
+fn content_in_several_streams_splits_too() {
+    let e = engine();
+    let black = Brush { width: 6.0, thinning: 0.0, color: 0xFF00_0000, kind: 0 };
+    let striped = striped_pdf(&e);
+    // A page exported before, with ink: its content is now four streams (q, page, Q, ink).
+    let (w0, _rx0, _) = worker(e, vec![striped], 4);
+    let inked = w0.export(priority::INTERACTIVE, &[pdf_sheet("0", vec![(hline(650.0), black)], vec![])]).unwrap();
+    let (w, _rx, _) = worker(e, vec![inked, two_stream_pdf()], 4);
+    let check = |bytes: &[u8], what: &str| {
+        let img = e.open(bytes.to_vec()).unwrap().render_page(0, 595).unwrap();
+        assert_eq!(img.height, 992, "{what}");
+        assert_eq!(pixel(&img, 300, 250), BLUE, "{what}: above the line");
+        assert_eq!(pixel(&img, 300, 380), WHITE, "{what}: inserted space");
+        assert_eq!(pixel(&img, 300, 500), BLUE, "{what}: below the line, moved");
+        img
+    };
+    // Flate and plain streams are joined into one form.
+    let again = w.export(priority::INTERACTIVE, &[pdf_sheet("0", vec![], vec![(300.0, 150.0)])]).unwrap();
+    let img = check(&again, "exported before");
+    assert_eq!(pixel(&img, 150, 800), [0, 0, 0, 255], "the earlier ink moved with its part of the page");
+    assert_eq!(pixel(&img, 150, 650), WHITE);
+    assert_eq!(count_objects(&e, &again, 0, PdfPageObjectType::XObjectForm), 2);
+    // The earlier ink is still in its layer: hiding n0te ink hides it inside the form too.
+    let hidden = e.open(n0te_pdf::hide_ink(again).unwrap()).unwrap().render_page(0, 595).unwrap();
+    assert_eq!(pixel(&hidden, 150, 800), RED, "earlier ink hidden, the red box under it shows");
+    // A filter the writer does not decode: the streams are drawn again per band.
+    let hex = w.export(priority::INTERACTIVE, &[pdf_sheet("1", vec![], vec![(300.0, 150.0)])]).unwrap();
+    check(&hex, "hex-encoded stream");
+    assert_eq!(count_objects(&e, &hex, 0, PdfPageObjectType::XObjectForm), 0);
 }

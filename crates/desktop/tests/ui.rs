@@ -184,6 +184,81 @@ fn pdf_import_insert_and_export() {
     assert!(std::fs::metadata(&picked).unwrap().len() < bytes.len() as u64);
 }
 
+/// A one-page PDF of 595 × 842 pt with a full-width blue band at page y 200..400.
+fn banded_pdf(app: &App) -> Vec<u8> {
+    use n0te_pdf::pdfium_render::prelude::*;
+    let pdf = app.pdf.as_ref().expect("pdfium (third_party/pdfium) for the PDF tests");
+    pdf.worker
+        .call(10, |docs| {
+            docs.engine().with_raw(|p| {
+                let mut doc = p.create_new_pdf().unwrap();
+                let mut page = doc.pages_mut().create_page_at_end(PdfPagePaperSize::from_points(PdfPoints::new(595.0), PdfPoints::new(842.0))).unwrap();
+                // (bottom, left, top, right) in PDF space, y up.
+                page.objects_mut().create_path_object_rect(PdfRect::new_from_values(842.0 - 400.0, 0.0, 842.0 - 200.0, 595.0), None, None, Some(PdfColor::new(30, 90, 200, 255))).unwrap();
+                doc.save_to_bytes().unwrap()
+            })
+        })
+        .unwrap()
+}
+
+#[test]
+fn a_pdf_page_with_inserted_space_draws_its_pdf_split_there() {
+    let root = temp_root("gap");
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    let pdf = h.app.pdf.clone().expect("pdfium (third_party/pdfium) for the PDF tests");
+    let stored = n0te_pdf::notebook::store_pdf(&h.app.lib, &pdf.worker, banded_pdf(&h.app)).unwrap();
+    let nb = h.app.lib.create_notebook("Platz").unwrap();
+    let sheets = n0te_pdf::notebook::add_pdf_sheets(&nb, &stored, None, 0).unwrap();
+    // 150 pt inserted at y 300, through the blue band.
+    nb.reshape(&sheets[0].node, 992.0, &[(300.0, 150.0)]).unwrap();
+    h.app.lib.save_notebook(&nb).unwrap();
+    // A red picture on the moved part of the band: drawn over the PDF.
+    let png = root.join("red.png");
+    harness::save_png(&png, &[215, 25, 33, 255].repeat(16 * 8), 16, 8);
+    let blob = h.app.lib.put_blob(&std::fs::read(&png).unwrap()).unwrap();
+    let sheet = h.app.lib.load_sheet(&nb.id(), &sheets[0].sheet_id).unwrap();
+    sheet.add_image(&blob, 400.0, 480.0, 100.0, 50.0).unwrap();
+    h.app.lib.save_sheet(&nb.id(), &sheets[0].sheet_id, &sheet).unwrap();
+    h.message(Message::Open(nb.id()));
+    h.events(&[]);
+    h.frame();
+    let o = open(&h);
+    let rect = o.pages.pages[0].rect();
+    assert_eq!((rect.width(), rect.height()), (595.0, 992.0), "the page is as long as the PDF plus the space");
+    // Zoom 1 (sharp tiles at scale 2), the page's top-left corner 20 px into the view.
+    let cam = n0te_desktop::pages::Camera { x: rect.x0 - 20.0, y: rect.y0 - 20.0, zoom: 1.0, ..o.camera };
+    assert!(cam.viewport.height > 600.0, "{cam:?}");
+    h.message(Message::Camera(cam));
+    let blue = [30u8, 90, 200, 255];
+    let px = |rgba: &[u8], x: f32, y: f32| -> [u8; 4] {
+        let (sx, sy) = ((cam.origin.x + 20.0 + x) as usize, (cam.origin.y + 20.0 + y) as usize);
+        let i = (sy * 1600 + sx) * 4;
+        rgba[i..i + 4].try_into().unwrap()
+    };
+    // Tiles render on the PDF worker and show up on a later frame (a debug frame takes ~1.5 s).
+    let mut frame = Vec::new();
+    for _ in 0..40 {
+        h.events(&[]);
+        frame = h.frame_rgba().0;
+        if px(&frame, 300.0, 250.0) == blue && px(&frame, 300.0, 500.0) == blue && px(&frame, 20.0, 545.0) == blue {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert_eq!(px(&frame, 300.0, 250.0), blue, "the band above the line stays where it is");
+    assert_eq!(px(&frame, 300.0, 296.0), blue);
+    for y in [304.0, 350.0, 399.0, 446.0] {
+        assert_ne!(px(&frame, 300.0, y), blue, "blank paper where the space went in (y {y}), no stretched PDF");
+    }
+    for y in [454.0, 500.0, 546.0] {
+        assert_eq!(px(&frame, 300.0, y), blue, "the rest of the band 150 pt lower (y {y})");
+        assert_eq!(px(&frame, 20.0, y), blue);
+    }
+    assert_ne!(px(&frame, 300.0, 556.0), blue, "and it ends 150 pt lower too");
+    assert_ne!(px(&frame, 300.0, 180.0), blue);
+    assert_eq!(px(&frame, 450.0, 505.0), [215, 25, 33, 255], "pictures stay over the split PDF");
+}
+
 #[test]
 fn opening_another_notebook_directly_gets_its_own_camera() {
     let root = temp_root("switch");

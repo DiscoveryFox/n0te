@@ -21,18 +21,147 @@ pub struct SheetSpec {
     pub spacing: f32,
     /// For PDF pages: the blob (BLAKE3 hex) and page index of the background.
     pub pdf: Option<(String, u32)>,
+    /// Blank space inserted into a PDF page (sorted): at `.0` page points down the PDF as
+    /// printed, `.1` points of empty paper, the rest of the PDF below. `height` includes them.
+    pub gaps: Vec<(f32, f32)>,
+}
+
+/// A stretch of the background and where it lies on the page: from `src` (page points down
+/// the background as printed) for `len`, drawn from `dst` down the page.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Band {
+    pub src: f32,
+    pub len: f32,
+    pub dst: f32,
 }
 
 impl SheetSpec {
     pub fn a4(background: Background) -> Self {
-        SheetSpec { width: 595.0, height: 842.0, background, spacing: 20.0, pdf: None }
+        SheetSpec { width: 595.0, height: 842.0, background, spacing: 20.0, pdf: None, gaps: Vec::new() }
     }
     pub fn board() -> Self {
-        SheetSpec { width: 0.0, height: 0.0, background: Background::Dots, spacing: 24.0, pdf: None }
+        SheetSpec { width: 0.0, height: 0.0, background: Background::Dots, spacing: 24.0, pdf: None, gaps: Vec::new() }
     }
     pub fn is_board(&self) -> bool {
         self.width <= 0.0 || self.height <= 0.0
     }
+    /// The background's own height (a PDF page as printed), without the space inserted into it.
+    pub fn base_height(&self) -> f32 {
+        self.height - self.gaps.iter().map(|g| g.1).sum::<f32>()
+    }
+    /// How the background lies on the page: one band without gaps, one more per gap (a renderer
+    /// draws each band of a `width` × [`SheetSpec::base_height`] background moved down to `dst`).
+    pub fn bands(&self) -> Vec<Band> {
+        let mut out = Vec::with_capacity(self.gaps.len() + 1);
+        let (mut src, mut shift) = (0.0, 0.0);
+        for &(at, h) in &self.gaps {
+            out.push(Band { src, len: at - src, dst: src + shift });
+            shift += h;
+            src = at;
+        }
+        out.push(Band { src, len: self.base_height() - src, dst: src + shift });
+        out
+    }
+}
+
+/// What lies below a line on a page (its top and bottom; none if nothing does).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Below {
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
+}
+
+/// Space inserted into or taken out of a page: how far what lies below the line moves, and
+/// the page's height and gaps after.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpacePlan {
+    pub dy: f32,
+    pub height: f32,
+    pub gaps: Vec<(f32, f32)>,
+}
+
+/// Room kept under the lowest thing on a page that grew to keep it.
+const SPACE_MARGIN: f32 = 12.0;
+
+/// Space inserted at `y` (`dy` > 0) or taken out (`dy` < 0) on a page, with `below` what lies
+/// under the line. Nothing ever leaves its page: what is pushed past the bottom makes the page
+/// longer; a PDF page splits at the line (the PDF below moves down with the ink, so notes stay
+/// next to what they belong to) and grows by the space. Taking space out stops before what
+/// lies below reaches the line, and on a PDF page it only takes out space inserted before
+/// (the printed sheet never shrinks).
+pub fn plan_space(spec: &SheetSpec, y: f32, dy: f32, below: Below) -> SpacePlan {
+    let mut plan = SpacePlan { dy: 0.0, height: spec.height, gaps: spec.gaps.clone() };
+    if !dy.is_finite() || dy == 0.0 {
+        return plan;
+    }
+    let max = crate::format::MAX_PT;
+    if spec.is_board() {
+        plan.dy = if dy > 0.0 { dy } else { -(-dy).min(below.top.map_or(0.0, |t| (t - y).max(0.0))) };
+        return plan;
+    }
+    let y = y.clamp(0.0, spec.height);
+    // Where `y` is on a PDF page: inside a band (its place in the PDF as printed) or inside a
+    // gap. The first band starts at the top, so a gap always lies between two bands.
+    enum Place {
+        Printed(f32),
+        Gap(usize),
+    }
+    let place = || -> Place {
+        let bands = spec.bands();
+        for (k, b) in bands.iter().enumerate() {
+            if y < b.dst {
+                return Place::Gap(k - 1);
+            }
+            if y < b.dst + b.len || k + 1 == bands.len() {
+                return Place::Printed(b.src + (y - b.dst).min(b.len));
+            }
+        }
+        Place::Printed(spec.base_height())
+    };
+    if dy > 0.0 {
+        if spec.pdf.is_some() {
+            let d = dy.min(max - spec.height).max(0.0);
+            match place() {
+                Place::Gap(k) => plan.gaps[k].1 += d,
+                Place::Printed(at) => match plan.gaps.iter_mut().find(|g| (g.0 - at).abs() < 0.01) {
+                    Some(g) => g.1 += d,
+                    None => {
+                        plan.gaps.push((at, d));
+                        plan.gaps.sort_by(|a, b| a.0.total_cmp(&b.0));
+                    }
+                },
+            }
+            plan.dy = d;
+            plan.height = spec.height + d;
+        } else {
+            let mut d = dy;
+            if let Some(bottom) = below.bottom {
+                d = d.min(max - SPACE_MARGIN - bottom).max(0.0);
+                plan.height = spec.height.max(bottom + d + SPACE_MARGIN).min(max);
+            }
+            plan.dy = d;
+        }
+    } else {
+        let mut d = (-dy).min(below.top.map_or(f32::INFINITY, |t| (t - y).max(0.0)));
+        if spec.pdf.is_some() {
+            let room = match place() {
+                Place::Gap(k) => (spec.bands()[k + 1].dst - y).max(0.0),
+                Place::Printed(_) => 0.0,
+            };
+            d = d.min(room);
+            if let Place::Gap(k) = place() {
+                plan.gaps[k].1 -= d;
+                if plan.gaps[k].1 < 0.5 {
+                    plan.gaps.remove(k);
+                }
+            }
+            plan.height = spec.height - d;
+        } else if below.top.is_none() {
+            d = 0.0; // nothing below to pull up
+        }
+        plan.dy = -d;
+    }
+    plan
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +250,24 @@ const K_BG: &str = "bg";
 const K_SPACING: &str = "spacing";
 const K_PDF: &str = "pdf";
 const K_PDF_PAGE: &str = "pdf_page";
+const K_GAPS: &str = "gaps";
+
+fn gaps_text(gaps: &[(f32, f32)]) -> String {
+    gaps.iter().map(|(a, h)| format!("{a}:{h}")).collect::<Vec<_>>().join(";")
+}
+
+fn parse_gaps(s: &str) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = s
+        .split(';')
+        .filter_map(|g| {
+            let (a, h) = g.split_once(':')?;
+            let (a, h) = (a.parse::<f32>().ok()?, h.parse::<f32>().ok()?);
+            (a.is_finite() && h.is_finite() && h > 0.0).then_some((a, h))
+        })
+        .collect();
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
+}
 
 impl Notebook {
     /// A new, empty notebook edited by `peer`.
@@ -274,6 +421,9 @@ impl Notebook {
         if let Some((blob, page)) = &spec.pdf {
             m.insert(K_PDF, blob.as_str())?;
             m.insert(K_PDF_PAGE, *page as i64)?;
+            if !spec.gaps.is_empty() {
+                m.insert(K_GAPS, gaps_text(&spec.gaps))?;
+            }
         }
         if let Some(s) = side {
             m.insert(K_SIDE, s.as_str())?;
@@ -348,6 +498,29 @@ impl Notebook {
         let m = self.tree.get_meta(id)?;
         m.insert(K_W, width as f64)?;
         m.insert(K_H, height as f64)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Space inserted into or taken out of a sheet (see [`plan_space`]): its new height and,
+    /// for a PDF page, where its background splits. Also what undoing that puts back.
+    pub fn reshape(&self, node: &str, height: f32, gaps: &[(f32, f32)]) -> Result<()> {
+        let id = self.node(node)?;
+        if self.kind(id) != "sheet" {
+            return Err(Error::Invalid("only sheets have a size".into()));
+        }
+        let spec = self.spec(id);
+        if spec.is_board() {
+            return Err(Error::Invalid("boards have no height".into()));
+        }
+        let ok = height.is_finite() && (crate::format::MIN_PT..=crate::format::MAX_PT).contains(&height);
+        let gaps_ok = gaps.iter().all(|g| g.0.is_finite() && g.1.is_finite() && g.1 > 0.0);
+        if !ok || !gaps_ok || (spec.pdf.is_none() && !gaps.is_empty()) {
+            return Err(Error::Invalid(format!("page height {height} pt or its gaps are out of range")));
+        }
+        let m = self.tree.get_meta(id)?;
+        m.insert(K_H, height as f64)?;
+        m.insert(K_GAPS, gaps_text(gaps))?;
         self.doc.commit();
         Ok(())
     }
@@ -461,6 +634,7 @@ impl Notebook {
             background: Background::parse(&self.meta_string(id, K_BG)),
             spacing: self.meta_f64(id, K_SPACING) as f32,
             pdf,
+            gaps: parse_gaps(&self.meta_string(id, K_GAPS)),
         }
     }
 
@@ -575,6 +749,62 @@ mod tests {
                 OutlineRow::Sheet { depth, left, right, .. } => format!("{}S[{}|{}]", "  ".repeat(depth as usize), left.len(), right.len()),
             })
             .collect()
+    }
+
+    fn pdf_spec() -> SheetSpec {
+        SheetSpec { pdf: Some(("b".repeat(64), 0)), ..SheetSpec::a4(Background::Blank) }
+    }
+
+    #[test]
+    fn inserted_space_makes_pages_longer_and_splits_pdf_pages() {
+        let a4 = SheetSpec::a4(Background::Lines);
+        // Room at the bottom: what lies below moves into it, the page keeps its size.
+        let p = plan_space(&a4, 400.0, 100.0, Below { top: Some(420.0), bottom: Some(600.0) });
+        assert_eq!((p.dy, p.height), (100.0, 842.0));
+        // Pushed past the bottom: the page grows just enough (nothing goes to the next page).
+        let p = plan_space(&a4, 400.0, 100.0, Below { top: Some(420.0), bottom: Some(800.0) });
+        assert_eq!((p.dy, p.height), (100.0, 912.0));
+        assert!(p.gaps.is_empty());
+        // Taking space out stops where the ink below would reach the line.
+        let p = plan_space(&a4, 300.0, -300.0, Below { top: Some(500.0), bottom: Some(600.0) });
+        assert_eq!((p.dy, p.height), (-200.0, 842.0));
+        assert_eq!(plan_space(&a4, 300.0, -50.0, Below::default()).dy, 0.0, "nothing below: nothing to pull up");
+
+        // A PDF page splits where the space goes in and grows by it.
+        let pdf = pdf_spec();
+        let p = plan_space(&pdf, 300.0, 100.0, Below::default());
+        assert_eq!((p.dy, p.height, p.gaps.clone()), (100.0, 942.0, vec![(300.0, 100.0)]));
+        let one = SheetSpec { height: p.height, gaps: p.gaps, ..pdf.clone() };
+        assert_eq!(one.base_height(), 842.0);
+        assert_eq!(one.bands(), vec![Band { src: 0.0, len: 300.0, dst: 0.0 }, Band { src: 300.0, len: 542.0, dst: 400.0 }]);
+        // More space inside the blank part widens that gap; further down, a new gap where the PDF is.
+        let p = plan_space(&one, 350.0, 50.0, Below::default());
+        assert_eq!(p.gaps, vec![(300.0, 150.0)]);
+        let p = plan_space(&one, 500.0, 40.0, Below::default());
+        assert_eq!((p.height, p.gaps), (982.0, vec![(300.0, 100.0), (400.0, 40.0)]));
+        // Out again: only the blank space, and not past the ink below it.
+        let p = plan_space(&one, 320.0, -200.0, Below { top: Some(460.0), bottom: Some(900.0) });
+        assert_eq!((p.dy, p.height, p.gaps), (-80.0, 862.0, vec![(300.0, 20.0)]));
+        let p = plan_space(&one, 300.0, -100.0, Below::default());
+        assert_eq!((p.dy, p.height, p.gaps.is_empty()), (-100.0, 842.0, true), "all of it: the PDF is whole again");
+        assert_eq!(plan_space(&one, 200.0, -50.0, Below::default()).dy, 0.0, "the printed sheet never shrinks");
+    }
+
+    #[test]
+    fn reshape_keeps_height_and_gaps_and_refuses_gaps_on_plain_pages() {
+        let nb = Notebook::create(1, "Platz").unwrap();
+        let (pdf, _) = nb.add_sheet(None, 0, &pdf_spec()).unwrap();
+        let (plain, _) = nb.add_sheet(None, 1, &SheetSpec::a4(Background::Grid)).unwrap();
+        nb.reshape(&pdf, 942.0, &[(300.0, 100.0)]).unwrap();
+        nb.reshape(&plain, 900.0, &[]).unwrap();
+        assert!(nb.reshape(&plain, 900.0, &[(10.0, 5.0)]).is_err());
+        let specs = nb.sheet_specs();
+        let s = specs.values().find(|s| s.pdf.is_some()).unwrap();
+        assert_eq!((s.height, s.gaps.clone(), s.base_height()), (942.0, vec![(300.0, 100.0)], 842.0));
+        assert!(specs.values().any(|s| s.pdf.is_none() && s.height == 900.0));
+        let bytes = nb.snapshot().unwrap();
+        let again = Notebook::load(2, &bytes).unwrap();
+        assert!(again.sheet_specs().values().any(|s| s.gaps == vec![(300.0, 100.0)]));
     }
 
     #[test]

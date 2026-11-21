@@ -54,18 +54,37 @@
 //! name). Hiding that OCG (setting it OFF in `/D`, see [`hide_ink`]) renders the page without
 //! the ink.
 //!
+//! # Inserted space
+//! A page with gaps ([`add_ink_paper_text_images_gaps`]; n0te: space inserted into a PDF page,
+//! `SheetSpec::gaps`) gets longer by their sum and its content splits at them, staying vector:
+//! - The box edge that is the bottom of the page as displayed moves down (`/MediaBox` and
+//!   `/CropBox` are set to the grown displayed box, other boxes and `/Thumb` are dropped), so the
+//!   display matrix, and with it the ink's `cm`, stays the same.
+//! - The original content becomes one form XObject (a single content stream is reused as
+//!   stored; several are decoded and joined) with the page's resources, drawn once per band
+//!   ([`n0te_core::notebook::SheetSpec::bands`]): `q`, the display matrix, the band's place on
+//!   the page as clip, the inverse display matrix moved down by the band's shift, `Do`, `Q`.
+//!   Content that cannot be joined (filters other than Flate) is instead referenced again per
+//!   band between the same `q … Q` operators. Either way each band draws all of the page's
+//!   content under its clip, so text extraction (search, copy) sees the text of a split page once
+//!   per band; only the copy in its own band is visible.
+//! - Annotations move with the band their middle lies in (`/Rect` and point lists).
+//!
 //! # Input requirements
 //! A classic cross-reference table (what pdfium writes; cross-reference streams and object
 //! streams are refused), not encrypted.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use flate2::Compression;
+use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use n0te_core::ink;
+use n0te_core::notebook::{Background, Band, SheetSpec};
 
 use crate::export::Stroke;
 use crate::syntax::{Dict, File, Obj, write_num, write_uint};
@@ -150,14 +169,31 @@ pub fn jpeg_info(data: &[u8]) -> Option<(u32, u32, u8)> {
 
 /// [`add_ink_paper_text`] plus images per page (`images[i]`), drawn over the paper and under
 /// text and ink (outside the ink layer: they are part of the page).
-pub fn add_ink_paper_text_images(mut pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]], images: &[&[PdfImage]]) -> Result<Vec<u8>> {
+pub fn add_ink_paper_text_images(pdf: Vec<u8>, pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]], images: &[&[PdfImage]]) -> Result<Vec<u8>> {
+    add_ink_paper_text_images_gaps(pdf, pages, papers, texts, images, &[])
+}
+
+/// [`add_ink_paper_text_images`] plus blank space inserted into pages (`gaps[i]`, missing
+/// entries = none): (at, height) as in [`n0te_core::notebook::SheetSpec::gaps`], `at` in points
+/// down the page as it is in `pdf`. The page gets that much longer and its content splits there
+/// (see "Inserted space" in the module docs); ink, text and images are in coordinates of the
+/// longer page.
+pub fn add_ink_paper_text_images_gaps(
+    mut pdf: Vec<u8>,
+    pages: &[&[Stroke<'_>]],
+    papers: &[Option<Paper>],
+    texts: &[&[crate::text_layout::PdfText]],
+    images: &[&[PdfImage]],
+    gaps: &[&[(f32, f32)]],
+) -> Result<Vec<u8>> {
     let has_paper = papers.iter().any(|p| p.is_some_and(|p| p.background != n0te_core::notebook::Background::Blank));
     let has_text = texts.iter().any(|t| !t.is_empty());
     let has_images = images.iter().any(|i| i.iter().any(|im| jpeg_info(&im.jpeg).is_some()));
-    if pages.iter().all(|s| s.is_empty()) && !has_paper && !has_text && !has_images {
+    let has_gaps = gaps.iter().any(|g| !clean_gaps(g, f32::INFINITY).is_empty());
+    if pages.iter().all(|s| s.is_empty()) && !has_paper && !has_text && !has_images && !has_gaps {
         return Ok(pdf);
     }
-    let update = build_update(&pdf, pages, papers, texts, images)?;
+    let update = build_update(&pdf, pages, papers, texts, images, gaps)?;
     pdf.extend_from_slice(&update);
     Ok(pdf)
 }
@@ -197,7 +233,14 @@ struct PdfImagePlace {
     h: f32,
 }
 
-fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], texts: &[&[crate::text_layout::PdfText]], images: &[&[PdfImage]]) -> Result<Vec<u8>> {
+fn build_update(
+    pdf: &[u8],
+    pages: &[&[Stroke<'_>]],
+    papers: &[Option<Paper>],
+    texts: &[&[crate::text_layout::PdfText]],
+    images: &[&[PdfImage]],
+    gaps: &[&[(f32, f32)]],
+) -> Result<Vec<u8>> {
     let file = File::parse(pdf)?;
     let (root_num, root_gen) = match file.trailer.get("Root") {
         Some(Obj::Ref(n, g)) => (*n, *g),
@@ -221,6 +264,10 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
 
     // Image objects to write: number, JPEG bytes, pixel size and components.
     let mut image_objects: Vec<(u32, &[u8], u32, u32, u8)> = Vec::new();
+    // Pages split at inserted space: their new streams and moved annotations.
+    let mut split_streams: Vec<(u32, Dict, Cow<[u8]>)> = Vec::new();
+    let mut moved_annots: Vec<(u32, u16, Dict)> = Vec::new();
+    let mut annots_seen: HashSet<u32> = HashSet::new();
 
     // Plan every inked page: new resources, contents and the names its ink stream uses.
     let mut plans = Vec::new();
@@ -231,7 +278,12 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
         let page_images: Vec<(&PdfImage, (u32, u32, u8))> =
             images.get(i).copied().unwrap_or(&[]).iter().filter_map(|im| jpeg_info(&im.jpeg).filter(|j| j.2 == 1 || j.2 == 3).map(|j| (im, j))).collect();
         let mut alphas: Vec<u8> = strokes.iter().filter(|s| visible(s)).map(|s| (s.brush.color >> 24) as u8).collect();
-        if alphas.is_empty() && paper.is_none() && page_texts.is_empty() && page_images.is_empty() {
+        let media = rect(&file, node.media_box.as_ref());
+        let crop = rect(&file, node.crop_box.as_ref());
+        let rotate = resolve_opt(&file, node.rotate.as_ref())?.and_then(|o| o.as_f64()).unwrap_or(0.0) as i64;
+        let (pw, ph) = display_size(media, crop, rotate);
+        let page_gaps = clean_gaps(gaps.get(i).copied().unwrap_or(&[]), ph as f32);
+        if alphas.is_empty() && paper.is_none() && page_texts.is_empty() && page_images.is_empty() && page_gaps.is_empty() {
             continue;
         }
         alphas.sort_unstable();
@@ -289,25 +341,30 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
 
         let ink_obj = alloc();
         let existing = contents(&file, node.dict.get("Contents"))?;
+        let matrix = display_matrix(media, crop, rotate);
+        let mut dict = node.dict;
         let mut new_contents = Vec::with_capacity(existing.len() + 3);
-        if !existing.is_empty() {
-            new_contents.push(Obj::Ref(wrap_open, 0));
-            new_contents.extend(existing);
-            new_contents.push(Obj::Ref(wrap_close, 0));
+        let mut height = ph;
+        if page_gaps.is_empty() {
+            if !existing.is_empty() {
+                new_contents.push(Obj::Ref(wrap_open, 0));
+                new_contents.extend(existing);
+                new_contents.push(Obj::Ref(wrap_close, 0));
+            }
+        } else {
+            let page = SplitPage { resources: node.resources, existing, gaps: &page_gaps, matrix, shown: display_rect(media, crop), width: pw, height: ph, wrap_close };
+            let split = split_page(&file, page, &mut dict, &mut res, &mut alloc, &mut annots_seen)?;
+            height += page_gaps.iter().map(|g| g.1 as f64).sum::<f64>();
+            new_contents = split.contents;
+            split_streams.extend(split.streams);
+            moved_annots.extend(split.annots);
         }
         new_contents.push(Obj::Ref(ink_obj, 0));
 
-        let media = rect(&file, node.media_box.as_ref());
-        let crop = rect(&file, node.crop_box.as_ref());
-        let rotate = resolve_opt(&file, node.rotate.as_ref())?.and_then(|o| o.as_f64()).unwrap_or(0.0) as i64;
-        let matrix = display_matrix(media, crop, rotate);
-        let (pw, ph) = display_size(media, crop, rotate);
-
-        let mut dict = node.dict;
         dict.set("Contents", Obj::Array(new_contents));
         dict.set("Resources", Obj::Dict(res));
         page_dicts.push((node.num, node.generation, dict, ink_obj));
-        plans.push(Plan { strokes, texts: page_texts, fonts, paper: paper.map(|p| (p, pw, ph)), matrix, oc_name, gs_names, images: image_names });
+        plans.push(Plan { strokes, texts: page_texts, fonts, paper: paper.map(|p| (p, pw, height)), matrix, oc_name, gs_names, images: image_names });
     }
 
     if plans.is_empty() {
@@ -341,6 +398,13 @@ fn build_update(pdf: &[u8], pages: &[&[Stroke<'_>]], papers: &[Option<Paper>], t
     }
     for &(num, data, w, h, comps) in &image_objects {
         out.image(num, data, w, h, comps);
+    }
+    for (num, mut dict, data) in split_streams {
+        dict.set("Length", Obj::num(data.len() as f64));
+        out.stream_dict(num, &dict, &data);
+    }
+    for (num, generation, dict) in moved_annots {
+        out.object(num, generation, &Obj::Dict(dict));
     }
     for (&alpha, &num) in &gs_objects {
         let a = Obj::num(alpha as f64 / 255.0);
@@ -575,15 +639,7 @@ pub(crate) fn display_size(media: Option<[f64; 4]>, crop: Option<[f64; 4]>, rota
 }
 
 pub(crate) fn display_matrix(media: Option<[f64; 4]>, crop: Option<[f64; 4]>, rotate: i64) -> [f64; 6] {
-    let empty = |r: &[f64; 4]| r[0] >= r[2] || r[1] >= r[3];
-    let media = media.filter(|r| !empty(r)).unwrap_or([0.0, 0.0, 612.0, 792.0]);
-    let [x0, y0, x1, y1] = match crop {
-        Some(c) if !empty(&c) => {
-            let r = [c[0].max(media[0]), c[1].max(media[1]), c[2].min(media[2]), c[3].min(media[3])];
-            if r[0] > r[2] || r[1] > r[3] { [0.0; 4] } else { r }
-        }
-        _ => media,
-    };
+    let [x0, y0, x1, y1] = display_rect(media, crop);
     // pdfium: (Rotate / 90) % 4 with C integer division, negative turns wrap around.
     let mut quarter = (rotate / 90) % 4;
     if quarter < 0 {
@@ -594,6 +650,20 @@ pub(crate) fn display_matrix(media: Option<[f64; 4]>, crop: Option<[f64; 4]>, ro
         1 => [0.0, 1.0, 1.0, 0.0, x0, y0],
         2 => [-1.0, 0.0, 0.0, 1.0, x1, y0],
         _ => [0.0, -1.0, -1.0, 0.0, x1, y1],
+    }
+}
+
+/// The page as displayed, in user space: the crop box within the media box (missing boxes
+/// default to the media box and US Letter), before `/Rotate`.
+fn display_rect(media: Option<[f64; 4]>, crop: Option<[f64; 4]>) -> [f64; 4] {
+    let empty = |r: &[f64; 4]| r[0] >= r[2] || r[1] >= r[3];
+    let media = media.filter(|r| !empty(r)).unwrap_or([0.0, 0.0, 612.0, 792.0]);
+    match crop {
+        Some(c) if !empty(&c) => {
+            let r = [c[0].max(media[0]), c[1].max(media[1]), c[2].min(media[2]), c[3].min(media[3])];
+            if r[0] > r[2] || r[1] > r[3] { [0.0; 4] } else { r }
+        }
+        _ => media,
     }
 }
 
@@ -626,6 +696,254 @@ fn push_ref<'a>(file: &File<'a>, dict: &mut Dict<'a>, key: &str, num: u32) -> Re
     items.push(Obj::Ref(num, 0));
     dict.set(key, Obj::Array(items));
     Ok(())
+}
+
+/// Usable gaps, sorted by `at`: finite, with a positive height, `at` clamped to the page
+/// (0 ..= `base`, the page's height as displayed).
+fn clean_gaps(gaps: &[(f32, f32)], base: f32) -> Vec<(f32, f32)> {
+    let mut out: Vec<(f32, f32)> = gaps.iter().filter(|g| g.0.is_finite() && g.1.is_finite() && g.1 > 0.0).map(|&(at, h)| (at.clamp(0.0, base), h)).collect();
+    out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    out
+}
+
+/// A page to split at inserted space.
+struct SplitPage<'a, 'g> {
+    /// The page's resources (own or inherited): the form XObject's resources.
+    resources: Option<Obj<'a>>,
+    /// Its content streams.
+    existing: Vec<Obj<'a>>,
+    gaps: &'g [(f32, f32)],
+    /// Page coordinates -> user space ([`display_matrix`]); unchanged by the split.
+    matrix: [f64; 6],
+    /// The page as displayed, in user space ([`display_rect`]).
+    shown: [f64; 4],
+    /// Width and height as displayed, before the split.
+    width: f64,
+    height: f64,
+    /// The shared `Q` stream.
+    wrap_close: u32,
+}
+
+/// What splitting a page writes.
+struct Split<'a> {
+    /// The page's contents before the ink: its content drawn band by band.
+    contents: Vec<Obj<'a>>,
+    /// New streams: (object number, dictionary without `/Length`, data as stored).
+    streams: Vec<(u32, Dict<'a>, Cow<'a, [u8]>)>,
+    /// Annotations moved down with their part of the page: (number, generation, dictionary).
+    annots: Vec<(u32, u16, Dict<'a>)>,
+}
+
+/// Splits a page at its gaps (see "Inserted space" in the module docs): grows its boxes, draws
+/// its content once per band and moves its annotations. `page` is the page dictionary and `res`
+/// its new resources, both changed in place.
+fn split_page<'a>(file: &File<'a>, p: SplitPage<'a, '_>, page: &mut Dict<'a>, res: &mut Dict<'a>, alloc: &mut dyn FnMut() -> u32, seen: &mut HashSet<u32>) -> Result<Split<'a>> {
+    let total: f32 = p.gaps.iter().map(|g| g.1).sum();
+    // The same bands the apps draw (`at` is measured on the page as it is in this PDF).
+    let spec = SheetSpec { width: p.width as f32, height: p.height as f32 + total, background: Background::Blank, spacing: 0.0, pdf: None, gaps: p.gaps.to_vec() };
+    let bands = spec.bands();
+
+    // Grow the page downwards as displayed: move the edge of the box that is the bottom on screen
+    // (which one depends on /Rotate). The display matrix stays the same, so does the ink's.
+    let m = p.matrix;
+    let mut grown = p.shown;
+    let (dx, dy) = (m[2] * total as f64, m[3] * total as f64);
+    if dx > 0.0 { grown[2] += dx } else { grown[0] += dx }
+    if dy > 0.0 { grown[3] += dy } else { grown[1] += dy }
+    let rect_obj = |r: [f64; 4]| Obj::Array(r.iter().map(|v| Obj::num(*v)).collect());
+    page.set("MediaBox", rect_obj(grown));
+    page.set("CropBox", rect_obj(grown));
+    for stale in ["BleedBox", "TrimBox", "ArtBox", "Thumb"] {
+        page.remove(stale);
+    }
+
+    let inv = invert(m);
+    let mut out = Split { contents: Vec::new(), streams: Vec::new(), annots: move_annots(file, page, m, inv, &bands, seen)? };
+    if p.existing.is_empty() {
+        return Ok(out);
+    }
+    // Per band: page coordinates, clip to where the band lies on the page, then the original
+    // user space moved down by the band's shift (the inverse display matrix plus the shift).
+    let band_start = |b: &Band| -> Vec<u8> {
+        let mut o = b"q\n".to_vec();
+        write_matrix(&mut o, m);
+        for v in [0.0, b.dst as f64, p.width, b.len as f64] {
+            write_num(&mut o, v, 4);
+            o.push(b' ');
+        }
+        o.extend_from_slice(b"re W n\n");
+        let mut moved = inv;
+        moved[5] += (b.dst - b.src) as f64;
+        write_matrix(&mut o, moved);
+        o
+    };
+    let drawn: Vec<&Band> = bands.iter().filter(|b| b.len > 0.0).collect();
+    match form_content(file, &p.existing) {
+        Some((filter, parms, data)) => {
+            // The original content as one form XObject, placed once per band.
+            let form = alloc();
+            let mut d = Dict::default();
+            d.set("Type", Obj::name("XObject"));
+            d.set("Subtype", Obj::name("Form"));
+            d.set("BBox", rect_obj(p.shown));
+            d.set("Resources", p.resources.unwrap_or(Obj::Dict(Dict::default())));
+            if let Some(f) = filter {
+                d.set("Filter", f);
+            }
+            if let Some(dp) = parms {
+                d.set("DecodeParms", dp);
+            }
+            out.streams.push((form, d, data));
+            let mut xo = sub_dict(file, res, "XObject")?;
+            let name = unique_name(&xo, "N0tePdf");
+            xo.set(&name, Obj::Ref(form, 0));
+            res.set("XObject", Obj::Dict(xo));
+            let mut ops = Vec::new();
+            for b in drawn {
+                ops.extend(band_start(b));
+                ops.push(b'/');
+                ops.extend_from_slice(name.as_bytes());
+                ops.extend_from_slice(b" Do\nQ\n");
+            }
+            let num = alloc();
+            out.streams.push((num, Dict::default(), Cow::Owned(ops)));
+            out.contents.push(Obj::Ref(num, 0));
+        }
+        None => {
+            // Content that cannot become one stream: the original streams again per band.
+            for b in drawn {
+                let num = alloc();
+                out.streams.push((num, Dict::default(), Cow::Owned(band_start(b))));
+                out.contents.push(Obj::Ref(num, 0));
+                out.contents.extend(p.existing.iter().cloned());
+                out.contents.push(Obj::Ref(p.wrap_close, 0));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Largest decoded content stream joined into a form XObject (beyond it the streams are reused
+/// as they are).
+const MAX_CONTENT: usize = 256 << 20;
+
+/// A page's content as one stream for a form XObject: (filter, decode parameters, data as
+/// stored). A single stream is taken as it is; several are decoded and joined (they may split
+/// anywhere between tokens). `None` if that is not possible (other filters, external data).
+fn form_content<'a>(file: &File<'a>, existing: &[Obj<'a>]) -> Option<(Option<Obj<'a>>, Option<Obj<'a>>, Cow<'a, [u8]>)> {
+    let streams: Vec<(Dict<'a>, &'a [u8])> = existing.iter().map(|o| if let Obj::Ref(n, _) = o { file.stream(*n).ok() } else { None }).collect::<Option<_>>()?;
+    if streams.iter().any(|(d, _)| d.contains("F")) {
+        return None;
+    }
+    if let [(d, data)] = streams.as_slice() {
+        return Some((d.get("Filter").cloned(), d.get("DecodeParms").cloned(), Cow::Borrowed(*data)));
+    }
+    let mut joined = Vec::new();
+    for (d, data) in &streams {
+        joined.extend(decode(file, d, data)?);
+        joined.push(b'\n');
+    }
+    let mut z = ZlibEncoder::new(Vec::with_capacity(joined.len() / 3), Compression::new(FLATE_LEVEL));
+    z.write_all(&joined).ok()?;
+    Some((Some(Obj::name("FlateDecode")), None, Cow::Owned(z.finish().ok()?)))
+}
+
+/// A content stream's data decoded, if it is stored plain or Flate-compressed without decode
+/// parameters (what content streams use in practice).
+fn decode<'a>(file: &File<'a>, d: &Dict<'a>, data: &[u8]) -> Option<Vec<u8>> {
+    if file.get(d, "DecodeParms").ok()?.is_some() {
+        return None;
+    }
+    let flate = match file.get(d, "Filter").ok()? {
+        None => false,
+        Some(Obj::Array(a)) if a.is_empty() => false,
+        Some(Obj::Array(a)) if a.len() == 1 => file.resolve(&a[0]).ok()?.is_name("FlateDecode").then_some(true)?,
+        Some(f) => f.is_name("FlateDecode").then_some(true)?,
+    };
+    if !flate {
+        return Some(data.to_vec());
+    }
+    let mut out = Vec::new();
+    ZlibDecoder::new(data).take(MAX_CONTENT as u64 + 1).read_to_end(&mut out).ok()?;
+    (out.len() <= MAX_CONTENT).then_some(out)
+}
+
+/// Moves a split page's annotations with their part of the page: each by the shift of the band
+/// its middle lies in. Returns the rewritten annotation objects (inline ones change in `page`).
+fn move_annots<'a>(file: &File<'a>, page: &mut Dict<'a>, m: [f64; 6], inv: [f64; 6], bands: &[Band], seen: &mut HashSet<u32>) -> Result<Vec<(u32, u16, Dict<'a>)>> {
+    let mut moved = Vec::new();
+    let Some(Obj::Array(mut list)) = file.get(page, "Annots")? else { return Ok(moved) };
+    let mut inline = false;
+    for item in &mut list {
+        match item {
+            Obj::Ref(n, _) => {
+                // Annotations are dictionaries; never rewrite a stream as one.
+                if seen.contains(n) || file.stream(*n).is_ok() {
+                    continue;
+                }
+                if let Ok((generation, Obj::Dict(mut a))) = file.object(*n)
+                    && shift_annot(file, &mut a, m, inv, bands)
+                {
+                    seen.insert(*n);
+                    moved.push((*n, generation, a));
+                }
+            }
+            Obj::Dict(a) => inline |= shift_annot(file, a, m, inv, bands),
+            _ => {}
+        }
+    }
+    if inline {
+        page.set("Annots", Obj::Array(list));
+    }
+    Ok(moved)
+}
+
+/// Moves one annotation: its rectangle (its appearance follows it) and point lists.
+fn shift_annot<'a>(file: &File<'a>, a: &mut Dict<'a>, m: [f64; 6], inv: [f64; 6], bands: &[Band]) -> bool {
+    let Some(r) = rect(file, a.get("Rect")) else { return false };
+    let (cx, cy) = ((r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0);
+    let shift = band_shift(bands, (inv[1] * cx + inv[3] * cy + inv[5]) as f32) as f64;
+    if shift == 0.0 {
+        return false;
+    }
+    let (dx, dy) = (m[2] * shift, m[3] * shift);
+    let pairs = |v: &[Obj<'a>]| -> Option<Vec<Obj<'a>>> {
+        v.iter().enumerate().map(|(i, o)| Some(Obj::num(file.resolve(o).ok()?.as_f64()? + if i % 2 == 0 { dx } else { dy }))).collect()
+    };
+    for key in ["Rect", "QuadPoints", "Vertices", "L", "CL"] {
+        if let Ok(Some(Obj::Array(v))) = file.get(a, key)
+            && let Some(t) = pairs(&v)
+        {
+            a.set(key, Obj::Array(t));
+        }
+    }
+    if let Ok(Some(Obj::Array(paths))) = file.get(a, "InkList") {
+        let t: Option<Vec<Obj>> = paths.iter().map(|p| if let Ok(Obj::Array(v)) = file.resolve(p) { pairs(&v).map(Obj::Array) } else { None }).collect();
+        if let Some(t) = t {
+            a.set("InkList", Obj::Array(t));
+        }
+    }
+    true
+}
+
+/// How far the band holding PDF y `y` (points down the page as printed) moves down.
+fn band_shift(bands: &[Band], y: f32) -> f32 {
+    bands.iter().rev().find(|b| y >= b.src).map_or(0.0, |b| b.dst - b.src)
+}
+
+fn invert(m: [f64; 6]) -> [f64; 6] {
+    let det = m[0] * m[3] - m[1] * m[2];
+    let (a, b, c, d) = (m[3] / det, -m[1] / det, -m[2] / det, m[0] / det);
+    [a, b, c, d, -(a * m[4] + c * m[5]), -(b * m[4] + d * m[5])]
+}
+
+/// `a b c d e f cm`
+fn write_matrix(out: &mut Vec<u8>, m: [f64; 6]) {
+    for v in m {
+        write_num(out, v, 4);
+        out.push(b' ');
+    }
+    out.extend_from_slice(b"cm\n");
 }
 
 /// Compressed ink streams of all plans, in order. Pages are independent, so they are built on
@@ -855,6 +1173,15 @@ impl Out {
         self.buf.extend_from_slice(b"\nendstream\nendobj\n");
     }
 
+    /// A stream with its own dictionary (which carries the `/Length`).
+    fn stream_dict(&mut self, num: u32, dict: &Dict, data: &[u8]) {
+        self.begin(num, 0);
+        dict.write(&mut self.buf);
+        self.buf.extend_from_slice(b"stream\n");
+        self.buf.extend_from_slice(data);
+        self.buf.extend_from_slice(b"\nendstream\nendobj\n");
+    }
+
     fn stream(&mut self, num: u32, data: &[u8], flate: bool) {
         self.begin(num, 0);
         self.buf.extend_from_slice(b"<</Length ");
@@ -993,6 +1320,47 @@ mod tests {
         let (p, b) = dot(1.0, 1.0, 0x00FF0000);
         let s = [Stroke { points: &p, brush: b }];
         assert_eq!(add_ink(handmade(), &[&s, &[]]).unwrap(), handmade());
+    }
+
+    #[test]
+    fn a_split_page_grows_at_its_displayed_bottom_and_draws_its_content_per_band() {
+        let (p, b) = dot(5.0, 5.0, 0xFF000000);
+        let s = [Stroke { points: &p, brush: b }];
+        // Page 1 is turned by 90 (inherited) and cropped to [10 20 590 780]: displayed 760 × 580,
+        // its displayed bottom is the right edge in user space. A broken gap is ignored.
+        let gaps: [&[(f32, f32)]; 2] = [&[(100.0, 50.0), (f32::NAN, 9.0)], &[]];
+        let out = add_ink_paper_text_images_gaps(handmade(), &[&s, &[]], &[], &[], &[], &gaps).unwrap();
+        let f = File::parse(&out).unwrap();
+        let cat = f.resolve(f.trailer.get("Root").unwrap()).unwrap().into_dict().unwrap();
+        let tree = page_tree(&f, &cat).unwrap();
+        let page = &tree[0];
+        let grown = Some([10.0, 20.0, 640.0, 780.0]);
+        assert_eq!((rect(&f, page.dict.get("MediaBox")), rect(&f, page.dict.get("CropBox"))), (grown, grown));
+        assert_eq!(display_size(grown, grown, 90), (760.0, 630.0), "50 pt longer as displayed");
+        assert_eq!(display_matrix(grown, grown, 90), display_matrix(Some([0.0, 0.0, 600.0, 800.0]), Some([10.0, 20.0, 590.0, 780.0]), 90), "same display matrix, so the ink stays put");
+
+        // Contents: the bands, then the ink.
+        let Some(Obj::Array(c)) = page.dict.get("Contents") else { panic!() };
+        assert_eq!(c.len(), 2, "{c:?}");
+        let Obj::Ref(bands, _) = c[0] else { panic!() };
+        let ops = std::str::from_utf8(f.stream(bands).unwrap().1).unwrap().to_string();
+        assert_eq!(
+            ops,
+            "q\n0 1 1 0 10 20 cm\n0 0 760 100 re W n\n0 1 1 0 -20 -10 cm\n/N0tePdf Do\nQ\n\
+             q\n0 1 1 0 10 20 cm\n0 150 760 480 re W n\n0 1 1 0 -20 40 cm\n/N0tePdf Do\nQ\n"
+        );
+        // The form: the original content stream as stored, with the page's resources.
+        let res = f.resolve(page.dict.get("Resources").unwrap()).unwrap().into_dict().unwrap();
+        let xo = f.get(&res, "XObject").unwrap().unwrap().into_dict().unwrap();
+        let Some(&Obj::Ref(form, _)) = xo.get("N0tePdf") else { panic!() };
+        let (fd, data) = f.stream(form).unwrap();
+        assert!(fd.get("Subtype").unwrap().is_name("Form"));
+        assert_eq!(fd.get("Resources"), Some(&Obj::Ref(5, 0)));
+        assert_eq!(rect(&f, fd.get("BBox")), Some([10.0, 20.0, 590.0, 780.0]));
+        assert_eq!(data, b"0 0 m 1 1");
+        // Page 2 has neither gaps nor ink: untouched.
+        assert!(!tree[1].dict.contains("Resources"));
+        assert_eq!(rect(&f, tree[1].dict.get("MediaBox")), Some([0.0, 0.0, 300.0, 300.0]));
     }
 
     #[test]

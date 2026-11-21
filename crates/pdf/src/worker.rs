@@ -323,7 +323,8 @@ impl PdfWorker {
         let papers: Vec<Option<crate::ink_writer::Paper>> = sheets.iter().map(|s| s.paper).collect();
         let texts: Vec<&[crate::text_layout::PdfText]> = sheets.iter().map(|s| s.texts.as_slice()).collect();
         let images: Vec<&[crate::ink_writer::PdfImage]> = sheets.iter().map(|s| s.images.as_slice()).collect();
-        crate::ink_writer::add_ink_paper_text_images(bytes, &refs, &papers, &texts, &images)
+        let gaps: Vec<&[(f32, f32)]> = sheets.iter().map(|s| s.gaps.as_slice()).collect();
+        crate::ink_writer::add_ink_paper_text_images_gaps(bytes, &refs, &papers, &texts, &images, &gaps)
     }
 }
 
@@ -357,6 +358,9 @@ pub struct ExportSheet {
     pub paper: Option<crate::ink_writer::Paper>,
     /// Images on the page (JPEG), over the paper and under text and ink.
     pub images: Vec<crate::ink_writer::PdfImage>,
+    /// Space inserted into a PDF page (`SheetSpec::gaps`): the page gets that much longer and
+    /// its PDF splits there (see [`crate::ink_writer`]). Empty for other pages.
+    pub gaps: Vec<(f32, f32)>,
 }
 
 fn run(shared: &Shared, mut docs: Docs, sink: Box<Sink>) {

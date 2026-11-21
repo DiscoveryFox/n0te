@@ -164,12 +164,63 @@ pub struct FfiSheetSpec {
     pub spacing: f32,
     pub pdf_blob: Option<String>,
     pub pdf_page: u32,
+    /// PDF pages: blank space inserted into the PDF, pairs (at, height) in page points down the
+    /// PDF as printed; `height` includes it.
+    #[uniffi(default)]
+    pub gaps: Vec<f32>,
+}
+
+fn pairs(v: &[f32]) -> Vec<(f32, f32)> {
+    v.chunks_exact(2).map(|c| (c[0], c[1])).collect()
+}
+
+fn flat(v: &[(f32, f32)]) -> Vec<f32> {
+    v.iter().flat_map(|&(a, b)| [a, b]).collect()
 }
 
 impl From<FfiSheetSpec> for SheetSpec {
     fn from(s: FfiSheetSpec) -> Self {
-        SheetSpec { width: s.width, height: s.height, background: s.background.into(), spacing: s.spacing, pdf: s.pdf_blob.map(|b| (b, s.pdf_page)) }
+        let gaps = pairs(&s.gaps);
+        SheetSpec { width: s.width, height: s.height, background: s.background.into(), spacing: s.spacing, pdf: s.pdf_blob.map(|b| (b, s.pdf_page)), gaps }
     }
+}
+
+/// A stretch of a page's background and where it lies: from `src` (down the background as
+/// printed) for `len`, drawn from `dst` down the page.
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiBand {
+    pub src: f32,
+    pub len: f32,
+    pub dst: f32,
+}
+
+/// How a page's background lies on it: one band, one more per gap of inserted space.
+#[uniffi::export]
+pub fn background_bands(spec: FfiSheetSpec) -> Vec<FfiBand> {
+    SheetSpec::from(spec).bands().into_iter().map(|b| FfiBand { src: b.src, len: b.len, dst: b.dst }).collect()
+}
+
+/// What lies below a line on a page: its top and bottom (none if nothing does).
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiBelow {
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
+}
+
+/// Space inserted or taken out: how far what lies below moves, the page's height and gaps after.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSpacePlan {
+    pub dy: f32,
+    pub height: f32,
+    pub gaps: Vec<f32>,
+}
+
+/// Space inserted at `y` (`dy` > 0) or taken out (`dy` < 0) on a page (see the core's `plan_space`):
+/// nothing leaves the page, a PDF page splits at the line.
+#[uniffi::export]
+pub fn plan_space(spec: FfiSheetSpec, y: f32, dy: f32, below: FfiBelow) -> FfiSpacePlan {
+    let p = n0te_core::notebook::plan_space(&spec.into(), y, dy, n0te_core::notebook::Below { top: below.top, bottom: below.bottom });
+    FfiSpacePlan { dy: p.dy, height: p.height, gaps: flat(&p.gaps) }
 }
 impl From<SheetSpec> for FfiSheetSpec {
     fn from(s: SheetSpec) -> Self {
@@ -177,7 +228,8 @@ impl From<SheetSpec> for FfiSheetSpec {
             Some((b, p)) => (Some(b), p),
             None => (None, 0),
         };
-        FfiSheetSpec { width: s.width, height: s.height, background: s.background.into(), spacing: s.spacing, pdf_blob, pdf_page }
+        let gaps = flat(&s.gaps);
+        FfiSheetSpec { width: s.width, height: s.height, background: s.background.into(), spacing: s.spacing, pdf_blob, pdf_page, gaps }
     }
 }
 
@@ -471,7 +523,7 @@ pub fn run_core_bench(root: String) -> R<BenchResult> {
     let t = Instant::now();
     let nb = lib.clone().create_notebook("Bench".into())?;
     let mut group = None;
-    let a4 = FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Grid, spacing: 20.0, pdf_blob: None, pdf_page: 0 };
+    let a4 = FfiSheetSpec { width: 595.0, height: 842.0, background: FfiBackground::Grid, spacing: 20.0, pdf_blob: None, pdf_page: 0, gaps: vec![] };
     let mut first_sheet = String::new();
     for i in 0..500u32 {
         if i % 25 == 0 {

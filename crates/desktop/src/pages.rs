@@ -28,7 +28,7 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Theme, Transfo
 
 use n0te_core::ink::{self, KIND_PENCIL, Rect};
 use n0te_core::layout::{self as nl, Header, Placed};
-use n0te_core::notebook::Background;
+use n0te_core::notebook::{Background, SheetSpec};
 use n0te_core::sheet::{Stroke, TextBox};
 
 use crate::pdf::{self, Pdf};
@@ -141,6 +141,46 @@ impl Page {
         *self.ink.borrow_mut() = Some((step, cache.clone()));
         cache
     }
+}
+
+/// One stretch of a PDF page's background to draw (a band of [`SheetSpec::bands`]): the tiles of
+/// the PDF page at its own size, `width` × [`SheetSpec::base_height`], drawn `shift` points
+/// further down the page and clipped to `dst`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PdfPart {
+    /// The whole stretch, in points on the PDF page (requested at thumbnail scale).
+    pub src: Rect,
+    /// Its part in view, in points on the PDF page (requested sharp); `None` if out of view.
+    pub visible: Option<Rect>,
+    /// Where it lies on the page (page points).
+    pub dst: Rect,
+    /// Page y minus PDF y.
+    pub shift: f32,
+}
+
+/// The stretches of a PDF page's background to draw while `visible` (page points) is in view:
+/// a page without gaps is one stretch, the whole page, as always; a page with space inserted
+/// one per band that lies in view.
+pub fn pdf_parts(spec: &SheetSpec, visible: Rect) -> Vec<PdfPart> {
+    let w = spec.width;
+    if spec.gaps.is_empty() {
+        let whole = Rect::new(0.0, 0.0, w, spec.height);
+        return vec![PdfPart { src: whole, visible: (!visible.is_empty()).then_some(visible), dst: whole, shift: 0.0 }];
+    }
+    spec.bands()
+        .into_iter()
+        .filter(|b| b.len > 0.0)
+        .filter_map(|b| {
+            let dst = Rect { x0: 0.0, y0: b.dst, x1: w, y1: b.dst + b.len };
+            let seen = Rect { x0: visible.x0.max(0.0), y0: visible.y0.max(dst.y0), x1: visible.x1.min(w), y1: visible.y1.min(dst.y1) };
+            if visible.is_empty() || seen.x0 >= seen.x1 || seen.y0 >= seen.y1 {
+                return None;
+            }
+            let shift = b.dst - b.src;
+            let src = Rect { x0: 0.0, y0: b.src, x1: w, y1: b.src + b.len };
+            Some(PdfPart { src, visible: Some(Rect { y0: seen.y0 - shift, y1: seen.y1 - shift, ..seen }), dst, shift })
+        })
+        .collect()
 }
 
 /// Whether `strokes` holds the finished live stroke `l` (same colour, about the same place and
@@ -470,24 +510,43 @@ impl Pages {
     }
 
     /// Draws a PDF page's background: the thumbnail, sharp tiles of the visible part on top.
+    /// Space inserted into the page splits it ([`pdf_parts`]): each stretch of the PDF (at its own
+    /// size, never stretched) is drawn moved down to its place, in a layer of its own clipped to
+    /// that place (the software renderer clips images only to their layer), so whatever goes on
+    /// the page over the PDF must be drawn in a later layer.
     fn draw_pdf(&self, r: &mut iced::Renderer, page: &Page, at: Point, cam: &Camera, view: &Rect, clip: Rectangle) {
         use iced::advanced::image::{FilterMethod, Image, Renderer as _};
-        let (Some(pdf), Some((blob, index))) = (&self.pdf, &page.placed.spec.pdf) else { return };
+        let spec = &page.placed.spec;
+        let (Some(pdf), Some((blob, index))) = (&self.pdf, &spec.pdf) else { return };
         let rect = page.rect();
-        let size = n0te_pdf::PageSize { width: rect.width(), height: rect.height() };
-        let whole = Rect::new(0.0, 0.0, size.width, size.height);
+        let size = n0te_pdf::PageSize { width: spec.width, height: spec.base_height() };
         let visible = Rect::new(view.x0.max(rect.x0) - rect.x0, view.y0.max(rect.y0) - rect.y0, view.x1.min(rect.x1) - rect.x0, view.y1.min(rect.y1) - rect.y0);
-        let mut levels = vec![pdf.tiles_for(blob, *index, size, pdf::THUMB, whole, n0te_pdf::worker::priority::BACKGROUND)];
         let b = pdf::bucket(cam.zoom);
-        if b > pdf::THUMB && !visible.is_empty() {
-            levels.push(pdf.tiles_for(blob, *index, size, b, visible, n0te_pdf::worker::priority::VISIBLE));
-        }
-        for tiles in levels {
-            for (t, img) in tiles {
-                if let Some(h) = img {
-                    let bounds = Rectangle::new(Point::new(at.x + t.x0 * cam.zoom, at.y + t.y0 * cam.zoom), Size::new(t.width() * cam.zoom, t.height() * cam.zoom));
-                    r.draw_image(Image::new(h).filter_method(FilterMethod::Linear), bounds, clip);
+        for part in pdf_parts(spec, visible) {
+            // A page without gaps draws exactly as it always did; a split one keeps each stretch
+            // inside its place on the page (the blank space between stays paper).
+            let place = Rectangle::new(Point::new(at.x + part.dst.x0 * cam.zoom, at.y + part.dst.y0 * cam.zoom), Size::new(part.dst.width() * cam.zoom, part.dst.height() * cam.zoom));
+            let Some(clip) = (if spec.gaps.is_empty() { Some(clip) } else { place.intersection(&clip) }) else { continue };
+            let mut levels = vec![pdf.tiles_for(blob, *index, size, pdf::THUMB, part.src, n0te_pdf::worker::priority::BACKGROUND)];
+            if b > pdf::THUMB
+                && let Some(seen) = part.visible
+            {
+                levels.push(pdf.tiles_for(blob, *index, size, b, seen, n0te_pdf::worker::priority::VISIBLE));
+            }
+            let draw = |r: &mut iced::Renderer| {
+                for tiles in levels {
+                    for (t, img) in tiles {
+                        if let Some(h) = img {
+                            let bounds = Rectangle::new(Point::new(at.x + t.x0 * cam.zoom, at.y + (t.y0 + part.shift) * cam.zoom), Size::new(t.width() * cam.zoom, t.height() * cam.zoom));
+                            r.draw_image(Image::new(h).filter_method(FilterMethod::Linear), bounds, clip);
+                        }
+                    }
                 }
+            };
+            if spec.gaps.is_empty() {
+                draw(r);
+            } else {
+                r.with_layer(clip, draw);
             }
         }
     }
@@ -872,7 +931,12 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
                 });
                 pages.draw_pdf(r, page, at, &cam, &view, bounds);
-                pages.draw_images(r, page, at, &cam, bounds);
+                if page.placed.spec.gaps.is_empty() {
+                    pages.draw_images(r, page, at, &cam, bounds);
+                } else {
+                    // Over the layers of a split PDF page's stretches.
+                    r.with_layer(bounds, |r| pages.draw_images(r, page, at, &cam, bounds));
+                }
             }
         });
         renderer.with_layer(bounds, |r| {
@@ -979,6 +1043,35 @@ mod tests {
         assert!(!stored_has(&[stored(50.0, 0xFFD7_1921)], &live));
         // The save with it: drop the live copy.
         assert!(stored_has(&[stored(300.0, brush.color), stored(50.0, brush.color)], &live));
+    }
+
+    #[test]
+    fn pdf_pages_split_where_space_was_inserted() {
+        let pdf = SheetSpec { pdf: Some(("b".repeat(64), 0)), ..SheetSpec::a4(Background::Blank) };
+        let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect { x0, y0, x1, y1 };
+        // Without gaps: the whole page, as always (the visible part as it is).
+        let view = r(100.0, 200.0, 595.0, 500.0);
+        assert_eq!(pdf_parts(&pdf, view), vec![PdfPart { src: r(0.0, 0.0, 595.0, 842.0), visible: Some(view), dst: r(0.0, 0.0, 595.0, 842.0), shift: 0.0 }]);
+
+        // 100 pt inserted at 300: the PDF above stays, the rest goes 100 pt down.
+        let split = SheetSpec { height: 942.0, gaps: vec![(300.0, 100.0)], ..pdf.clone() };
+        let all = pdf_parts(&split, r(0.0, 0.0, 595.0, 942.0));
+        assert_eq!(all.len(), 2);
+        assert_eq!((all[0].src, all[0].dst, all[0].shift), (r(0.0, 0.0, 595.0, 300.0), r(0.0, 0.0, 595.0, 300.0), 0.0));
+        assert_eq!((all[1].src, all[1].dst, all[1].shift), (r(0.0, 300.0, 595.0, 842.0), r(0.0, 400.0, 595.0, 942.0), 100.0));
+        // Sharp tiles only for what is in view, in PDF points: the view 350..600 shows the blank
+        // space and the PDF from 300 (page 400) to 500 (page 600).
+        let part = pdf_parts(&split, r(0.0, 350.0, 595.0, 600.0));
+        assert_eq!(part.len(), 1, "the band above is out of view: {part:?}");
+        assert_eq!((part[0].visible, part[0].shift), (Some(r(0.0, 300.0, 595.0, 500.0)), 100.0));
+        assert!(pdf_parts(&split, r(0.0, 320.0, 595.0, 380.0)).is_empty(), "only blank space in view");
+        let top = pdf_parts(&split, r(50.0, 100.0, 200.0, 350.0));
+        assert_eq!((top.len(), top[0].visible), (1, Some(r(50.0, 100.0, 200.0, 300.0))));
+
+        // Space at the very top: the whole PDF moves down, nothing is drawn above it.
+        let at_top = SheetSpec { height: 892.0, gaps: vec![(0.0, 50.0)], ..pdf.clone() };
+        let p = pdf_parts(&at_top, r(0.0, 0.0, 595.0, 892.0));
+        assert_eq!((p.len(), p[0].src, p[0].dst), (1, r(0.0, 0.0, 595.0, 842.0), r(0.0, 50.0, 595.0, 892.0)));
     }
 
     #[test]
