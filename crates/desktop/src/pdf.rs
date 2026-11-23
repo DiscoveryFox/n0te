@@ -56,6 +56,9 @@ impl Tiles {
 pub struct Pdf {
     pub worker: PdfWorker,
     pub tiles: Arc<Mutex<Tiles>>,
+    /// Pages' lines with their boxes, for search (pdfium's text extraction isn't free; blobs
+    /// never change, so they stay valid).
+    lines: Mutex<HashMap<(String, u32), Vec<(String, n0te_pdf::Rect)>>>,
 }
 
 static READY: OnceLock<Mutex<Option<mpsc::UnboundedReceiver<()>>>> = OnceLock::new();
@@ -109,7 +112,21 @@ impl Pdf {
             },
             WorkerOptions::default(),
         );
-        Ok(Arc::new(Pdf { worker, tiles }))
+        Ok(Arc::new(Pdf { worker, tiles, lines: Mutex::default() }))
+    }
+
+    /// A page's lines with their boxes (page points of the PDF as printed, top-left origin),
+    /// cached. Blocks until the worker has read them: call it off the UI thread.
+    pub fn page_lines(&self, blob: &str, page: u32) -> Vec<(String, n0te_pdf::Rect)> {
+        let key = (blob.to_string(), page);
+        if let Some(l) = self.lines.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+            return l.clone();
+        }
+        let b = blob.to_string();
+        // Kept only once read (a page that failed is tried again next time).
+        let Some(lines) = self.worker.call(priority::INTERACTIVE, move |d| d.get(&b)?.page_text(page)).ok().and_then(|r| r.ok()).map(|t| t.lines()) else { return Vec::new() };
+        self.lines.lock().unwrap_or_else(|p| p.into_inner()).insert(key, lines.clone());
+        lines
     }
 
     /// Fires whenever a tile arrived (the UI redraws).

@@ -32,6 +32,8 @@ pub enum Command {
     /// The page in view: turn it (portrait ↔ landscape); its paper and format.
     RotatePage,
     PageSetup,
+    /// The outline's search field (Ctrl+F).
+    Search,
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +61,7 @@ pub fn items(app: &App) -> Vec<Item> {
             }
         }
         Screen::Notebook(o) => {
+            v.push(item("Suchen", "Strg F · Handschrift, Text, Überschriften, PDF", Command::Search));
             v.push(item("Neue Textseite", "Strg N · nach der aktuellen Seite", Command::NewTextPage));
             v.push(item("Notizen neben der Seite", "Strg M", Command::Notes));
             v.push(item("Textfeld", "Strg T · oder Doppelklick auf die Seite", Command::NewTextBox));

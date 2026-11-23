@@ -23,6 +23,38 @@ impl PageText {
         self.chars.iter().map(|c| c.ch).collect()
     }
 
+    /// The page's lines in reading order, each with the box around its drawn characters (lines
+    /// break where pdfium put a line break).
+    pub fn lines(&self) -> Vec<(String, Rect)> {
+        let mut out = Vec::new();
+        let mut text = String::new();
+        let mut b: Option<Rect> = None;
+        let flush = |text: &mut String, b: &mut Option<Rect>, out: &mut Vec<(String, Rect)>| {
+            if let Some(r) = b.take()
+                && !text.trim().is_empty()
+            {
+                out.push((text.trim().to_string(), r));
+            }
+            text.clear();
+        };
+        for c in &self.chars {
+            if c.ch == '\n' || c.ch == '\r' {
+                flush(&mut text, &mut b, &mut out);
+                continue;
+            }
+            text.push(c.ch);
+            if !c.generated {
+                let r = c.bbox;
+                b = Some(match b {
+                    None => r,
+                    Some(o) => Rect { x0: o.x0.min(r.x0), y0: o.y0.min(r.y0), x1: o.x1.max(r.x1), y1: o.y1.max(r.y1) },
+                });
+            }
+        }
+        flush(&mut text, &mut b, &mut out);
+        out
+    }
+
     /// Case-insensitive search. Each match is returned as one box per line it spans.
     pub fn find(&self, needle: &str) -> Vec<Vec<Rect>> {
         let fold = |c: char| c.to_lowercase().next().unwrap_or(c);

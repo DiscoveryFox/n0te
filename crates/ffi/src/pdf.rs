@@ -135,6 +135,22 @@ static RUNNING: Mutex<Weak<PdfService>> = Mutex::new(Weak::new());
 pub struct PdfService {
     worker: PdfWorker,
     lib: Arc<NoteLibrary>,
+    /// Pages' lines with their boxes, for search (pdfium's text extraction isn't free).
+    lines: std::sync::Mutex<std::collections::HashMap<(String, u32), Vec<(String, n0te_pdf::Rect)>>>,
+}
+
+impl PdfService {
+    /// A page's lines with their boxes (page points, top-left origin), cached.
+    pub(crate) fn page_lines(&self, blob: &str, page: u32) -> Vec<(String, n0te_pdf::Rect)> {
+        let key = (blob.to_string(), page);
+        if let Some(l) = crate::lock(&self.lines).get(&key) {
+            return l.clone();
+        }
+        let b = blob.to_string();
+        let lines = self.worker.call(priority::INTERACTIVE, move |d| d.get(&b)?.page_text(page)).ok().and_then(|r| r.ok()).map(|t| t.lines()).unwrap_or_default();
+        crate::lock(&self.lines).insert(key, lines.clone());
+        lines
+    }
 }
 
 #[uniffi::export]
@@ -153,7 +169,7 @@ impl PdfService {
         let engine = PdfEngine::load_with_font_dirs(&pdfium_path, &dirs)?;
         let lib = library.clone();
         let worker = PdfWorker::start(engine, move |blob| Ok(lib.inner.blob(blob)?), move |r| sink.on_tile(to_ffi_tile(r)), WorkerOptions::default());
-        let service = Arc::new(PdfService { worker, lib: library });
+        let service = Arc::new(PdfService { worker, lib: library, lines: Default::default() });
         *running = Arc::downgrade(&service);
         Ok(service)
     }

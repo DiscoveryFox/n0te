@@ -108,6 +108,8 @@ impl Sheet {
         let mut undo = UndoManager::new(&doc);
         undo.set_merge_interval(0); // every committed edit (stroke, erase gesture, lasso move) is one step
         undo.set_max_undo_steps(500);
+        // What the handwriting recogniser writes is no edit of the user's: undo skips it.
+        undo.add_exclude_origin_prefix(INDEX_ORIGIN);
         Ok(Sheet { doc, objects, undo: Mutex::new(undo) })
     }
 
@@ -576,6 +578,185 @@ impl Sheet {
         Ok(n)
     }
 
+    // --- what the handwriting says, headings, search ------------------------------------------
+
+    fn index_map(&self) -> LoroMap {
+        self.doc.get_map("index")
+    }
+
+    fn headings_map(&self) -> LoroMap {
+        self.doc.get_map("headings")
+    }
+
+    /// The boxes of the strokes still on the page, by id.
+    fn boxes_by_id(&self) -> std::collections::HashMap<String, Rect> {
+        let mut out = std::collections::HashMap::new();
+        self.objects.for_each(|k, v| {
+            if let ValueOrContainer::Value(LoroValue::Binary(b)) = v
+                && let Some(r) = stroke_bounds(&b)
+            {
+                out.insert(k.to_string(), r);
+            }
+        });
+        out
+    }
+
+    /// The box around `ids` (those still there), or None if none is.
+    fn box_of(boxes: &std::collections::HashMap<String, Rect>, ids: &[String]) -> Option<[f32; 4]> {
+        let mut b: Option<[f32; 4]> = None;
+        for id in ids {
+            if let Some(r) = boxes.get(id) {
+                b = Some(match b {
+                    None => [r.x0, r.y0, r.x1, r.y1],
+                    Some(c) => [c[0].min(r.x0), c[1].min(r.y0), c[2].max(r.x1), c[3].max(r.y1)],
+                });
+            }
+        }
+        b
+    }
+
+    /// Every stroke's id, box and kind, without reading its points (cheap: for finding the
+    /// lines of handwriting on a page).
+    pub fn stroke_boxes(&self) -> Vec<(String, Rect, u8)> {
+        let mut out = Vec::new();
+        self.objects.for_each(|k, v| {
+            if let ValueOrContainer::Value(LoroValue::Binary(b)) = v
+                && let Some(r) = stroke_bounds(&b)
+            {
+                let kind = if b[0] == STROKE_V2 { b[HEADER] } else { ink::KIND_PEN };
+                out.push((k.to_string(), r, kind));
+            }
+        });
+        out
+    }
+
+    /// The lines of handwriting as the recogniser read them, where they are now (lines whose
+    /// strokes are all gone are left out).
+    pub fn index_lines(&self) -> Vec<IndexLine> {
+        let boxes = self.boxes_by_id();
+        let mut out = Vec::new();
+        self.index_map().for_each(|k, v| {
+            if let ValueOrContainer::Value(LoroValue::String(s)) = v {
+                let mut parts = s.split(SEP_FIELD);
+                let text = parts.next().unwrap_or("").to_string();
+                let alts: Vec<String> = parts.next().unwrap_or("").split(SEP_ITEM).filter(|a| !a.is_empty()).map(str::to_string).collect();
+                let strokes: Vec<String> = parts.next().unwrap_or("").split(',').filter(|a| !a.is_empty()).map(str::to_string).collect();
+                if let Some(b) = Self::box_of(&boxes, &strokes) {
+                    out.push(IndexLine { key: k.to_string(), text, alts, strokes, x0: b[0], y0: b[1], x1: b[2], y1: b[3] });
+                }
+            }
+        });
+        out.sort_by(|a, b| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
+        out
+    }
+
+    /// The keys of all stored lines (also those whose strokes are gone: to drop them).
+    pub fn index_keys(&self) -> Vec<String> {
+        self.index_map().keys().map(|k| k.to_string()).collect()
+    }
+
+    /// Lines read (put, by key) and lines gone (`drop`), in one step that undo leaves alone.
+    pub fn set_index(&self, put: &[IndexLine], drop: &[String]) -> Result<()> {
+        let m = self.index_map();
+        for k in drop {
+            m.delete(k)?;
+        }
+        for l in put {
+            let clean = |t: &str| t.replace([SEP_FIELD, SEP_ITEM], " ");
+            let alts: Vec<String> = l.alts.iter().map(|a| clean(a)).collect();
+            let v = format!("{}{SEP_FIELD}{}{SEP_FIELD}{}", clean(&l.text), alts.join(&SEP_ITEM.to_string()), l.strokes.join(","));
+            m.insert(&l.key, v)?;
+        }
+        self.doc.set_next_commit_origin(INDEX_ORIGIN);
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Marks `strokes` as a heading reading `text` (one step to undo); returns its id.
+    pub fn add_heading(&self, text: &str, strokes: &[String]) -> Result<String> {
+        let id = ids::new_id(self.doc.peer_id());
+        self.headings_map().insert(&id, format!("{}{SEP_FIELD}{}", text.replace(SEP_FIELD, " "), strokes.join(",")))?;
+        self.doc.commit();
+        Ok(id)
+    }
+
+    /// A heading's words changed (its strokes stay).
+    pub fn set_heading_text(&self, id: &str, text: &str) -> Result<()> {
+        let Some(h) = self.headings().into_iter().find(|h| h.id == id) else { return Err(Error::NotFound(format!("heading {id}"))) };
+        self.headings_map().insert(id, format!("{}{SEP_FIELD}{}", text.replace(SEP_FIELD, " "), h.strokes.join(",")))?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// No longer a heading (the strokes stay).
+    pub fn remove_heading(&self, id: &str) -> Result<()> {
+        self.headings_map().delete(id)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// The headings the user marked, top to bottom, where their strokes are now (a heading
+    /// whose strokes are all gone is left out).
+    pub fn headings(&self) -> Vec<Heading> {
+        let boxes = self.boxes_by_id();
+        let mut out = Vec::new();
+        self.headings_map().for_each(|k, v| {
+            if let ValueOrContainer::Value(LoroValue::String(s)) = v {
+                let (text, rest) = s.split_once(SEP_FIELD).unwrap_or((s.as_str(), ""));
+                let strokes: Vec<String> = rest.split(',').filter(|a| !a.is_empty()).map(str::to_string).collect();
+                if let Some(b) = Self::box_of(&boxes, &strokes) {
+                    out.push(Heading { id: k.to_string(), text: text.to_string(), strokes, x0: b[0], y0: b[1], x1: b[2], y1: b[3] });
+                }
+            }
+        });
+        out.sort_by(|a, b| a.y0.total_cmp(&b.y0).then(a.x0.total_cmp(&b.x0)));
+        out
+    }
+
+    /// Where the words of `query` are on this page (a `page_width` page): headings, handwriting
+    /// (also as the recogniser's second and third guess), text boxes and a text page's body.
+    /// Best first, then top to bottom. PDF text is searched by the caller (it needs the PDF).
+    pub fn search(&self, query: &str, page_width: f32) -> Vec<crate::search::Hit> {
+        use crate::search::{Hit, HitKind, normalize, score, words};
+        let w = words(query);
+        let mut out = Vec::new();
+        if w.is_empty() {
+            return out;
+        }
+        // Strokes of headings that matched: their handwriting needn't be found a second time.
+        let mut in_heading = std::collections::HashSet::new();
+        for h in self.headings() {
+            if let Some(slips) = score(&w, &normalize(&h.text)) {
+                in_heading.extend(h.strokes.iter().cloned());
+                out.push(Hit { kind: HitKind::Heading, text: h.text, x0: h.x0, y0: h.y0, x1: h.x1, y1: h.y1, slips });
+            }
+        }
+        for l in self.index_lines() {
+            if !l.strokes.is_empty() && l.strokes.iter().all(|s| in_heading.contains(s)) {
+                continue;
+            }
+            let best = std::iter::once(&l.text).chain(l.alts.iter()).filter_map(|t| score(&w, &normalize(t))).min();
+            if let Some(slips) = best {
+                out.push(Hit { kind: HitKind::Ink, text: l.text, x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1, slips });
+            }
+        }
+        for t in self.text_boxes_with_body(page_width) {
+            // Line by line, so a long text page points at the line that matched.
+            let line_h = t.size * 1.4;
+            let per_line = (t.w / (t.size * 0.5)).max(1.0);
+            let mut y = t.y;
+            for line in t.text.lines() {
+                let rows = (line.chars().count() as f32 / per_line).ceil().max(1.0);
+                if let Some(slips) = score(&w, &normalize(line)) {
+                    out.push(Hit { kind: HitKind::Text, text: line.trim().to_string(), x0: t.x, y0: y, x1: t.x + t.w, y1: y + rows * line_h, slips });
+                }
+                y += rows * line_h;
+            }
+        }
+        out.sort_by(|a, b| a.slips.cmp(&b.slips).then(a.y0.total_cmp(&b.y0)));
+        out
+    }
+
     /// What would stick out of a `width` × `height` page (top-left at 0, 0): strokes, images
     /// and text boxes reaching past its edges (a little slack for the stroke's own width).
     /// Used to warn before a page is turned or made smaller.
@@ -780,6 +961,39 @@ fn known(b: &[u8]) -> bool {
     (b.len() >= HEADER && b[0] == STROKE_V1) || (b.len() > HEADER && b[0] == STROKE_V2)
 }
 
+/// Commits from the handwriting recogniser carry this origin (undo skips them).
+const INDEX_ORIGIN: &str = "index";
+/// Separators inside a stored index line / heading (control characters, never typed).
+const SEP_FIELD: char = '\u{1f}';
+const SEP_ITEM: char = '\u{1e}';
+
+/// A line of handwriting as the recogniser read it: its best reading, the next guesses, the
+/// strokes it is made of, and where they are now. `key` names the line (the app derives it
+/// from the strokes, so a line read again replaces itself).
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndexLine {
+    pub key: String,
+    pub text: String,
+    pub alts: Vec<String>,
+    pub strokes: Vec<String>,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+/// A heading the user marked: its words, the strokes it is made of, where they are now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Heading {
+    pub id: String,
+    pub text: String,
+    pub strokes: Vec<String>,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
 /// A text box's height follows its text: estimated from its lines and their length.
 fn text_box_height(t: &TextBox) -> f32 {
     let per_line = (t.w / (t.size * 0.5)).max(1.0);
@@ -823,6 +1037,49 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn what_the_handwriting_says_is_searchable_and_not_undone() {
+        let s = Sheet::create(1).unwrap();
+        let p = |x: f32, y: f32| InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
+        let a = s.add_stroke(brush, &[p(100.0, 100.0), p(140.0, 110.0)]).unwrap();
+        let b = s.add_stroke(brush, &[p(150.0, 100.0), p(190.0, 110.0)]).unwrap();
+        let c = s.add_stroke(brush, &[p(100.0, 300.0), p(200.0, 310.0)]).unwrap();
+        let line = |key: &str, text: &str, alts: &[&str], strokes: &[&String]| IndexLine {
+            key: key.into(), text: text.into(), alts: alts.iter().map(|a| a.to_string()).collect(),
+            strokes: strokes.iter().map(|s| s.to_string()).collect(), x0: 0.0, y0: 0.0, x1: 0.0, y1: 0.0,
+        };
+        s.set_index(&[line("l1", "Grenzwert der Folge", &["Grenzwert der Falge"], &[&a, &b]), line("l2", "Beweis", &[], &[&c])], &[]).unwrap();
+        let lines = s.index_lines();
+        assert_eq!(lines.len(), 2);
+        assert!((lines[0].x0 - 99.0).abs() < 2.0 && lines[0].x1 > 189.0, "box from the strokes: {:?}", lines[0]);
+        // Undo takes back the last stroke, not what the recogniser wrote.
+        assert!(s.undo().unwrap());
+        assert_eq!(s.index_lines().len(), 1, "the line of the undone stroke is gone with it, the other stays");
+        s.redo().unwrap();
+        // Headings: marked by the user, undoable, found first.
+        let h = s.add_heading("Satz 3: Grenzwerte", &[c.clone()]).unwrap();
+        let hits = s.search("grenzwert", 595.0);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits.iter().filter(|h| h.kind == crate::search::HitKind::Heading).count(), 1);
+        assert_eq!(s.search("Beweis", 595.0)[0].kind, crate::search::HitKind::Ink);
+        assert!(s.search("Integral", 595.0).is_empty());
+        s.set_heading_text(&h, "Satz 3").unwrap();
+        assert_eq!(s.headings()[0].text, "Satz 3");
+        assert!(s.undo().unwrap() && s.undo().unwrap());
+        assert!(s.headings().is_empty());
+        // Gone lines and typed text.
+        s.set_index(&[], &["l2".into()]).unwrap();
+        assert_eq!(s.index_lines().len(), 1);
+        s.add_text_box(56.0, 400.0, 300.0, 12.0, "Übung zur Konvergenz").unwrap();
+        assert_eq!(s.search("uebung", 595.0)[0].kind, crate::search::HitKind::Text);
+        // Handwriting marked as a heading is found once, as the heading.
+        s.add_heading("Grenzwert der Folge", &[a.clone(), b.clone()]).unwrap();
+        let hits = s.search("folge", 595.0);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert_eq!(hits[0].kind, crate::search::HitKind::Heading);
+    }
 
     #[test]
     fn stretching_keeps_the_pen_width_and_one_side() {

@@ -50,6 +50,41 @@ impl SheetHandle {
             .map(|t| crate::FfiTextBox { id: t.id, x: t.x, y: t.y, w: t.w, size: t.size, text: t.text })
             .collect()
     }
+    /// Every stroke's id, box and kind (no points: cheap).
+    pub fn stroke_boxes(&self) -> Vec<crate::FfiStrokeBox> {
+        lock(&self.sheet).stroke_boxes().into_iter().map(|(id, r, kind)| crate::FfiStrokeBox { id, x0: r.x0, y0: r.y0, x1: r.x1, y1: r.y1, kind }).collect()
+    }
+    /// The lines of handwriting as read, where they are now.
+    pub fn index_lines(&self) -> Vec<crate::FfiIndexLine> {
+        lock(&self.sheet).index_lines().into_iter().map(Into::into).collect()
+    }
+    /// The keys of all stored lines (also those whose strokes are gone).
+    pub fn index_keys(&self) -> Vec<String> {
+        lock(&self.sheet).index_keys()
+    }
+    /// Lines read (`put`, by key) and lines gone (`drop`); undo leaves this alone.
+    pub fn set_index(&self, put: Vec<crate::FfiIndexLine>, drop: Vec<String>) -> R<()> {
+        let put: Vec<n0te_core::sheet::IndexLine> = put.into_iter().map(Into::into).collect();
+        Ok(lock(&self.sheet).set_index(&put, &drop)?)
+    }
+    /// Marks strokes as a heading (one undo step); returns its id.
+    pub fn add_heading(&self, text: String, strokes: Vec<String>) -> R<String> {
+        Ok(lock(&self.sheet).add_heading(&text, &strokes)?)
+    }
+    pub fn set_heading_text(&self, id: String, text: String) -> R<()> {
+        Ok(lock(&self.sheet).set_heading_text(&id, &text)?)
+    }
+    pub fn remove_heading(&self, id: String) -> R<()> {
+        Ok(lock(&self.sheet).remove_heading(&id)?)
+    }
+    /// The headings, top to bottom, where their strokes are now.
+    pub fn headings(&self) -> Vec<crate::FfiHeading> {
+        lock(&self.sheet)
+            .headings()
+            .into_iter()
+            .map(|h| crate::FfiHeading { id: h.id, text: h.text, strokes: h.strokes, x0: h.x0, y0: h.y0, x1: h.x1, y1: h.y1 })
+            .collect()
+    }
     /// Stretches strokes and images about (ax, ay) by kx across and ky down (pen width kept).
     pub fn stretch(&self, ids: Vec<String>, ax: f32, ay: f32, kx: f32, ky: f32) -> R<()> {
         Ok(lock(&self.sheet).stretch(&ids, ax, ay, kx, ky)?)

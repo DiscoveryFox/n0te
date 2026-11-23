@@ -155,6 +155,89 @@ pub struct FfiImage {
 }
 
 /// A stroke's brush and samples (packed LE f32 x, y, pressure, t_ms), for copy/paste.
+/// A stroke's id, box (page points) and kind (0 pen, 1 pencil, 2 highlighter …).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiStrokeBox {
+    pub id: String,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub kind: u8,
+}
+
+/// A line of handwriting as the recogniser read it (see the core's `IndexLine`).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiIndexLine {
+    pub key: String,
+    pub text: String,
+    pub alts: Vec<String>,
+    pub strokes: Vec<String>,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+impl From<n0te_core::sheet::IndexLine> for FfiIndexLine {
+    fn from(l: n0te_core::sheet::IndexLine) -> Self {
+        FfiIndexLine { key: l.key, text: l.text, alts: l.alts, strokes: l.strokes, x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 }
+    }
+}
+impl From<FfiIndexLine> for n0te_core::sheet::IndexLine {
+    fn from(l: FfiIndexLine) -> Self {
+        n0te_core::sheet::IndexLine { key: l.key, text: l.text, alts: l.alts, strokes: l.strokes, x0: l.x0, y0: l.y0, x1: l.x1, y1: l.y1 }
+    }
+}
+
+/// A heading the user marked: its words, its strokes, where they are now.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiHeading {
+    pub id: String,
+    pub text: String,
+    pub strokes: Vec<String>,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+/// A heading on a page, for the outline: the page (node, sheet id), the heading's id, words, height on the page.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiPageHeading {
+    pub node: String,
+    pub sheet_id: String,
+    pub id: String,
+    pub text: String,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiHitKind {
+    Ink,
+    Text,
+    Heading,
+    Pdf,
+}
+
+/// Something found in a notebook: on which sheet (node and sheet id), what kind, its text, where
+/// on the page (page points), how many slips it took to match.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiSearchHit {
+    pub node: String,
+    pub sheet_id: String,
+    pub kind: FfiHitKind,
+    pub text: String,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub slips: u32,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct FfiStrokeData {
     pub brush: FfiBrush,
@@ -516,6 +599,84 @@ impl NotebookHandle {
     pub fn save(&self) -> R<()> {
         Ok(self.lib.inner.save_notebook(&lock(&self.nb))?)
     }
+    /// Where the words of `query` are in this notebook, page by page (in order), best first on
+    /// each page: headings, handwriting as read, typed text, and with `pdf` the PDF pages' text.
+    /// Open sheets are searched as they are now (unsaved strokes too).
+    pub fn search(&self, query: String, pdf: Option<Arc<crate::pdf::PdfService>>) -> Vec<FfiSearchHit> {
+        use n0te_core::search::{HitKind, normalize, score, words};
+        let w = words(&query);
+        if w.is_empty() {
+            return Vec::new();
+        }
+        let id = self.id();
+        let rows = lock(&self.nb).outline(true);
+        let open: Vec<(String, Arc<SheetHandle>)> = lock(&self.open_sheets).iter().filter_map(|(s, h)| h.upgrade().map(|h| (s.clone(), h))).collect();
+        let mut sheets: Vec<(String, String, SheetSpec)> = Vec::new();
+        for row in rows {
+            if let n0te_core::notebook::OutlineRow::Sheet { node, sheet_id, spec, left, right, .. } = row {
+                for s in left {
+                    sheets.push((s.node, s.sheet_id, s.spec));
+                }
+                sheets.push((node, sheet_id, spec));
+                for s in right {
+                    sheets.push((s.node, s.sheet_id, s.spec));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (node, sheet_id, spec) in sheets {
+            let kind = |k: HitKind| match k {
+                HitKind::Ink => FfiHitKind::Ink,
+                HitKind::Text => FfiHitKind::Text,
+                HitKind::Heading => FfiHitKind::Heading,
+                HitKind::Pdf => FfiHitKind::Pdf,
+            };
+            let mut hits: Vec<FfiSearchHit> = Vec::new();
+            let width = if spec.width > 0.0 { spec.width } else { 595.0 };
+            let found = match open.iter().find(|(s, _)| *s == sheet_id) {
+                Some((_, h)) => lock(&h.sheet).search(&query, width),
+                None => self.lib.inner.load_sheet(&id, &sheet_id).map(|s| s.search(&query, width)).unwrap_or_default(),
+            };
+            for h in found {
+                hits.push(FfiSearchHit { node: node.clone(), sheet_id: sheet_id.clone(), kind: kind(h.kind), text: h.text, x0: h.x0, y0: h.y0, x1: h.x1, y1: h.y1, slips: h.slips as u32 });
+            }
+            if let (Some(svc), Some((blob, page))) = (&pdf, &spec.pdf) {
+                let bands = spec.bands();
+                for (text, r) in svc.page_lines(blob, *page) {
+                    if let Some(slips) = score(&w, &normalize(&text)) {
+                        // Where that line lies now (space inserted into the page moves the PDF below it down).
+                        let shift = bands.iter().find(|b| r.y0 >= b.src && r.y0 < b.src + b.len).map(|b| b.dst - b.src).unwrap_or(0.0);
+                        hits.push(FfiSearchHit { node: node.clone(), sheet_id: sheet_id.clone(), kind: FfiHitKind::Pdf, text, x0: r.x0, y0: r.y0 + shift, x1: r.x1, y1: r.y1 + shift, slips: slips as u32 });
+                    }
+                }
+            }
+            hits.sort_by(|a, b| a.slips.cmp(&b.slips).then(a.y0.total_cmp(&b.y0)));
+            out.extend(hits);
+        }
+        out
+    }
+
+    /// Every page's headings (in page order, top to bottom on each), for the outline. Open
+    /// sheets as they are now.
+    pub fn headings(&self) -> Vec<FfiPageHeading> {
+        let id = self.id();
+        let rows = lock(&self.nb).outline(true);
+        let open: Vec<(String, Arc<SheetHandle>)> = lock(&self.open_sheets).iter().filter_map(|(s, h)| h.upgrade().map(|h| (s.clone(), h))).collect();
+        let mut out = Vec::new();
+        for row in rows {
+            if let n0te_core::notebook::OutlineRow::Sheet { node, sheet_id, .. } = row {
+                let hs = match open.iter().find(|(s, _)| *s == sheet_id) {
+                    Some((_, h)) => lock(&h.sheet).headings(),
+                    None => self.lib.inner.load_sheet(&id, &sheet_id).map(|s| s.headings()).unwrap_or_default(),
+                };
+                for h in hs {
+                    out.push(FfiPageHeading { node: node.clone(), sheet_id: sheet_id.clone(), id: h.id, text: h.text, x0: h.x0, y0: h.y0, x1: h.x1, y1: h.y1 });
+                }
+            }
+        }
+        out
+    }
+
     pub fn open_sheet(self: Arc<Self>, sheet_id: String) -> R<Arc<SheetHandle>> {
         let id = self.id();
         let sheet = self.lib.inner.load_sheet(&id, &sheet_id)?;

@@ -114,6 +114,25 @@ impl Harness {
         }
     }
 
+    /// Bounds of the first widget `selector` picks in the current UI (a text, an id, the
+    /// focused field: see `iced_test::selector`).
+    pub fn find<S>(&mut self, selector: S) -> Option<core::Rectangle>
+    where
+        S: iced_test::selector::Selector + Send,
+        S::Output: iced_test::selector::Bounded + Clone + Send,
+    {
+        use core::widget::Operation;
+        use iced_test::selector::Bounded as _;
+        let mut op = selector.find();
+        let mut ui = UserInterface::build(self.app.view(), self.size, self.cache.take().unwrap_or_default(), &mut self.renderer);
+        ui.operate(&self.renderer, &mut core::widget::operation::black_box(&mut op));
+        self.cache = Some(ui.into_cache());
+        match op.finish() {
+            core::widget::operation::Outcome::Some(Some(t)) => Some(t.bounds()),
+            _ => None,
+        }
+    }
+
     /// Runs a task returned outside of `update` (e.g. a focus operation).
     pub fn task(&mut self, task: iced::Task<Message>) {
         self.run_task(task);

@@ -375,6 +375,26 @@ pub struct RemoteMark {
     pub name: String,
 }
 
+/// A spot that was jumped to (a search hit, a heading): it lights up in the accent and fades.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Flash {
+    pub sheet_id: String,
+    /// Sheet points.
+    pub rect: Rect,
+    pub at: std::time::Instant,
+}
+
+impl Flash {
+    /// 1 when it starts, fading to 0 over [`crate::search::FLASH`] (eased: it holds a moment).
+    pub fn strength(&self) -> f32 {
+        let t = (self.at.elapsed().as_secs_f32() / crate::search::FLASH.as_secs_f32()).clamp(0.0, 1.0);
+        1.0 - t * t
+    }
+    pub fn done(&self) -> bool {
+        self.at.elapsed() >= crate::search::FLASH
+    }
+}
+
 /// A stroke another device is drawing right now (shown until the stored stroke arrives).
 pub struct LiveInk {
     pub sheet_id: String,
@@ -393,6 +413,8 @@ pub struct Pages {
     pub erasing: RefCell<HashMap<String, Erasing>>,
     /// Draw other devices' views as frames (the laser point shows either way).
     pub show_remote_frame: Cell<bool>,
+    /// The spot just jumped to, lighting up.
+    pub flash: Option<Flash>,
     pub pages: Vec<Page>,
     pub headers: Vec<Header>,
     pub bounds: Rect,
@@ -414,6 +436,7 @@ impl Pages {
             live: RefCell::new(HashMap::new()),
             erasing: RefCell::new(HashMap::new()),
             show_remote_frame: Cell::new(true),
+            flash: None,
             pages: layout.sheets.into_iter().map(Page::new).collect(),
             headers: layout.headers,
             bounds: layout.bounds,
@@ -1015,6 +1038,21 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                         Color::from_rgba8(255, 59, 48, 0.9),
                     );
                 }
+            }
+            // The spot just jumped to: an accent box around it that fades.
+            if let Some(f) = pages.flash.as_ref().filter(|f| !f.done())
+                && let Some(page) = visible.iter().find(|p| p.placed.sheet_id == f.sheet_id)
+            {
+                let o = page.rect();
+                let pad = (4.0 * cam.zoom).max(3.0);
+                let a = cam.to_screen(bounds, o.x0 + f.rect.x0, o.y0 + f.rect.y0);
+                let b = cam.to_screen(bounds, o.x0 + f.rect.x1, o.y0 + f.rect.y1);
+                let spot = Rectangle::new(Point::new(a.x - pad, a.y - pad), Size::new((b.x - a.x).max(2.0) + 2.0 * pad, (b.y - a.y).max(2.0) + 2.0 * pad));
+                let k = f.strength();
+                r.fill_quad(
+                    renderer::Quad { bounds: spot, border: iced::Border { color: theme::alpha(theme::p().accent, 0.9 * k), width: 2.0, radius: 4.0.into() }, ..Default::default() },
+                    theme::alpha(theme::p().accent, 0.22 * k),
+                );
             }
         });
         pages.evict_stale();

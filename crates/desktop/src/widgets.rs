@@ -1,10 +1,11 @@
-//! Small custom widgets: a drag grip (move / resize text boxes).
+//! Small custom widgets: a drag grip (move / resize text boxes), Escape on a text field.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::text::{self, Renderer as _};
-use iced::advanced::widget::{self, Widget, tree};
-use iced::advanced::{Clipboard, Shell, mouse};
+use iced::advanced::widget::{self, Operation, Tree, Widget, tree};
+use iced::advanced::{Clipboard, Shell, mouse, overlay};
+use iced::keyboard::{self, Key, key::Named};
 use iced::{Border, Color, Element, Event, Length, Point, Rectangle, Size, Theme, Vector};
 
 use crate::theme;
@@ -101,5 +102,57 @@ impl<'a, Message: Clone> Widget<Message, Theme, iced::Renderer> for Grip<'a, Mes
 impl<'a, Message: Clone + 'a> From<Grip<'a, Message>> for Element<'a, Message> {
     fn from(g: Grip<'a, Message>) -> Self {
         Element::new(g)
+    }
+}
+
+/// A text field that also reports Escape: the field itself only lets go of the focus (and keeps
+/// the key from the app's shortcuts), this sends `on_escape` too — while it had the focus.
+pub struct OnEscape<'a, Message> {
+    content: Element<'a, Message>,
+    on_escape: Message,
+}
+
+pub fn on_escape<'a, Message>(content: impl Into<Element<'a, Message>>, on_escape: Message) -> OnEscape<'a, Message> {
+    OnEscape { content: content.into(), on_escape }
+}
+
+impl<'a, Message: Clone> Widget<Message, Theme, iced::Renderer> for OnEscape<'a, Message> {
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+    fn update(&mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor, renderer: &iced::Renderer, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, viewport: &Rectangle) {
+        let escape = matches!(event, Event::Keyboard(keyboard::Event::KeyPressed { key: Key::Named(Named::Escape), .. })) && !shell.is_event_captured();
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
+        // A text field takes Escape only while it has the focus.
+        if escape && shell.is_event_captured() {
+            shell.publish(self.on_escape.clone());
+        }
+    }
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &iced::Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+    }
+    fn draw(&self, tree: &Tree, renderer: &mut iced::Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+    }
+    fn overlay<'b>(&'b mut self, tree: &'b mut Tree, layout: Layout<'b>, renderer: &iced::Renderer, viewport: &Rectangle, translation: Vector) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: Clone + 'a> From<OnEscape<'a, Message>> for Element<'a, Message> {
+    fn from(w: OnEscape<'a, Message>) -> Self {
+        Element::new(w)
     }
 }

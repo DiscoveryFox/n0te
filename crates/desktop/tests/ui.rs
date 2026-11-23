@@ -789,3 +789,245 @@ fn turning_a_page_warns_when_content_would_be_cut_off() {
     assert!(h.app.size_warning.is_none());
     assert_eq!(spec(&h).width, 595.0);
 }
+
+// --- search and headings -------------------------------------------------------------------
+
+/// A stroke from (x, y), `w` wide: something the tablet could have read.
+fn scribble(sheet: &n0te_core::sheet::Sheet, x: f32, y: f32, w: f32) -> String {
+    let pts: Vec<_> = (0..20).map(|i| n0te_core::ink::InkPoint { x: x + i as f32 * w / 19.0, y: y + (i % 3) as f32 * 4.0, pressure: 0.5, t_ms: i * 8 }).collect();
+    sheet.add_stroke(n0te_core::ink::Brush { width: 2.0, thinning: 0.0, color: 0xFF111114, kind: 0 }, &pts).unwrap()
+}
+
+/// A line of handwriting as the tablet's recogniser read it.
+fn read_line(key: &str, text: &str, alts: &[&str], strokes: &[String]) -> n0te_core::sheet::IndexLine {
+    n0te_core::sheet::IndexLine {
+        key: key.into(),
+        text: text.into(),
+        alts: alts.iter().map(|a| a.to_string()).collect(),
+        strokes: strokes.to_vec(),
+        x0: 0.0,
+        y0: 0.0,
+        x1: 0.0,
+        y1: 0.0,
+    }
+}
+
+struct Searchable {
+    h: Harness,
+    root: std::path::PathBuf,
+    nb: String,
+    /// Page 1, the text page beside it, page 2, page 3 (in a folded group).
+    sheets: [String; 4],
+    /// The headings on page 1 and on page 2.
+    headings: [String; 2],
+}
+
+/// A notebook to search, opened: page 1 (untitled) with a heading and a line of handwriting
+/// the tablet read, a text page beside it; page 2 "Übungen" with a heading and a text box;
+/// page 3, in a folded group, with a line read. All made through the core, like the tablet.
+fn searchable(tag: &str) -> Searchable {
+    use n0te_core::notebook::{Background, SheetSpec, Side};
+    let root = temp_root(tag);
+    let lib = Library::open(&root).unwrap();
+    let nb = lib.create_notebook("Analysis").unwrap();
+    let (n1, s1) = nb.add_sheet(None, 0, &SheetSpec::a4(Background::Lines)).unwrap();
+    let (_, side) = nb.add_side_sheet(&n1, Side::Right, 0, &SheetSpec::a4(Background::Text)).unwrap();
+    let (n2, s2) = nb.add_sheet(None, 1, &SheetSpec::a4(Background::Grid)).unwrap();
+    nb.set_title_of(&n2, "Übungen").unwrap();
+    let g = nb.add_group(None, 2, "Woche 2").unwrap();
+    let (_, s3) = nb.add_sheet(Some(&g), 0, &SheetSpec::a4(Background::Lines)).unwrap();
+    nb.set_collapsed(&g, true).unwrap();
+    lib.save_notebook(&nb).unwrap();
+    let id = nb.id();
+    let p1 = lib.load_sheet(&id, &s1).unwrap();
+    let a = scribble(&p1, 80.0, 120.0, 220.0);
+    let b = scribble(&p1, 80.0, 300.0, 320.0);
+    let satz = p1.add_heading("Satz 3: Grenzwerte", &[a]).unwrap();
+    p1.set_index(&[read_line("l1", "Der Grenzwert der Folge ist eins", &["Der Grenzwerf der Falge ist eins"], &[b])], &[]).unwrap();
+    lib.save_sheet(&id, &s1, &p1).unwrap();
+    let notes = lib.load_sheet(&id, &side).unwrap();
+    notes.set_page_text("Notiz zum Grenzwert").unwrap();
+    lib.save_sheet(&id, &side, &notes).unwrap();
+    let p2 = lib.load_sheet(&id, &s2).unwrap();
+    let c = scribble(&p2, 80.0, 90.0, 150.0);
+    let aufgabe = p2.add_heading("Aufgabe 1", &[c]).unwrap();
+    p2.add_text_box(56.0, 400.0, 300.0, 12.0, "Übung: Grenzwert berechnen").unwrap();
+    lib.save_sheet(&id, &s2, &p2).unwrap();
+    let p3 = lib.load_sheet(&id, &s3).unwrap();
+    let d = scribble(&p3, 80.0, 500.0, 300.0);
+    p3.set_index(&[read_line("l1", "Grenzwerte im Unendlichen", &[], &[d])], &[]).unwrap();
+    lib.save_sheet(&id, &s3, &p3).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::Open(id.clone()));
+    h.events(&[]);
+    h.events(&[]);
+    Searchable { h, root, nb: id, sheets: [s1, side, s2, s3], headings: [satz, aufgabe] }
+}
+
+/// Ctrl + a key as the keyboard subscription delivers it (the harness doesn't run it).
+fn ctrl_key(h: &Harness, c: &str) -> Message {
+    match h.key_event(iced::keyboard::Key::Character(c.into()), None)[0].clone() {
+        iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, modified_key, physical_key, location, text, repeat, .. }) => {
+            Message::Key(iced::keyboard::Event::KeyPressed { key, modified_key, physical_key, location, modifiers: iced::keyboard::Modifiers::CTRL, text, repeat })
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn ctrl_f_searches_the_whole_notebook_and_lists_the_hits_by_page() {
+    use n0te_core::search::HitKind;
+    use n0te_desktop::sidebar;
+    let mut s = searchable("search");
+    let h = &mut s.h;
+    let m = ctrl_key(h, "f");
+    h.message(m);
+    let field = h.bounds_of(sidebar::input_id()).expect("a search field in the sidebar");
+    assert_eq!(h.find(iced_test::selector::is_focused()), Some(field), "Ctrl+F focuses it");
+    h.type_text("Grenzwert");
+    let (query, pages) = h.app.search.found.clone().expect("searched");
+    assert_eq!(query, "Grenzwert");
+    // Page by page in outline order (side sheets after their page, folded groups too), each
+    // page's hits best first, then top to bottom.
+    let summary: Vec<(u32, i32, String, Vec<HitKind>)> = pages.iter().map(|p| (p.number, p.side, p.name.clone(), p.hits.iter().map(|h| h.kind).collect())).collect();
+    assert_eq!(
+        summary,
+        vec![
+            (1, 0, "Satz 3: Grenzwerte".to_string(), vec![HitKind::Heading, HitKind::Ink]),
+            (1, 1, "Textseite".to_string(), vec![HitKind::Text]),
+            (2, 0, "Übungen".to_string(), vec![HitKind::Text]),
+            (3, 0, "Seite".to_string(), vec![HitKind::Ink]),
+        ]
+    );
+    let ink = &pages[0].hits[1];
+    assert_eq!(ink.text, "Der Grenzwert der Folge ist eins");
+    assert!(ink.x0 < 82.0 && ink.y0 > 290.0 && ink.y1 < 320.0, "where the strokes are: {ink:?}");
+    // The sidebar shows them instead of the outline: a row per hit under its page's name.
+    assert!(h.bounds_of(sidebar::hit_id(4)).is_some() && h.bounds_of(sidebar::hit_id(5)).is_none());
+    assert!(h.find("Übungen").is_some());
+    assert!(h.bounds_of(sidebar::heading_id(&s.headings[1])).is_none(), "no outline while searching");
+    h.frame();
+    // The recogniser's second guess counts too ("Falge" for "Folge" is read as it is).
+    h.message(Message::SearchQuery("falge".into()));
+    assert_eq!(h.app.search.hits().map(|(p, _)| p.number).collect::<Vec<_>>(), vec![1]);
+    h.message(Message::SearchQuery("Integral".into()));
+    assert_eq!(h.app.search.found.as_ref().map(|(_, p)| p.len()), Some(0), "nothing found");
+    h.frame();
+    // Escape in the field empties it: the outline again.
+    h.press(Named::Escape);
+    assert!(!h.app.search.active() && h.app.search.found.is_none());
+    assert!(h.bounds_of(sidebar::heading_id(&s.headings[1])).is_some());
+}
+
+#[test]
+fn text_typed_but_not_saved_yet_is_found_too() {
+    use n0te_core::search::HitKind;
+    let (mut h, root, nb) = blank_notebook("unsaved");
+    let sheet = open(&h).pages.pages[0].placed.sheet_id.clone();
+    h.message(Message::NewText(sheet.clone(), 60.0, 200.0));
+    h.type_text("Konvergenzradius");
+    assert!(h.app.editing.as_ref().is_some_and(|e| e.dirty), "typed, not saved yet");
+    assert!(stored_texts(&root, &nb).iter().all(|t| t.text.is_empty()));
+    h.message(Message::SearchQuery("konvergenzradius".into()));
+    let hits: Vec<(String, HitKind, String)> = h.app.search.hits().map(|(p, h)| (p.sheet_id.clone(), h.kind, h.text.clone())).collect();
+    assert_eq!(hits, vec![(sheet, HitKind::Text, "Konvergenzradius".to_string())]);
+}
+
+#[test]
+fn clicking_a_hit_shows_it_in_the_middle_and_lights_it_up() {
+    use n0te_desktop::sidebar;
+    let mut s = searchable("reveal");
+    let h = &mut s.h;
+    let zoom = open(h).camera.zoom;
+    h.message(Message::SearchQuery("unendlichen".into()));
+    let hit = h.app.search.hits().next().expect("found").1.clone();
+    assert_eq!(h.app.search.hits().count(), 1);
+    assert!(open(h).pages.page_of_sheet(&s.sheets[3]).is_none(), "its group is folded");
+    let row = h.bounds_of(sidebar::hit_id(0)).expect("its row");
+    h.click(row.center());
+    let o = open(h);
+    let page = o.pages.pages[o.pages.page_of_sheet(&s.sheets[3]).expect("the group opened for it")].placed.rect;
+    let c = o.camera;
+    let middle = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
+    let spot = (page.x0 + (hit.x0 + hit.x1) / 2.0, page.y0 + (hit.y0 + hit.y1) / 2.0);
+    assert!((middle.0 - spot.0).abs() < 0.5 && (middle.1 - spot.1).abs() < 0.5, "{middle:?} vs {spot:?}");
+    assert_eq!(c.zoom, zoom, "the zoom stays");
+    let flash = o.pages.flash.clone().expect("it lights up");
+    assert_eq!((flash.sheet_id.as_str(), flash.rect.y0), (s.sheets[3].as_str(), hit.y0));
+    // In the accent (a warm red in the designs the tests use), around the spot.
+    let pad = (4.0 * c.zoom).max(3.0);
+    let x = (c.origin.x + (page.x0 + hit.x0 - c.x) * c.zoom - pad).ceil() as usize;
+    let y = (c.origin.y + (spot.1 - c.y) * c.zoom) as usize;
+    let (rgba, _) = h.frame_rgba();
+    let px = &rgba[(y * 1600 + x) * 4..][..4];
+    assert!(px[0] as i32 > px[1] as i32 + 50 && px[0] as i32 > px[2] as i32 + 50, "accent frame at ({x}, {y}): {px:?}");
+    // It fades: gone after 1.5 s (the frame clock clears it).
+    if let Screen::Notebook(o) = &mut h.app.screen {
+        o.pages.flash.as_mut().unwrap().at -= std::time::Duration::from_secs(2);
+    }
+    h.message(Message::Glide(std::time::Instant::now()));
+    assert!(open(h).pages.flash.is_none());
+    // Enter in the field shows the first hit.
+    h.message(Message::Camera(n0te_desktop::pages::Camera { y: 0.0, ..open(h).camera }));
+    h.message(Message::SearchSubmit);
+    assert_eq!(open(h).pages.flash.as_ref().map(|f| f.sheet_id.clone()), Some(s.sheets[3].clone()));
+}
+
+#[test]
+fn headings_show_under_their_page_name_untitled_pages_and_follow_the_tablet() {
+    use n0te_desktop::live::LiveEvent;
+    use n0te_desktop::sidebar;
+    let mut s = searchable("headings");
+    let h = &mut s.h;
+    assert_eq!(h.app.headings.get(&s.sheets[0]).map(Vec::len), Some(1), "read in the background on opening");
+    // Page 2 has a title: its heading is listed under it, indented.
+    let title = h.find("Übungen").expect("page 2 in the outline");
+    let row = h.bounds_of(sidebar::heading_id(&s.headings[1])).expect("its heading under it");
+    assert!(row.y > title.y && h.find("Aufgabe 1").is_some_and(|t| t.x > title.x), "below and indented");
+    // Page 1 has no title: its first heading names it (and isn't listed again).
+    assert!(h.find("Satz 3: Grenzwerte").is_some());
+    assert!(h.bounds_of(sidebar::heading_id(&s.headings[0])).is_none());
+    // A click shows the heading on its page, lit up.
+    h.click(row.center());
+    let o = open(h);
+    let flash = o.pages.flash.clone().expect("lit up");
+    assert_eq!(flash.sheet_id, s.sheets[2]);
+    let page = o.pages.pages[o.pages.page_of_sheet(&s.sheets[2]).unwrap()].placed.rect;
+    let c = o.camera;
+    assert!((c.y + c.viewport.height / c.zoom / 2.0 - (page.y0 + (flash.rect.y0 + flash.rect.y1) / 2.0)).abs() < 0.5);
+    // The tablet marks another heading: it shows once the sheet comes in.
+    {
+        let lib = Library::open(&s.root).unwrap();
+        let p2 = lib.load_sheet(&s.nb, &s.sheets[2]).unwrap();
+        let e = scribble(&p2, 80.0, 600.0, 120.0);
+        p2.add_heading("Lemma 4", &[e]).unwrap();
+        lib.save_sheet(&s.nb, &s.sheets[2], &p2).unwrap();
+    }
+    h.message(Message::Live(LiveEvent::Changed { notebook: s.nb.clone(), index: false, sheets: vec![s.sheets[2].clone()] }));
+    assert_eq!(h.app.headings[&s.sheets[2]].iter().map(|h| h.text.as_str()).collect::<Vec<_>>(), vec!["Aufgabe 1", "Lemma 4"]);
+    assert!(h.find("Lemma 4").is_some());
+    h.frame();
+}
+
+#[test]
+fn pdf_text_is_found_where_it_lies_on_the_page() {
+    use n0te_core::search::HitKind;
+    let root = temp_root("pdfsearch");
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    let pdf = h.app.pdf.clone().expect("pdfium (third_party/pdfium) for the PDF tests");
+    let stored = n0te_pdf::notebook::store_pdf(&h.app.lib, &pdf.worker, two_page_pdf(&h.app)).unwrap();
+    let nb = h.app.lib.create_notebook("Folien").unwrap();
+    let sheets = n0te_pdf::notebook::add_pdf_sheets(&nb, &stored, None, 0).unwrap();
+    // 100 pt of space inserted near the top of the second page: its text moved down.
+    nb.reshape(&sheets[1].node, 942.0, &[(20.0, 100.0)]).unwrap();
+    h.app.lib.save_notebook(&nb).unwrap();
+    h.message(Message::Open(nb.id()));
+    h.events(&[]);
+    h.message(Message::SearchQuery("folie".into()));
+    let found = h.app.search.found.clone().expect("searched").1;
+    assert_eq!(found.iter().map(|p| (p.number, p.name.as_str())).collect::<Vec<_>>(), vec![(1, "PDF-Seite 1"), (2, "PDF-Seite 2")]);
+    let (a, b) = (&found[0].hits[0], &found[1].hits[0]);
+    assert_eq!((a.kind, a.text.as_str(), b.kind, b.text.as_str()), (HitKind::Pdf, "Folie 0", HitKind::Pdf, "Folie 1"));
+    assert!(a.y0 > 50.0 && a.y1 < 110.0, "near the top: {a:?}");
+    assert!((b.y0 - a.y0 - 100.0).abs() < 0.5, "moved down with the PDF: {a:?} {b:?}");
+}

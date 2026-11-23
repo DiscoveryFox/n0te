@@ -1,7 +1,7 @@
 //! The application: the library (notebooks by folder, import of `.n0te` bundles) and an open
 //! notebook (outline sidebar, page canvas, top and status bar).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use iced::{Alignment, Element, Length, Padding, Point, Subscription, Task, Theme
 use n0te_core::format;
 use n0te_core::layout as nl;
 use n0te_core::notebook::{Background, Notebook, OutlineRow, SheetSpec};
-use n0te_core::sheet::Sheet;
+use n0te_core::sheet::{Heading, Sheet};
 use n0te_core::store::Library;
 
 use crate::gestures::Gesture;
@@ -22,6 +22,7 @@ use crate::pages::{self, Camera, Pages, SheetContent};
 use crate::pdf::{self, Pdf};
 use crate::live::{self, LiveEvent};
 use crate::palette::{self, Command};
+use crate::search::{self, Search};
 use crate::settings::Settings;
 use crate::{library, sidebar, theme};
 
@@ -174,12 +175,25 @@ pub enum Message {
     SizeWidth(String),
     SizeHeight(String),
     /// Touchpad gestures (Wayland): the window to listen on, its display, a gesture, the frame
-    /// clock while the page glides, gliding on/off.
+    /// clock (while the page glides or a found spot fades), gliding on/off.
     WindowOpened(iced::window::Id),
     WaylandDisplay(Option<usize>),
     Gesture(Gesture),
     Glide(Instant),
     Momentum(bool),
+    /// Search in the outline's field: typed; the pause after a key is over (the key's number);
+    /// the results (search number, query, pages; None: a newer search took over); Enter (show
+    /// the first hit); empty the field; Ctrl+F.
+    SearchQuery(String),
+    SearchDue(u64),
+    Found(u64, String, Option<Vec<search::PageHits>>),
+    SearchSubmit,
+    SearchClear,
+    FocusSearch,
+    /// Show a spot of a sheet (sheet points) and light it up: a search hit, a heading.
+    Reveal(String, [f32; 4]),
+    /// Headings read in the background: the notebook, each sheet's headings.
+    Headings(String, Vec<(String, Vec<Heading>)>),
 }
 
 /// The text box being edited: its sheet stays open while typing.
@@ -337,6 +351,16 @@ pub struct App {
     pub glide: Option<(f32, f32, Instant)>,
     pub show_imports: bool,
     pub sidebar: bool,
+    /// The outline's search field and what it found in the open notebook.
+    pub search: Search,
+    /// The open notebook's headings, by main sheet id (top to bottom), read in the background.
+    pub headings: HashMap<String, Vec<Heading>>,
+    /// Headings to read (again): every sheet's, or these sheets'; one read at a time.
+    headings_all: bool,
+    headings_due: HashSet<String>,
+    /// Look for sheets whose headings weren't read yet (new pages).
+    headings_check: bool,
+    headings_reading: bool,
 }
 
 /// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
@@ -438,6 +462,12 @@ impl App {
             size_warning: None,
             show_imports: false,
             sidebar: true,
+            search: Search::default(),
+            headings: HashMap::new(),
+            headings_all: false,
+            headings_due: HashSet::new(),
+            headings_check: false,
+            headings_reading: false,
         };
         app.refresh();
         app
@@ -482,7 +512,12 @@ impl App {
             }),
             iced::window::open_events().map(Message::WindowOpened),
             crate::gestures::subscription().map(Message::Gesture),
-            if self.glide.is_some() { iced::window::frames().map(Message::Glide) } else { Subscription::none() },
+            // The frame clock: a gliding page, a found spot fading.
+            if self.glide.is_some() || matches!(&self.screen, Screen::Notebook(o) if o.pages.flash.as_ref().is_some_and(|f| !f.done())) {
+                iced::window::frames().map(Message::Glide)
+            } else {
+                Subscription::none()
+            },
         ])
     }
 
@@ -526,6 +561,14 @@ impl App {
         pages.show_remote_frame.set(self.settings.remote_frame);
         self.finish_text();
         self.close_text_page();
+        // The same notebook again (new design, merged import): its search and headings stay
+        // until read again; another one starts afresh.
+        if self.notebook_id().as_deref() != Some(id) {
+            self.search.clear();
+            self.headings.clear();
+        }
+        self.search.stale = true;
+        self.headings_all = true;
         self.stamp = self.lib.change_stamp(id);
         self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, pages, camera: Camera::default() }));
         Ok(())
@@ -535,7 +578,15 @@ impl App {
         self.status = Some(s.into());
     }
 
+    /// Runs a message, then what it left to do in the background: headings to read (again), a
+    /// search to run again after the notebook changed.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.handle(message);
+        let more = self.background();
+        if more.is_empty() { task } else { Task::batch(std::iter::once(task).chain(more)) }
+    }
+
+    fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Open(id) => {
                 if let Err(e) = self.open(&id) {
@@ -756,7 +807,14 @@ impl App {
                 }
             }
             Message::Gesture(g) => return self.gesture(g),
-            Message::Glide(now) => return self.glide_step(now),
+            Message::Glide(now) => {
+                if let Screen::Notebook(o) = &mut self.screen
+                    && o.pages.flash.as_ref().is_some_and(|f| f.done())
+                {
+                    o.pages.flash = None;
+                }
+                return self.glide_step(now);
+            }
             Message::Momentum(on) => {
                 self.settings.momentum = on;
                 self.glide = None;
@@ -768,8 +826,8 @@ impl App {
             Message::FileDropped(p) => {
                 let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                 return match ext.as_str() {
-                    "n0te" => self.update(Message::Import(p)),
-                    "pdf" => self.update(Message::ImportPdf(p)),
+                    "n0te" => self.handle(Message::Import(p)),
+                    "pdf" => self.handle(Message::ImportPdf(p)),
                     _ => {
                         self.say("Nur PDF- und .n0te-Dateien");
                         Task::none()
@@ -1012,7 +1070,7 @@ impl App {
                         self.say("Einladung erstellt und kopiert");
                         // The new link opens (its QR code shows).
                         self.invite_open = live::invites().into_iter().find(|i| i.link == link).map(|i| i.id);
-                        let _ = self.update(Message::ShowShare(true));
+                        let _ = self.handle(Message::ShowShare(true));
                         return iced::clipboard::write(link);
                     }
                     Err(e) => self.say(format!("Einladen: {e}")),
@@ -1023,7 +1081,7 @@ impl App {
                     Ok(_) => self.say(if write { "Gäste dürfen jetzt mitschreiben" } else { "Gäste dürfen jetzt nur lesen" }),
                     Err(e) => self.say(format!("Rechte: {e}")),
                 }
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::GuestFrames(on) => {
                 self.settings.guest_frames = on;
@@ -1089,14 +1147,14 @@ impl App {
             }
             Message::ToggleInvite(id) => {
                 self.invite_open = if self.invite_open.as_deref() == Some(id.as_str()) { None } else { Some(id) };
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::Admit(device, yes) => {
                 if let Err(e) = live::request(&[if yes { "admit" } else { "deny" }, &device]) {
                     self.say(format!("Einlass: {e}"));
                 }
                 self.refresh_guests();
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::RemoveGuest(device) => {
                 if self.removing.as_deref() != Some(device.as_str()) {
@@ -1110,19 +1168,19 @@ impl App {
                     Err(e) => self.say(format!("Entfernen: {e}")),
                 }
                 self.refresh_guests();
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::AllowAgain(invite, device) => {
                 if let Err(e) = live::request(&["allow-again", &invite, &device]) {
                     self.say(format!("Zulassen: {e}"));
                 }
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::SetExpiry(invite, days) => {
                 if let Err(e) = live::request(&["set-expiry", &invite, &days.to_string()]) {
                     self.say(format!("Ablauf: {e}"));
                 }
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::SetInviteOptions(invite, approve, single) => {
                 let mut args = vec!["set-options", invite.as_str()];
@@ -1135,21 +1193,21 @@ impl App {
                 if let Err(e) = live::request(&args) {
                     self.say(format!("Einladung: {e}"));
                 }
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::SetPin(invite, on) => {
                 let pin = if on { new_pin() } else { "off".into() };
                 if let Err(e) = live::request(&["set-pin", &invite, &pin]) {
                     self.say(format!("PIN: {e}"));
                 }
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::Revoke(id) => {
                 match live::request(&["revoke", &id]) {
                     Ok(_) => self.say("Widerrufen: der Gast ist getrennt"),
                     Err(e) => self.say(format!("Widerrufen: {e}")),
                 }
-                return self.update(Message::ShowShare(true));
+                return self.handle(Message::ShowShare(true));
             }
             Message::CopyText(t) => {
                 self.say("Kopiert");
@@ -1284,6 +1342,54 @@ impl App {
                     Err(e) => self.say(format!("Textseite: {e}")),
                 }
             }
+            Message::SearchQuery(q) => {
+                self.search.query = q;
+                if !self.search.active() {
+                    self.search.clear();
+                    return Task::none();
+                }
+                self.search.stale = false;
+                return self.search_soon();
+            }
+            Message::SearchDue(n) => {
+                if n == self.search.typed && self.search.active() {
+                    return self.start_search();
+                }
+            }
+            Message::Found(generation, query, found) => {
+                if let Some(pages) = found
+                    && generation == self.search.latest.load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    self.search.busy = false;
+                    let other_words = self.search.found.as_ref().is_none_or(|(q, _)| *q != query);
+                    self.search.found = Some((query, pages));
+                    // New words: the list starts at the top (the same search again stays put).
+                    if other_words {
+                        return iced::widget::operation::snap_to(sidebar::list_id(), iced::widget::operation::RelativeOffset::START);
+                    }
+                }
+            }
+            Message::SearchSubmit => {
+                let first = self.search.hits().next().map(|(p, h)| (p.sheet_id.clone(), [h.x0, h.y0, h.x1, h.y1]));
+                if let Some((sheet, r)) = first {
+                    self.reveal(&sheet, r);
+                }
+            }
+            Message::SearchClear => self.search.clear(),
+            Message::FocusSearch => {
+                if matches!(self.screen, Screen::Notebook(_)) {
+                    self.sidebar = true;
+                    // What was searched before is selected: typing replaces it.
+                    return iced::widget::operation::focus(sidebar::input_id()).chain(iced::widget::operation::select_all(sidebar::input_id()));
+                }
+            }
+            Message::Reveal(sheet, r) => self.reveal(&sheet, r),
+            Message::Headings(nb, read) => {
+                self.headings_reading = false;
+                if self.notebook_id().as_deref() == Some(nb.as_str()) {
+                    self.headings.extend(read);
+                }
+            }
             Message::ToggleNotes => {
                 if self.text_page.as_ref().is_some_and(|t| t.docked) {
                     self.close_text_page();
@@ -1293,6 +1399,141 @@ impl App {
             }
         }
         Task::none()
+    }
+
+    /// What the last message left to do in the background: headings to read (one read at a
+    /// time; what comes due meanwhile waits for the next), a search to run again.
+    fn background(&mut self) -> Vec<Task<Message>> {
+        let mut out = Vec::new();
+        let Screen::Notebook(o) = &self.screen else { return out };
+        if !self.headings_reading && (self.headings_all || self.headings_check || !self.headings_due.is_empty()) {
+            let sheets: Vec<String> = o
+                .nb
+                .outline(true)
+                .into_iter()
+                .filter_map(|r| match r {
+                    OutlineRow::Sheet { sheet_id, .. } => Some(sheet_id),
+                    OutlineRow::Group { .. } => None,
+                })
+                .filter(|s| self.headings_all || self.headings_due.contains(s) || !self.headings.contains_key(s))
+                .collect();
+            self.headings_all = false;
+            self.headings_check = false;
+            self.headings_due.clear();
+            if !sheets.is_empty() {
+                self.headings_reading = true;
+                let (root, nb) = (self.lib.root().to_path_buf(), o.id.clone());
+                out.push(Task::perform(
+                    async move {
+                        let read = search::read_headings(&root, &nb, &sheets);
+                        (nb, read)
+                    },
+                    |(nb, read)| Message::Headings(nb, read),
+                ));
+            }
+        }
+        if self.search.stale && self.search.active() {
+            self.search.stale = false;
+            out.push(self.search_soon());
+        }
+        out
+    }
+
+    /// Sheets changed (None: maybe all; empty: the notebook's pages): their headings are read
+    /// again, new sheets' too, and a search in the field runs again.
+    fn changed(&mut self, sheets: Option<&[String]>) {
+        match sheets {
+            Some(s) => self.headings_due.extend(s.iter().cloned()),
+            None => self.headings_all = true,
+        }
+        self.headings_check = true;
+        if self.search.active() {
+            self.search.stale = true;
+        }
+    }
+
+    /// The search runs a moment after the last key ([`search::DEBOUNCE`]).
+    fn search_soon(&mut self) -> Task<Message> {
+        self.search.typed += 1;
+        let n = self.search.typed;
+        Task::perform(search::after(search::DEBOUNCE), move |_| Message::SearchDue(n))
+    }
+
+    /// Starts the search in the background (one still running stops).
+    fn start_search(&mut self) -> Task<Message> {
+        let open = self.open_sheets();
+        let Screen::Notebook(o) = &self.screen else { return Task::none() };
+        let generation = self.search.latest.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let job = search::Job {
+            root: self.lib.root().to_path_buf(),
+            notebook: o.id.clone(),
+            query: self.search.query.clone(),
+            targets: search::targets(&o.nb),
+            open,
+            pdf: self.pdf.clone(),
+            generation,
+            latest: self.search.latest.clone(),
+        };
+        self.search.busy = true;
+        self.search.stale = false;
+        let query = job.query.clone();
+        Task::perform(async move { search::run(&job) }, move |found| Message::Found(generation, query.clone(), found))
+    }
+
+    /// The sheets being edited here as they are on screen (typed, not saved yet): snapshots by
+    /// sheet id, for the search.
+    fn open_sheets(&self) -> HashMap<String, Vec<u8>> {
+        let mut out = HashMap::new();
+        let copy = |sheet: &Sheet, edit: &dyn Fn(&Sheet)| -> Option<Vec<u8>> {
+            let c = Sheet::load(0, &sheet.snapshot().ok()?).ok()?;
+            edit(&c);
+            c.snapshot().ok()
+        };
+        if let Some(e) = &self.editing {
+            let text = e.content.text();
+            let text = text.strip_suffix('\n').unwrap_or(&text).to_string();
+            if let Some(b) = copy(&e.sheet, &|c| {
+                let _ = c.set_text(&e.box_id, &text);
+                let _ = c.place_text_box(&e.box_id, e.x, e.y, e.w, e.size);
+            }) {
+                out.insert(e.sheet_id.clone(), b);
+            }
+        }
+        if let Some(t) = self.text_page.as_ref().filter(|t| t.dirty && !t.sheet_id.is_empty()) {
+            let md = t.doc.to_markdown();
+            if let Some(b) = copy(&t.sheet, &|c| {
+                let _ = c.set_page_text(&md);
+            }) {
+                out.insert(t.sheet_id.clone(), b);
+            }
+        }
+        out
+    }
+
+    /// Shows a spot of a sheet (sheet points) in the middle of the view, at the zoom it has,
+    /// and lights it up; folded groups around it open first.
+    fn reveal(&mut self, sheet: &str, r: [f32; 4]) {
+        let lib = self.lib.clone();
+        let layout = self.settings.layout();
+        let Screen::Notebook(o) = &mut self.screen else { return };
+        if o.pages.page_of_sheet(sheet).is_none() {
+            let folded = folded_around(&o.nb, sheet);
+            if folded.is_empty() {
+                return;
+            }
+            for g in &folded {
+                let _ = o.nb.set_collapsed(g, false);
+            }
+            let _ = lib.save_notebook(&o.nb);
+            o.rows = o.nb.outline(false);
+            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
+        }
+        let Some(i) = o.pages.page_of_sheet(sheet) else { return };
+        let page = o.pages.pages[i].placed.rect;
+        let c = o.camera;
+        let (cx, cy) = (page.x0 + (r[0] + r[2]) / 2.0, page.y0 + (r[1] + r[3]) / 2.0);
+        o.camera = o.pages.clamp(Camera { x: cx - c.viewport.width / c.zoom / 2.0, y: cy - c.viewport.height / c.zoom / 2.0, ..c });
+        o.pages.flash = Some(pages::Flash { sheet_id: sheet.to_string(), rect: n0te_core::ink::Rect::new(r[0], r[1], r[2], r[3]), at: Instant::now() });
     }
 
     fn connect_sync(&mut self) {
@@ -1447,7 +1688,7 @@ impl App {
                     self.send_presence();
                 }
                 if self.share.is_some() {
-                    return self.update(Message::ShowShare(true));
+                    return self.handle(Message::ShowShare(true));
                 }
             }
             LiveEvent::Waiting { name, on, .. } => {
@@ -1456,7 +1697,7 @@ impl App {
                     self.say(format!("{name} möchte herein (Teilen → Hereinlassen)"));
                 }
                 if self.share.is_some() {
-                    return self.update(Message::ShowShare(true));
+                    return self.handle(Message::ShowShare(true));
                 }
             }
             LiveEvent::JoinWaiting { owner } => self.say(format!("Warte, bis {owner} dich hereinlässt …")),
@@ -1506,6 +1747,8 @@ impl App {
         {
             let _ = lib.refresh_sheet(&id, &e.sheet_id, &e.sheet);
         }
+        // Headings and a search in the field follow (sheets in folded groups too).
+        self.changed(if sheets.is_empty() { None } else { Some(sheets) });
     }
 
     /// Live: where this view is (sheet points of the page in the middle), at most 10× a second.
@@ -1572,13 +1815,13 @@ impl App {
     /// Runs a palette command.
     fn run(&mut self, cmd: Command) -> Task<Message> {
         match cmd {
-            Command::NewNotebook => self.update(Message::StartCreate),
-            Command::ImportPdf | Command::InsertPdf => self.update(Message::ShowPdfImport(true)),
-            Command::ImportBundle => self.update(Message::ShowImports(true)),
-            Command::OpenNotebook(id) => self.update(Message::Open(id)),
-            Command::Library => self.update(Message::Back),
-            Command::NewTextPage => self.update(Message::NewTextPage),
-            Command::Notes => self.update(Message::ToggleNotes),
+            Command::NewNotebook => self.handle(Message::StartCreate),
+            Command::ImportPdf | Command::InsertPdf => self.handle(Message::ShowPdfImport(true)),
+            Command::ImportBundle => self.handle(Message::ShowImports(true)),
+            Command::OpenNotebook(id) => self.handle(Message::Open(id)),
+            Command::Library => self.handle(Message::Back),
+            Command::NewTextPage => self.handle(Message::NewTextPage),
+            Command::Notes => self.handle(Message::ToggleNotes),
             Command::NewTextBox => {
                 let ev = keyboard::Event::KeyPressed {
                     key: Key::Character("t".into()),
@@ -1589,21 +1832,22 @@ impl App {
                     text: None,
                     repeat: false,
                 };
-                self.update(Message::Key(ev))
+                self.handle(Message::Key(ev))
             }
-            Command::Export => self.update(Message::ShowExport(true)),
-            Command::SendToTablet => self.update(Message::SendToTablet),
-            Command::ToggleSidebar => self.update(Message::ToggleSidebar),
-            Command::Zoom(z) => self.update(Message::Zoom(z)),
-            Command::GoTo(sheet) => self.update(Message::Jump(sheet)),
-            Command::Theme(id) => self.update(Message::SetTheme(id)),
-            Command::Settings => self.update(Message::ShowSettings(true)),
-            Command::Help => self.update(Message::ShowHelp(true)),
-            Command::History => self.update(Message::ShowHistory(true)),
-            Command::Share => self.update(Message::ShowShare(true)),
-            Command::Live => self.update(Message::StartLive),
-            Command::RotatePage => self.update(Message::RotatePage),
-            Command::PageSetup => self.update(Message::ShowPage(true)),
+            Command::Export => self.handle(Message::ShowExport(true)),
+            Command::SendToTablet => self.handle(Message::SendToTablet),
+            Command::ToggleSidebar => self.handle(Message::ToggleSidebar),
+            Command::Zoom(z) => self.handle(Message::Zoom(z)),
+            Command::GoTo(sheet) => self.handle(Message::Jump(sheet)),
+            Command::Theme(id) => self.handle(Message::SetTheme(id)),
+            Command::Settings => self.handle(Message::ShowSettings(true)),
+            Command::Help => self.handle(Message::ShowHelp(true)),
+            Command::History => self.handle(Message::ShowHistory(true)),
+            Command::Share => self.handle(Message::ShowShare(true)),
+            Command::Live => self.handle(Message::StartLive),
+            Command::RotatePage => self.handle(Message::RotatePage),
+            Command::PageSetup => self.handle(Message::ShowPage(true)),
+            Command::Search => self.handle(Message::FocusSearch),
         }
     }
 
@@ -1837,6 +2081,7 @@ impl App {
         o.rows = o.nb.outline(false);
         o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
         o.camera = o.pages.clamp(o.camera);
+        self.changed(Some(&[]));
         if let Err(e) = done {
             self.say(format!("Nicht geändert: {e}"));
         }
@@ -1939,7 +2184,7 @@ impl App {
                 self.pinch = Some((z0, p));
                 let zoom = (z0 * scale).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
                 let next = o.pages.clamp(Camera { x: anchor.x - p.x / zoom, y: anchor.y - p.y / zoom, zoom, ..c });
-                self.update(Message::Camera(next))
+                self.handle(Message::Camera(next))
             }
             Gesture::PinchEnd => {
                 self.pinch = None;
@@ -1978,7 +2223,7 @@ impl App {
         if next == c {
             return Task::none();
         }
-        self.update(Message::Camera(next))
+        self.handle(Message::Camera(next))
     }
 
     /// Writes a sheet and makes the canvas read it again.
@@ -1990,6 +2235,7 @@ impl App {
         if let Screen::Notebook(o) = &self.screen {
             o.pages.reload_sheet(sheet_id);
         }
+        self.changed(Some(&[sheet_id.to_string()]));
     }
 
     /// Saves the box being edited (text, and with `place` its position/size).
@@ -2114,6 +2360,7 @@ impl App {
             o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
             o.camera = o.pages.clamp(o.camera);
         }
+        self.changed(Some(&[]));
     }
 
     /// A PDF: in the library a new notebook named after the file, in a notebook new pages
@@ -2196,8 +2443,8 @@ impl App {
         // The palette takes the arrows and Esc while it is open.
         if self.palette.is_some() {
             return match key.as_ref() {
-                Key::Named(Named::ArrowDown) => self.update(Message::PaletteMove(1)),
-                Key::Named(Named::ArrowUp) => self.update(Message::PaletteMove(-1)),
+                Key::Named(Named::ArrowDown) => self.handle(Message::PaletteMove(1)),
+                Key::Named(Named::ArrowUp) => self.handle(Message::PaletteMove(-1)),
                 Key::Named(Named::Escape) => {
                     self.palette = None;
                     Task::none()
@@ -2207,8 +2454,8 @@ impl App {
         }
         if self.size_warning.is_some() {
             return match key.as_ref() {
-                Key::Named(Named::Escape) => self.update(Message::ConfirmSize(false)),
-                Key::Named(Named::Enter) => self.update(Message::ConfirmSize(true)),
+                Key::Named(Named::Escape) => self.handle(Message::ConfirmSize(false)),
+                Key::Named(Named::Enter) => self.handle(Message::ConfirmSize(true)),
                 _ => Task::none(),
             };
         }
@@ -2229,14 +2476,15 @@ impl App {
                 return iced::widget::operation::focus(editor_id());
             }
             if self.text_page.is_some() {
-                return self.update(Message::Blocks(crate::blocks::Msg::Wrap(mark)));
+                return self.handle(Message::Blocks(crate::blocks::Msg::Wrap(mark)));
             }
         }
         match (m.command(), key.as_ref()) {
-            (true, Key::Character("k")) => return self.update(Message::OpenPalette),
-            (_, Key::Named(Named::F1)) => return self.update(Message::ShowHelp(true)),
-            (true, Key::Character(",")) => return self.update(Message::ShowSettings(true)),
-            (true, Key::Character("o")) => return self.update(Message::ShowPdfImport(true)),
+            (true, Key::Character("k")) => return self.handle(Message::OpenPalette),
+            (_, Key::Named(Named::F1)) => return self.handle(Message::ShowHelp(true)),
+            (true, Key::Character(",")) => return self.handle(Message::ShowSettings(true)),
+            (true, Key::Character("o")) => return self.handle(Message::ShowPdfImport(true)),
+            (true, Key::Character("f")) => return self.handle(Message::FocusSearch),
             _ => {}
         }
         if let Key::Named(Named::Escape) = key.as_ref() {
@@ -2253,32 +2501,37 @@ impl App {
                 self.show_imports = false;
                 return Task::none();
             }
-            return self.update(Message::Back);
+            // Search results in the sidebar: the outline again.
+            if self.search.active() && matches!(self.screen, Screen::Notebook(_)) {
+                self.search.clear();
+                return Task::none();
+            }
+            return self.handle(Message::Back);
         }
         let Screen::Notebook(o) = &mut self.screen else {
             return match (m.command(), key.as_ref()) {
-                (true, Key::Character("n")) => self.update(Message::StartCreate),
-                (true, Key::Character("i")) => self.update(Message::ShowImports(true)),
+                (true, Key::Character("n")) => self.handle(Message::StartCreate),
+                (true, Key::Character("i")) => self.handle(Message::ShowImports(true)),
                 _ => Task::none(),
             };
         };
         let c = o.camera;
         if m.command() {
             return match key.as_ref() {
-                Key::Character("0") => self.update(Message::Zoom(1.0)),
-                Key::Character("+" | "=") => self.update(Message::Zoom(c.zoom * 1.25)),
-                Key::Character("-") => self.update(Message::Zoom(c.zoom / 1.25)),
-                Key::Character("b") => self.update(Message::ToggleSidebar),
-                Key::Character("n") => self.update(Message::NewTextPage),
-                Key::Character("m") => self.update(Message::ToggleNotes),
-                Key::Character("e") => self.update(Message::ShowExport(true)),
-                Key::Character("h") => self.update(Message::ShowHistory(true)),
-                Key::Character("r") => self.update(Message::RotatePage),
+                Key::Character("0") => self.handle(Message::Zoom(1.0)),
+                Key::Character("+" | "=") => self.handle(Message::Zoom(c.zoom * 1.25)),
+                Key::Character("-") => self.handle(Message::Zoom(c.zoom / 1.25)),
+                Key::Character("b") => self.handle(Message::ToggleSidebar),
+                Key::Character("n") => self.handle(Message::NewTextPage),
+                Key::Character("m") => self.handle(Message::ToggleNotes),
+                Key::Character("e") => self.handle(Message::ShowExport(true)),
+                Key::Character("h") => self.handle(Message::ShowHistory(true)),
+                Key::Character("r") => self.handle(Message::RotatePage),
                 Key::Character("t") => {
                     // A text box in the middle of the view, on the page there.
                     let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 3.0);
                     match o.pages.sheet_at(cx, cy).filter(|p| !p.is_board()).map(|p| (p.sheet_id.clone(), cx - p.rect.x0, cy - p.rect.y0)) {
-                        Some((sheet, x, y)) => self.update(Message::NewText(sheet, x, y)),
+                        Some((sheet, x, y)) => self.handle(Message::NewText(sheet, x, y)),
                         None => Task::none(),
                     }
                 }
@@ -2534,6 +2787,7 @@ impl App {
     fn help_view(&self) -> Element<'_, Message> {
         let keys = [
             ("Strg K", "Befehle, Seiten, Notizbücher suchen"),
+            ("Strg F", "Im Notizbuch suchen: Handschrift, Text, Überschriften, PDF"),
             ("Esc", "Zurück · Bearbeiten beenden · Bibliothek"),
             ("Bild ↑ / ↓, ← / →", "Vorige / nächste Seite"),
             ("Pos1 / Ende", "Erste / letzte Seite"),
@@ -2693,7 +2947,7 @@ impl App {
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
         if self.sidebar {
-            body = body.push(sidebar::view(&o.rows, &o.pages, current));
+            body = body.push(sidebar::view(&o.rows, &o.pages, current, &self.headings, &self.search));
             body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
         }
         let panel: Option<Element<'a, Message>> = if let Some(h) = &self.history {
@@ -2979,6 +3233,26 @@ impl App {
     pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         scrollable(content).style(theme::scroll_dark).height(Length::Fill).width(Length::Fill).into()
     }
+}
+
+/// The folded groups around a sheet (main or side sheet), outermost first.
+fn folded_around(nb: &Notebook, sheet: &str) -> Vec<String> {
+    let mut groups: Vec<(String, bool)> = Vec::new();
+    for row in nb.outline(true) {
+        match row {
+            OutlineRow::Group { node, depth, collapsed, .. } => {
+                groups.truncate(depth as usize);
+                groups.push((node, collapsed));
+            }
+            OutlineRow::Sheet { depth, sheet_id, left, right, .. } => {
+                groups.truncate(depth as usize);
+                if sheet_id == sheet || left.iter().chain(&right).any(|s| s.sheet_id == sheet) {
+                    return groups.into_iter().filter(|g| g.1).map(|g| g.0).collect();
+                }
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// Every plain page of a notebook (main and side sheets; no PDF pages, no boards): (node, spec).
