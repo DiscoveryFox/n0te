@@ -10,6 +10,7 @@ pub mod ids;
 pub mod ink;
 pub mod layout;
 pub mod notebook;
+pub mod plot;
 pub mod search;
 pub mod sheet;
 pub mod store;

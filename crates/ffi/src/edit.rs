@@ -103,8 +103,20 @@ impl SheetHandle {
     pub fn add_image(&self, blob: String, x: f32, y: f32, w: f32, h: f32) -> R<String> {
         Ok(lock(&self.sheet).add_image(&blob, x, y, w, h)?)
     }
+    /// The page's images and then its plots (as images without a blob, see `FfiImage::plot`).
     pub fn images(&self) -> Vec<crate::FfiImage> {
-        lock(&self.sheet).images().into_iter().map(|i| crate::FfiImage { id: i.id, blob: i.blob, x: i.x, y: i.y, w: i.w, h: i.h }).collect()
+        let s = lock(&self.sheet);
+        let mut out: Vec<crate::FfiImage> = s.images().into_iter().map(|i| crate::FfiImage { id: i.id, blob: i.blob, x: i.x, y: i.y, w: i.w, h: i.h, plot: None }).collect();
+        out.extend(s.plots().into_iter().map(|p| crate::FfiImage { id: p.id.clone(), blob: String::new(), x: p.x, y: p.y, w: p.w, h: p.h, plot: Some(p.into()) }));
+        out
+    }
+    /// Puts a coordinate system on the page; returns its id.
+    pub fn add_plot(&self, plot: crate::FfiPlot) -> R<String> {
+        Ok(lock(&self.sheet).add_plot(&plot.into())?)
+    }
+    /// Changes a plot (by its id) in one step.
+    pub fn set_plot(&self, plot: crate::FfiPlot) -> R<()> {
+        Ok(lock(&self.sheet).set_plot(&plot.into())?)
     }
     pub fn place_image(&self, id: String, x: f32, y: f32, w: f32, h: f32) -> R<()> {
         Ok(lock(&self.sheet).place_image(&id, x, y, w, h)?)

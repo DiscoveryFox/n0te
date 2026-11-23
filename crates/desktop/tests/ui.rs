@@ -1031,3 +1031,243 @@ fn pdf_text_is_found_where_it_lies_on_the_page() {
     assert!(a.y0 > 50.0 && a.y1 < 110.0, "near the top: {a:?}");
     assert!((b.y0 - a.y0 - 100.0).abs() < 0.5, "moved down with the PDF: {a:?} {b:?}");
 }
+
+// --- coordinate systems ----------------------------------------------------------------------
+
+/// The green of the test plots' curve.
+const CURVE: u32 = 0xFF00_B000;
+
+fn is_curve(p: &[u8]) -> bool {
+    p[0] < 70 && p[1] > 130 && p[2] < 70
+}
+
+/// y = 2 in thick green, ruler-straight, in a 240 × 160 pt box at (100, 200) with 20 pt to the
+/// unit: the curve runs along page y 240 from x 100 to 340.
+fn green_plot() -> n0te_core::plot::Plot {
+    let mut p = n0te_core::plot::Plot::centered(100.0, 200.0, 240.0, 160.0, 20.0, n0te_desktop::plots::AXES, 4.0);
+    p.clean = true;
+    p.fns = vec![n0te_core::plot::PlotFn { expr: "2".into(), color: CURVE }];
+    p
+}
+
+/// A library with one page of `paper` (and a green plot on it), opened at zoom 1 with the
+/// page's corner 20 px into the view: (harness, root, notebook, sheet).
+fn plot_page(tag: &str, paper: n0te_core::notebook::Background, with_plot: bool) -> (Harness, std::path::PathBuf, String, String) {
+    plot_page_on("tiny-skia", tag, paper, with_plot).expect("tiny-skia renderer")
+}
+
+/// [`plot_page`] on a renderer (None: not available here).
+fn plot_page_on(backend: &str, tag: &str, paper: n0te_core::notebook::Background, with_plot: bool) -> Option<(Harness, std::path::PathBuf, String, String)> {
+    let root = temp_root(tag);
+    let lib = Library::open(&root).unwrap();
+    let nb = lib.create_notebook("Funktionen").unwrap();
+    let spec = n0te_core::notebook::SheetSpec { spacing: 17.0, ..n0te_core::notebook::SheetSpec::a4(paper) };
+    let (_, sheet_id) = nb.add_sheet(None, 0, &spec).unwrap();
+    lib.save_notebook(&nb).unwrap();
+    if with_plot {
+        let sheet = lib.load_sheet(&nb.id(), &sheet_id).unwrap();
+        sheet.add_plot(&green_plot()).unwrap();
+        lib.save_sheet(&nb.id(), &sheet_id, &sheet).unwrap();
+    }
+    let mut h = Harness::new(App::new(&root), backend, Size::new(1600.0, 900.0), 1.0)?;
+    h.message(Message::Open(nb.id()));
+    h.events(&[]);
+    let o = open(&h);
+    let rect = o.pages.pages[0].rect();
+    let cam = n0te_desktop::pages::Camera { x: rect.x0 - 20.0, y: rect.y0 - 20.0, zoom: 1.0, ..o.camera };
+    h.message(Message::Camera(cam));
+    h.events(&[]);
+    Some((h, root, nb.id(), sheet_id))
+}
+
+/// Where a sheet point is on the screen (the camera of [`plot_page`]).
+fn screen_at(h: &Harness, x: f32, y: f32) -> Point {
+    let c = open(h).camera;
+    Point::new(c.origin.x + 20.0 + x, c.origin.y + 20.0 + y)
+}
+
+fn stored_plots(root: &std::path::Path, nb: &str, sheet: &str) -> Vec<n0te_core::plot::Plot> {
+    Library::open(root).unwrap().load_sheet(nb, sheet).unwrap().plots()
+}
+
+/// Curve-green pixels of a frame: (in the band along page y 236..244, x 96..344; elsewhere).
+fn green_pixels(h: &mut Harness) -> (usize, usize) {
+    let (rgba, _) = h.frame_rgba();
+    let (a, b) = (screen_at(h, 96.0, 235.0), screen_at(h, 344.0, 245.0));
+    let (mut on, mut off) = (0, 0);
+    for (i, p) in rgba.chunks_exact(4).enumerate() {
+        if !is_curve(p) {
+            continue;
+        }
+        let (x, y) = ((i % 1600) as f32, (i / 1600) as f32);
+        if x >= a.x && x <= b.x && y >= a.y && y <= b.y {
+            on += 1;
+        } else {
+            off += 1;
+        }
+    }
+    (on, off)
+}
+
+#[test]
+fn a_plot_on_a_page_is_drawn_also_when_it_comes_from_the_tablet() {
+    // Ink (strokes and plots) is drawn as meshes, which only the GPU renderer draws.
+    let gpu = plot_page_on("wgpu", "plotdraw", n0te_core::notebook::Background::Blank, false);
+    let pixels = gpu.is_some();
+    let (mut h, root, nb, sheet) = gpu.unwrap_or_else(|| plot_page("plotdraw", n0te_core::notebook::Background::Blank, false));
+    if pixels {
+        assert_eq!(green_pixels(&mut h).0, 0);
+    }
+    // The tablet adds a plot: the change comes in through the sync service.
+    {
+        let lib = Library::open(&root).unwrap();
+        let s = lib.load_sheet(&nb, &sheet).unwrap();
+        s.add_plot(&green_plot()).unwrap();
+        lib.save_sheet(&nb, &sheet, &s).unwrap();
+    }
+    h.message(Message::Live(n0te_desktop::live::LiveEvent::Changed { notebook: nb.clone(), index: false, sheets: vec![sheet.clone()] }));
+    let plots = open(&h).pages.plots_of(&sheet);
+    assert_eq!(plots.len(), 1, "the page has it");
+    if !pixels {
+        // No GPU here: what would be drawn — the curve's ink lies along y = 2.
+        use iced::advanced::graphics::mesh::Mesh;
+        let green = iced::advanced::graphics::color::pack(n0te_desktop::pages::argb(CURVE));
+        let meshes = n0te_desktop::plots::meshes(&plots, iced::Rectangle::new(Point::ORIGIN, Size::new(595.0, 842.0))).expect("plot ink");
+        let at: Vec<[f32; 2]> = meshes
+            .iter()
+            .flat_map(|m| match m {
+                Mesh::Solid { buffers, .. } => buffers.vertices.iter().filter(|v| v.color == green).map(|v| v.position).collect(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(at.len() > 20 && at.iter().all(|p| (p[1] - 240.0).abs() < 3.0 && p[0] > 97.0 && p[0] < 343.0), "{at:?}");
+        eprintln!("no wgpu: checked the plot's mesh instead of pixels");
+        return;
+    }
+    let (on, off) = green_pixels(&mut h);
+    // 240 pt of a 4 pt line at zoom 1.
+    assert!(on > 600, "the curve is drawn along y = 2: {on} green pixels there");
+    assert!(off < 20, "and nowhere else: {off}");
+    // Its axes in their near-black: the x axis along page y 280.
+    let (rgba, _) = h.frame_rgba();
+    let at = screen_at(&h, 160.0, 280.0);
+    let dark = (-3..=3).any(|d| {
+        let i = (((at.y as i32 + d) * 1600) + at.x as i32) as usize * 4;
+        rgba[i] < 90 && rgba[i + 1] < 90 && rgba[i + 2] < 90
+    });
+    assert!(dark, "the x axis is drawn");
+}
+
+#[test]
+fn clicking_a_plot_opens_its_dialog_and_ok_stores_what_was_typed() {
+    let (mut h, root, nb, sheet) = plot_page("plotclick", n0te_core::notebook::Background::Lines, true);
+    let id = stored_plots(&root, &nb, &sheet)[0].id.clone();
+    // A click into the box (not a double click: no text box either).
+    let at = screen_at(&h, 220.0, 300.0);
+    h.click(at);
+    let e = h.app.plot_edit.as_ref().expect("the dialog opened");
+    assert_eq!((e.sheet_id.as_str(), e.plot.id.as_str()), (sheet.as_str(), id.as_str()));
+    assert!(h.app.editing.is_none());
+    assert!(h.find("Koordinatensystem").is_some() || h.find("KOORDINATENSYSTEM").is_some() || h.find("koordinatensystem").is_some());
+    // Its preview draws the plot (as paths: the software renderer draws those, not the page's
+    // ink meshes, so the green is the preview's).
+    let green = h.frame_rgba().0.chunks_exact(4).filter(|p| is_curve(p)).count();
+    assert!(green > 300, "the preview shows the curve: {green} green pixels");
+    // The cursor is in the first function's field: type, then OK.
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::expr_id(0)));
+    h.type_text("x - 1");
+    assert_eq!(h.app.plot_edit.as_ref().unwrap().plot.fns[0].expr, "2x - 1");
+    h.frame();
+    let ok = h.find("OK").expect("the OK button");
+    h.click(ok.center());
+    assert!(h.app.plot_edit.is_none(), "OK closes the dialog");
+    let p = &stored_plots(&root, &nb, &sheet)[0];
+    assert_eq!(p.fns, vec![n0te_core::plot::PlotFn { expr: "2x - 1".into(), color: CURVE }]);
+    assert_eq!((p.x, p.y, p.w, p.h), (100.0, 200.0, 240.0, 160.0), "the box stays");
+    assert_eq!(open(&h).pages.plots_of(&sheet)[0].fns[0].expr, "2x - 1", "the page shows the new curve");
+}
+
+#[test]
+fn a_function_with_a_mistake_says_why_and_ok_refuses_until_it_is_fixed() {
+    use n0te_desktop::plots::Msg;
+    let (mut h, root, nb, sheet) = plot_page("plotbad", n0te_core::notebook::Background::Blank, true);
+    let before = stored_plots(&root, &nb, &sheet)[0].clone();
+    h.message(Message::EditPlot(sheet.clone(), before.id.clone()));
+    h.message(Message::Plot(Msg::Expr(0, "2x +".into())));
+    let why = n0te_core::plot::check("2x +").unwrap_err();
+    assert!(h.find(why.as_str()).is_some(), "the mistake shows under the field: {why}");
+    let ok = h.find("OK").unwrap();
+    h.click(ok.center());
+    h.message(Message::Plot(Msg::Submit));
+    assert!(h.app.plot_edit.is_some(), "OK and Enter don't close it");
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], before, "nothing stored");
+    // A range that isn't one: the same.
+    h.message(Message::Plot(Msg::Expr(0, "2x + 1".into())));
+    h.message(Message::Plot(Msg::Range(1, "-7".into())));
+    assert!(h.find("x bis muss größer sein als x von").is_some());
+    h.message(Message::Plot(Msg::Ok));
+    assert!(h.app.plot_edit.is_some());
+    // Fixed (German comma): stored in one go.
+    h.message(Message::Plot(Msg::Range(1, "7,5".into())));
+    h.message(Message::Plot(Msg::Grid(true)));
+    h.message(Message::Plot(Msg::Ok));
+    assert!(h.app.plot_edit.is_none());
+    let p = stored_plots(&root, &nb, &sheet)[0].clone();
+    assert_eq!((p.fns[0].expr.as_str(), p.x_max, p.grid), ("2x + 1", 7.5, true));
+    // Esc (also from the field) cancels; Löschen removes it.
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
+    h.message(Message::Plot(Msg::Expr(0, "x^3".into())));
+    h.press(iced::keyboard::key::Named::Escape);
+    assert!(h.app.plot_edit.is_none(), "Esc closed it");
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p, "unchanged");
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
+    h.message(Message::Plot(Msg::Delete));
+    assert!(h.app.plot_edit.is_none() && stored_plots(&root, &nb, &sheet).is_empty());
+}
+
+#[test]
+fn inserting_from_the_palette_puts_a_plot_on_the_squares() {
+    let (mut h, root, nb, sheet) = plot_page("plotinsert", n0te_core::notebook::Background::Grid, false);
+    h.message(Message::OpenPalette);
+    h.type_text("koordinaten");
+    h.message(Message::PaletteRun(None));
+    let plots = stored_plots(&root, &nb, &sheet);
+    assert_eq!(plots.len(), 1, "stored at once");
+    let p = &plots[0];
+    assert_eq!((p.w, p.h), (12.0 * 17.0, 8.0 * 17.0), "12 × 8 squares");
+    assert_eq!((p.x % 17.0, p.y % 17.0), (0.0, 0.0), "on the squares: {p:?}");
+    assert!(p.x >= 0.0 && p.y >= 0.0 && p.x + p.w <= 595.0 && p.y + p.h <= 842.0);
+    assert_eq!((p.x_min, p.x_max, p.y_min, p.y_max), (-6.0, 6.0, -4.0, 4.0), "a square is the unit");
+    assert_eq!((p.color, p.width), (0xFF20_2428, 1.2));
+    // In the middle of the view, as far as the page goes (the view shows more than the page).
+    let (c, page) = (open(&h).camera, open(&h).pages.pages[0].rect());
+    let mid = (c.x + c.viewport.width / c.zoom / 2.0 - page.x0, c.y + c.viewport.height / c.zoom / 2.0 - page.y0);
+    let want = ((mid.0 - p.w / 2.0).clamp(0.0, 595.0 - p.w), (mid.1 - p.h / 2.0).clamp(0.0, 842.0 - p.h));
+    assert!((p.x - want.0).abs() <= 17.0 && (p.y - want.1).abs() <= 17.0, "{p:?} around {mid:?}");
+    // Its dialog is open with the first function to type; Enter stores it.
+    let e = h.app.plot_edit.as_ref().expect("the dialog opened");
+    assert_eq!((e.plot.fns.len(), e.plot.fns[0].expr.as_str()), (1, ""));
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::expr_id(0)));
+    h.type_text("sin x");
+    h.press(iced::keyboard::key::Named::Enter);
+    assert!(h.app.plot_edit.is_none());
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0].fns, vec![n0te_core::plot::PlotFn { expr: "sin x".into(), color: n0te_desktop::plots::INKS[1] }]);
+}
+
+#[test]
+fn the_pdf_export_has_the_plot_as_ink() {
+    let (mut h, root, _nb, _sheet) = plot_page("plotpdf", n0te_core::notebook::Background::Blank, true);
+    let pdf = h.app.pdf.clone().expect("pdfium (third_party/pdfium) for the PDF tests");
+    h.app.export_dir = root.join("out");
+    h.message(Message::Export(n0te_desktop::app::ExportWhat::Current));
+    let bytes = std::fs::read(h.app.last_export.clone().expect("exported")).unwrap();
+    // The page rendered 1 px per point: the curve along y 240, from x 100 to 340.
+    let page = pdf.worker.call(10, move |docs| docs.engine().open(bytes).and_then(|d| d.render_page(0, 595))).unwrap().unwrap();
+    let px = |x: u32, y: u32| {
+        let i = ((y * page.width + x) * 4) as usize;
+        &page.data[i..i + 4]
+    };
+    let band = (120..320).flat_map(|x| (236..245).map(move |y| (x, y))).filter(|&(x, y)| is_curve(px(x, y))).count();
+    assert!(band > 400, "the curve is in the PDF: {band} green pixels");
+    assert!(!is_curve(px(200, 300)) && !is_curve(px(450, 240)));
+}

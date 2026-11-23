@@ -181,7 +181,10 @@ impl Pdf {
             selected,
             |sheet| {
                 let s = lib.load_sheet(&id, sheet)?;
-                Ok((s.strokes(), s.text_boxes_with_body(specs.get(sheet).map(|s| s.width).unwrap_or(595.0)), s.images()))
+                // Coordinate systems go in as ink under the handwriting (the same look as on screen).
+                let mut ink = s.plot_strokes();
+                ink.extend(s.strokes());
+                Ok((ink, s.text_boxes_with_body(specs.get(sheet).map(|s| s.width).unwrap_or(595.0)), s.images()))
             },
             |blob| lib.blob(blob).ok(),
         )

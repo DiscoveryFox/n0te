@@ -404,9 +404,17 @@ pub fn card(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// The primary action (the accent).
+/// The primary action (the accent); faded while it can't be pressed.
 pub fn accent_button(_: &Theme, status: button::Status) -> button::Style {
     let hovered = is_hover(status);
+    if status == button::Status::Disabled {
+        return button::Style {
+            background: Some(Background::Color(alpha(p().accent, 0.35))),
+            text_color: alpha(Color::WHITE, 0.6),
+            border: border(Color::TRANSPARENT, 1.0, s().button),
+            ..Default::default()
+        };
+    }
     button::Style {
         background: Some(Background::Color(if hovered { alpha(p().accent, 0.85) } else { p().accent })),
         text_color: Color::WHITE,

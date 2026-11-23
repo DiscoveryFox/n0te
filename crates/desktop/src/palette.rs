@@ -17,6 +17,8 @@ pub enum Command {
     NewTextPage,
     Notes,
     NewTextBox,
+    /// A coordinate system on the page in view (its dialog opens).
+    InsertPlot,
     InsertPdf,
     Export,
     SendToTablet,
@@ -65,6 +67,7 @@ pub fn items(app: &App) -> Vec<Item> {
             v.push(item("Neue Textseite", "Strg N · nach der aktuellen Seite", Command::NewTextPage));
             v.push(item("Notizen neben der Seite", "Strg M", Command::Notes));
             v.push(item("Textfeld", "Strg T · oder Doppelklick auf die Seite", Command::NewTextBox));
+            v.push(item("Koordinatensystem einfügen", "Funktionsgraphen · mitten auf die Seite", Command::InsertPlot));
             v.push(item("PDF einfügen", "Strg O · nach der aktuellen Seite", Command::InsertPdf));
             v.push(item("Seite drehen", "Strg R · hoch ↔ quer", Command::RotatePage));
             v.push(item("Papier und Format der Seite", "A4, A5, eigene Größe · oder oben auf die Seitenzahl", Command::PageSetup));

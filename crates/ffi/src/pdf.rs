@@ -223,12 +223,18 @@ impl NotebookHandle {
     /// included), else stored.
     #[allow(clippy::type_complexity)]
     fn content_for_export(&self, nb_id: &str, sheet_id: &str, width: f32) -> n0te_pdf::Result<(Vec<n0te_core::sheet::Stroke>, Vec<n0te_core::sheet::TextBox>, Vec<n0te_core::sheet::ImageObj>)> {
+        // Plots go in as ink under the handwriting (the same look as on screen).
+        let ink = |s: &n0te_core::sheet::Sheet| {
+            let mut v = s.plot_strokes();
+            v.extend(s.strokes());
+            v
+        };
         if let Some(open) = self.open_sheet_handle(sheet_id) {
             let s = lock(&open.sheet);
-            return Ok((s.strokes(), s.text_boxes_with_body(width), s.images()));
+            return Ok((ink(&s), s.text_boxes_with_body(width), s.images()));
         }
         let s = self.lib.inner.load_sheet(nb_id, sheet_id)?;
-        Ok((s.strokes(), s.text_boxes_with_body(width), s.images()))
+        Ok((ink(&s), s.text_boxes_with_body(width), s.images()))
     }
 
     fn export_bytes(&self, pdf: &PdfService, sheet_ids: Option<Vec<String>>) -> R<(Vec<u8>, u32)> {

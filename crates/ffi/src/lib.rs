@@ -152,6 +152,107 @@ pub struct FfiImage {
     pub y: f32,
     pub w: f32,
     pub h: f32,
+    /// A coordinate system instead of a picture (blob empty): selected, moved and resized
+    /// like an image, drawn from [`plot_strokes`].
+    #[uniffi(default)]
+    pub plot: Option<FfiPlot>,
+}
+
+/// One function of a plot: what was typed and its ink (0xAARRGGBB).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiPlotFn {
+    pub expr: String,
+    pub color: u32,
+}
+
+/// A coordinate system on a page (see the core's `Plot`): box in page points, ranges, look,
+/// functions.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiPlot {
+    pub id: String,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub x_min: f64,
+    pub x_max: f64,
+    pub y_min: f64,
+    pub y_max: f64,
+    pub grid: bool,
+    pub clean: bool,
+    pub color: u32,
+    pub width: f32,
+    pub fns: Vec<FfiPlotFn>,
+}
+
+impl From<n0te_core::plot::Plot> for FfiPlot {
+    fn from(p: n0te_core::plot::Plot) -> Self {
+        FfiPlot {
+            id: p.id,
+            x: p.x,
+            y: p.y,
+            w: p.w,
+            h: p.h,
+            x_min: p.x_min,
+            x_max: p.x_max,
+            y_min: p.y_min,
+            y_max: p.y_max,
+            grid: p.grid,
+            clean: p.clean,
+            color: p.color,
+            width: p.width,
+            fns: p.fns.into_iter().map(|f| FfiPlotFn { expr: f.expr, color: f.color }).collect(),
+        }
+    }
+}
+
+impl From<FfiPlot> for n0te_core::plot::Plot {
+    fn from(p: FfiPlot) -> Self {
+        n0te_core::plot::Plot {
+            id: p.id,
+            x: p.x,
+            y: p.y,
+            w: p.w,
+            h: p.h,
+            x_min: p.x_min,
+            x_max: p.x_max,
+            y_min: p.y_min,
+            y_max: p.y_max,
+            grid: p.grid,
+            clean: p.clean,
+            color: p.color,
+            width: p.width,
+            fns: p.fns.into_iter().map(|f| n0te_core::plot::PlotFn { expr: f.expr, color: f.color }).collect(),
+        }
+    }
+}
+
+/// A plot as ink (page points): grid, axes, numbers, curves, ready to draw like strokes.
+#[uniffi::export]
+pub fn plot_strokes(plot: FfiPlot) -> Vec<FfiStroke> {
+    n0te_core::plot::render(&plot.into())
+        .into_iter()
+        .map(|(brush, points)| to_ffi(n0te_core::sheet::Stroke { id: String::new(), bounds: n0te_core::sheet::bounds_of(&points, brush.width), brush, points }))
+        .collect()
+}
+
+/// What is wrong with a typed function (German), or None when it can be drawn.
+#[uniffi::export]
+pub fn plot_check(expr: String) -> Option<String> {
+    n0te_core::plot::check(&expr).err()
+}
+
+/// A y range that shows the plot's functions over its x range: [min, max], or empty.
+#[uniffi::export]
+pub fn plot_fit_y(plot: FfiPlot) -> Vec<f64> {
+    n0te_core::plot::Plot::from(plot).fit_y().map(|(a, b)| vec![a, b]).unwrap_or_default()
+}
+
+/// The y range for the same units as across: [min, max].
+#[uniffi::export]
+pub fn plot_equal_units(plot: FfiPlot) -> Vec<f64> {
+    let (a, b) = n0te_core::plot::Plot::from(plot).equal_units();
+    vec![a, b]
 }
 
 /// A stroke's brush and samples (packed LE f32 x, y, pressure, t_ms), for copy/paste.

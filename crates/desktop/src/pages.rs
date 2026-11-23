@@ -6,8 +6,10 @@
 //! Drawing: each page's paper and pattern go into one `canvas::Cache` at a power-of-two level
 //! of detail; its strokes become one triangle mesh in page units (`ink::outline_mesh`, no
 //! tessellation) drawn under a GPU transformation, so neither panning nor zooming rebuilds
-//! anything. A sheet's strokes are read from disk the first time it becomes visible; caches
-//! of pages not drawn for a while are dropped (LRU).
+//! anything. Coordinate systems are ink too (their look from the core, [`crate::plots`]): one
+//! more mesh per page under the strokes, rebuilt only when a plot changes. A sheet's strokes
+//! are read from disk the first time it becomes visible; caches of pages not drawn for a while
+//! are dropped (LRU).
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -29,6 +31,7 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Theme, Transfo
 use n0te_core::ink::{self, KIND_PENCIL, Rect};
 use n0te_core::layout::{self as nl, Header, Placed};
 use n0te_core::notebook::{Background, SheetSpec};
+use n0te_core::plot::Plot;
 use n0te_core::sheet::{Stroke, TextBox};
 
 use crate::pdf::{self, Pdf};
@@ -50,6 +53,8 @@ pub struct SheetContent {
     pub body: String,
     /// Images with their file (a blob path; drawn once the file is there).
     pub images: Vec<(n0te_core::sheet::ImageObj, std::path::PathBuf)>,
+    /// Coordinate systems (drawn as ink under the strokes).
+    pub plots: Vec<Plot>,
 }
 
 /// Reads a sheet's content (from the library).
@@ -67,6 +72,9 @@ pub struct Page {
     lod: Cell<f32>,
     /// (sample step, mesh): zoomed-out views use a decimated mesh.
     ink: RefCell<Option<(usize, mesh::Cache)>>,
+    /// The plots the mesh shows, and the mesh: kept while the sheet's plots stay the same (a
+    /// reload for a new stroke doesn't rebuild it).
+    plots: RefCell<Option<(Vec<Plot>, Option<mesh::Cache>)>>,
     last_frame: Cell<u64>,
 }
 
@@ -78,6 +86,7 @@ impl Page {
             cache: RefCell::new(canvas::Cache::new()),
             lod: Cell::new(0.0),
             ink: RefCell::new(None),
+            plots: RefCell::new(None),
             last_frame: Cell::new(0),
         }
     }
@@ -97,6 +106,7 @@ impl Page {
     fn evict(&self) {
         *self.cache.borrow_mut() = canvas::Cache::new();
         *self.ink.borrow_mut() = None;
+        *self.plots.borrow_mut() = None;
         self.lod.set(0.0);
     }
 
@@ -140,6 +150,27 @@ impl Page {
         let cache = mesh::Cache::new(Arc::from(meshes));
         *self.ink.borrow_mut() = Some((step, cache.clone()));
         cache
+    }
+
+    /// The page's coordinate systems as one mesh in page units (None: it has none), built when
+    /// they change.
+    fn plot_mesh(&self, load: &Loader) -> Option<mesh::Cache> {
+        let content = self.content(load);
+        if let Some((plots, cache)) = self.plots.borrow().as_ref()
+            && *plots == content.plots
+        {
+            return cache.clone();
+        }
+        let (w, h) = self.size();
+        let cache = crate::plots::meshes(&content.plots, Rectangle::new(Point::ORIGIN, Size::new(w, h))).map(|m| mesh::Cache::new(Arc::from(m)));
+        *self.plots.borrow_mut() = Some((content.plots.clone(), cache.clone()));
+        cache
+    }
+
+    /// The topmost plot at a sheet point (a few points around its box count).
+    fn plot_at(&self, load: &Loader, x: f32, y: f32) -> Option<String> {
+        let m = 4.0;
+        self.content(load).plots.iter().rev().find(|p| x >= p.x - m && x <= p.x + p.w + m && y >= p.y - m && y <= p.y + p.h + m).map(|p| p.id.clone())
     }
 }
 
@@ -276,6 +307,11 @@ fn thin<'a>(points: &'a [ink::InkPoint], step: usize, buf: &'a mut Vec<ink::InkP
 /// All strokes of a page as solid meshes (page units, colour per vertex). Pencils are three
 /// translucent bands like on the tablet (without the grain).
 pub fn ink_meshes(strokes: &[Stroke], step: usize, clip: Rectangle) -> Vec<Mesh> {
+    ink_meshes_of(strokes.iter().map(|s| (s.points.as_slice(), &s.brush)), step, clip)
+}
+
+/// Like [`ink_meshes`], for any ink: (points, brush) per stroke.
+pub fn ink_meshes_of<'a>(strokes: impl IntoIterator<Item = (&'a [ink::InkPoint], &'a ink::Brush)>, step: usize, clip: Rectangle) -> Vec<Mesh> {
     let (mut xy, mut indices) = (Vec::new(), Vec::new());
     let mut vertices: Vec<SolidVertex2D> = Vec::new();
     let mut buf = Vec::new();
@@ -285,16 +321,16 @@ pub fn ink_meshes(strokes: &[Stroke], step: usize, clip: Rectangle) -> Vec<Mesh>
         let packed = color::pack(color);
         vertices.extend(xy[start..].chunks_exact(2).map(|v| SolidVertex2D { position: [v[0], v[1]], color: packed }));
     };
-    for s in strokes {
-        let points = thin(&s.points, step, &mut buf).to_vec();
-        let base = argb(s.brush.color);
-        if s.brush.kind == KIND_PENCIL {
-            push(&points, &s.brush, Color { a: base.a * PENCIL_ALPHA[0], ..base }, &mut xy, &mut indices, &mut vertices);
-            for (i, b) in ink::pencil_layer_brushes(&s.brush).iter().enumerate() {
+    for (points, brush) in strokes {
+        let points = thin(points, step, &mut buf).to_vec();
+        let base = argb(brush.color);
+        if brush.kind == KIND_PENCIL {
+            push(&points, brush, Color { a: base.a * PENCIL_ALPHA[0], ..base }, &mut xy, &mut indices, &mut vertices);
+            for (i, b) in ink::pencil_layer_brushes(brush).iter().enumerate() {
                 push(&points, b, Color { a: base.a * PENCIL_ALPHA[i + 1], ..base }, &mut xy, &mut indices, &mut vertices);
             }
         } else {
-            push(&points, &s.brush, base, &mut xy, &mut indices, &mut vertices);
+            push(&points, brush, base, &mut xy, &mut indices, &mut vertices);
         }
     }
     if vertices.is_empty() {
@@ -532,6 +568,18 @@ impl Pages {
         self.pages.iter().map(|p| &p.placed).find(|p| p.rect.contains(x, y))
     }
 
+    /// The coordinate system under a page point: (sheet id, plot id).
+    pub fn plot_at(&self, x: f32, y: f32) -> Option<(String, String)> {
+        let page = self.pages.iter().find(|p| p.rect().contains(x, y))?;
+        let r = page.rect();
+        page.plot_at(&self.load, x - r.x0, y - r.y0).map(|id| (page.placed.sheet_id.clone(), id))
+    }
+
+    /// A sheet's coordinate systems as drawn (read from the library if not shown yet).
+    pub fn plots_of(&self, sheet_id: &str) -> Vec<Plot> {
+        self.pages.iter().find(|p| p.placed.sheet_id == sheet_id).map(|p| p.content(&self.load).plots.clone()).unwrap_or_default()
+    }
+
     /// Draws a PDF page's background: the thumbnail, sharp tiles of the visible part on top.
     /// Space inserted into the page splits it ([`pdf_parts`]): each stretch of the PDF (at its own
     /// size, never stretched) is drawn moved down to its place, in a layer of its own clipped to
@@ -733,16 +781,23 @@ pub struct PageView<'a, Message> {
     on_camera: Box<dyn Fn(Camera) -> Message + 'a>,
     on_fold: Box<dyn Fn(String) -> Message + 'a>,
     on_double: Option<Box<dyn Fn(String, f32, f32) -> Message + 'a>>,
+    on_plot: Option<Box<dyn Fn(String, String) -> Message + 'a>>,
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None }
 }
 
 impl<'a, Message> PageView<'a, Message> {
     /// A double click on a page: (sheet id, x, y in the sheet's points) — a new text box there.
     pub fn on_double_click(mut self, f: impl Fn(String, f32, f32) -> Message + 'a) -> Self {
         self.on_double = Some(Box::new(f));
+        self
+    }
+
+    /// A click on a coordinate system: (sheet id, plot id) — its editor opens.
+    pub fn on_plot_click(mut self, f: impl Fn(String, String) -> Message + 'a) -> Self {
+        self.on_plot = Some(Box::new(f));
         self
     }
 }
@@ -842,14 +897,20 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 }
                 None => None,
             },
-            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left | mouse::Button::Middle)) => {
+            Event::Mouse(mouse::Event::ButtonReleased(button @ (mouse::Button::Left | mouse::Button::Middle))) => {
                 if let Some((start, _, false)) = state.drag.take() {
                     let at = cam.to_page(bounds, start);
                     let double = state.last_click.is_some_and(|(t, p)| t.elapsed().as_millis() < 400 && p.distance(at) * cam.zoom < 8.0);
                     state.last_click = if double { None } else { Some((std::time::Instant::now(), at)) };
+                    let plot = if *button == mouse::Button::Left && self.on_plot.is_some() { self.pages.plot_at(at.x, at.y) } else { None };
                     if let Some(h) = self.pages.header_at(at) {
                         // A click on a group title folds/unfolds the group.
                         fold = Some(h.node.clone());
+                    } else if let (Some(f), Some((sheet, id))) = (&self.on_plot, plot) {
+                        // A click on a coordinate system edits it (a second one makes no text box).
+                        state.last_click = None;
+                        shell.publish(f(sheet, id));
+                        shell.capture_event();
                     } else if double
                         && let (Some(f), Some(p)) = (&self.on_double, self.pages.sheet_at(at.x, at.y))
                         && !p.is_board()
@@ -881,6 +942,13 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         match (state.drag, cursor.position_over(bounds)) {
             (Some((_, _, true)), _) => mouse::Interaction::Grabbing,
             (_, Some(p)) if self.pages.header_at(self.camera.to_page(bounds, p)).is_some() => mouse::Interaction::Pointer,
+            (_, Some(p)) if self.on_plot.is_some() && {
+                let at = self.camera.to_page(bounds, p);
+                self.pages.plot_at(at.x, at.y).is_some()
+            } =>
+            {
+                mouse::Interaction::Pointer
+            }
             (_, Some(_)) => mouse::Interaction::Grab,
             _ => mouse::Interaction::default(),
         }
@@ -963,6 +1031,16 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             }
         });
         renderer.with_layer(bounds, |r| {
+            // Coordinate systems: ink under everything written (over the paper, PDF and images:
+            // in the layer before, images go over meshes).
+            for page in &visible {
+                let Some(plots) = page.plot_mesh(&pages.load) else { continue };
+                let rect = page.rect();
+                let at = cam.to_screen(bounds, rect.x0, rect.y0);
+                r.with_translation(Vector::new(at.x, at.y), |r| {
+                    r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(plots));
+                });
+            }
             for l in pages.live.borrow().values() {
                 let Some(page) = visible.iter().find(|p| p.placed.sheet_id == l.sheet_id) else { continue };
                 let rect = page.rect();

@@ -10,6 +10,7 @@ use loro::{Container, ExportMode, LoroDoc, LoroMap, LoroText, LoroValue, UndoMan
 use crate::error::{Error, Result};
 use crate::ids;
 use crate::ink::{self, Brush, InkPoint, Rect};
+use crate::plot::{Plot, PlotFn};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -299,6 +300,73 @@ impl Sheet {
         }
     }
 
+    /// An image's or a plot's map: the objects that are a box on the page.
+    fn boxed_map(&self, id: &str) -> Option<LoroMap> {
+        match self.objects.get(id) {
+            Some(ValueOrContainer::Container(Container::Map(m))) if matches!(map_str(&m, "kind").as_deref(), Some("image") | Some("plot")) => Some(m),
+            _ => None,
+        }
+    }
+
+    fn plot_map(&self, id: &str) -> Option<LoroMap> {
+        match self.objects.get(id) {
+            Some(ValueOrContainer::Container(Container::Map(m))) if map_str(&m, "kind").as_deref() == Some("plot") => Some(m),
+            _ => None,
+        }
+    }
+
+    // --- plots ------------------------------------------------------------------------------
+
+    /// Puts a coordinate system on the page (its `id` is ignored); returns its id. Apps that
+    /// predate plots skip it.
+    pub fn add_plot(&self, p: &Plot) -> Result<String> {
+        if !p.is_valid() {
+            return Err(Error::Invalid("plot: empty box or range".into()));
+        }
+        let id = ids::new_id(self.doc.peer_id());
+        let m = self.objects.insert_container(&id, LoroMap::new())?;
+        m.insert("kind", "plot")?;
+        let z = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as f64).unwrap_or(0.0);
+        m.insert("z", z)?;
+        write_plot(&m, p)?;
+        self.doc.commit();
+        Ok(id)
+    }
+
+    /// Changes a plot (its box, ranges, functions …) in one step.
+    pub fn set_plot(&self, p: &Plot) -> Result<()> {
+        if !p.is_valid() {
+            return Err(Error::Invalid("plot: empty box or range".into()));
+        }
+        let Some(m) = self.plot_map(&p.id) else { return Err(Error::NotFound(format!("plot {}", p.id))) };
+        write_plot(&m, p)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// The page's plots, bottom to top.
+    pub fn plots(&self) -> Vec<Plot> {
+        let mut out: Vec<(f64, Plot)> = Vec::new();
+        self.objects.for_each(|k, v| {
+            if let ValueOrContainer::Container(Container::Map(m)) = v
+                && map_str(&m, "kind").as_deref() == Some("plot")
+            {
+                out.push((map_f64(&m, "z").unwrap_or(0.0), read_plot(k, &m)));
+            }
+        });
+        out.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+        out.into_iter().map(|(_, p)| p).collect()
+    }
+
+    /// The plots drawn as ink (for the PDF export: the same look as on screen).
+    pub fn plot_strokes(&self) -> Vec<Stroke> {
+        self.plots()
+            .iter()
+            .flat_map(|p| crate::plot::render(p))
+            .map(|(brush, points)| Stroke { id: String::new(), bounds: bounds_of(&points, brush.width), brush, points })
+            .collect()
+    }
+
     fn text_map(&self, id: &str) -> Option<LoroMap> {
         match self.objects.get(id) {
             Some(ValueOrContainer::Container(Container::Map(m))) if map_str(&m, "kind").as_deref() == Some("text") => Some(m),
@@ -400,8 +468,8 @@ impl Sheet {
             return Err(Error::Invalid("scale must be positive".into()));
         }
         for id in ids {
-            if let Some(m) = self.image_map(id) {
-                // Images move and scale with the selection.
+            if let Some(m) = self.boxed_map(id) {
+                // Images and plots move and scale with the selection.
                 let f = |key: &str| map_f64(&m, key).unwrap_or(0.0) as f32;
                 m.insert("x", (ox + (f("x") - ox) * scale + dx) as f64)?;
                 m.insert("y", (oy + (f("y") - oy) * scale + dy) as f64)?;
@@ -430,7 +498,7 @@ impl Sheet {
             return Err(Error::Invalid("bad stretch".into()));
         }
         for id in ids {
-            if let Some(m) = self.image_map(id) {
+            if let Some(m) = self.boxed_map(id) {
                 let f = |key: &str| map_f64(&m, key).unwrap_or(0.0) as f32;
                 let (x0, x1) = (ax + (f("x") - ax) * kx, ax + (f("x") + f("w") - ax) * kx);
                 let (y0, y1) = (ay + (f("y") - ay) * ky, ay + (f("y") + f("h") - ay) * ky);
@@ -526,6 +594,9 @@ impl Sheet {
         for i in self.images() {
             take(i.y, i.y + i.h);
         }
+        for p in self.plots() {
+            take(p.y, p.y + p.h);
+        }
         for t in self.text_boxes() {
             take(t.y, t.y + text_box_height(&t));
         }
@@ -563,6 +634,14 @@ impl Sheet {
                 && let Some(m) = self.image_map(&i.id)
             {
                 m.insert("y", (i.y + dy) as f64)?;
+                n += 1;
+            }
+        }
+        for p in self.plots() {
+            if p.y + p.h / 2.0 >= y
+                && let Some(m) = self.plot_map(&p.id)
+            {
+                m.insert("y", (p.y + dy) as f64)?;
                 n += 1;
             }
         }
@@ -772,7 +851,8 @@ impl Sheet {
                 o.strokes += 1;
             }
         });
-        o.images = self.images().iter().filter(|i| out_of(i.x, i.y, i.x + i.w, i.y + i.h)).count();
+        o.images = self.images().iter().filter(|i| out_of(i.x, i.y, i.x + i.w, i.y + i.h)).count()
+            + self.plots().iter().filter(|p| out_of(p.x, p.y, p.x + p.w, p.y + p.h)).count();
         o.texts = self
             .text_boxes()
             .iter()
@@ -808,6 +888,57 @@ fn map_str(m: &LoroMap, key: &str) -> Option<String> {
     match m.get(key) {
         Some(ValueOrContainer::Value(LoroValue::String(s))) => Some(s.to_string()),
         _ => None,
+    }
+}
+
+fn map_bool(m: &LoroMap, key: &str) -> Option<bool> {
+    match m.get(key) {
+        Some(ValueOrContainer::Value(LoroValue::Bool(b))) => Some(b),
+        _ => None,
+    }
+}
+
+/// A plot's fields into its map. Functions are one string ("expr␟color␞…"): a plot's
+/// functions are edited together, in its dialog.
+fn write_plot(m: &LoroMap, p: &Plot) -> Result<()> {
+    for (k, v) in [("x", p.x as f64), ("y", p.y as f64), ("w", p.w as f64), ("h", p.h as f64), ("x0", p.x_min), ("x1", p.x_max), ("y0", p.y_min), ("y1", p.y_max), ("color", p.color as f64), ("width", p.width as f64)] {
+        m.insert(k, v)?;
+    }
+    m.insert("grid", p.grid)?;
+    m.insert("clean", p.clean)?;
+    let fns: Vec<String> = p.fns.iter().map(|f| format!("{}{SEP_FIELD}{:08x}", f.expr.replace([SEP_FIELD, SEP_ITEM], " "), f.color)).collect();
+    m.insert("fns", fns.join(&SEP_ITEM.to_string()))?;
+    Ok(())
+}
+
+fn read_plot(id: &str, m: &LoroMap) -> Plot {
+    let f = |k: &str, d: f64| map_f64(m, k).unwrap_or(d);
+    let fns = map_str(m, "fns")
+        .unwrap_or_default()
+        .split(SEP_ITEM)
+        .filter(|s| !s.is_empty())
+        .map(|item| {
+            let mut parts = item.split(SEP_FIELD);
+            let expr = parts.next().unwrap_or("").to_string();
+            let color = parts.next().and_then(|c| u32::from_str_radix(c, 16).ok()).unwrap_or(0xFF20_2428);
+            PlotFn { expr, color }
+        })
+        .collect();
+    Plot {
+        id: id.to_string(),
+        x: f("x", 0.0) as f32,
+        y: f("y", 0.0) as f32,
+        w: f("w", 1.0) as f32,
+        h: f("h", 1.0) as f32,
+        x_min: f("x0", -5.0),
+        x_max: f("x1", 5.0),
+        y_min: f("y0", -5.0),
+        y_max: f("y1", 5.0),
+        grid: map_bool(m, "grid").unwrap_or(false),
+        clean: map_bool(m, "clean").unwrap_or(false),
+        color: f("color", 0xFF20_2428u32 as f64) as u32,
+        width: f("width", 1.2) as f32,
+        fns,
     }
 }
 
@@ -1079,6 +1210,48 @@ mod tests {
         let hits = s.search("folge", 595.0);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert_eq!(hits[0].kind, crate::search::HitKind::Heading);
+    }
+
+    #[test]
+    fn plots_are_boxes_that_keep_their_settings() {
+        let s = Sheet::create(1).unwrap();
+        let mut p = Plot::centered(100.0, 200.0, 240.0, 160.0, 20.0, 0xFF22_2222, 1.2);
+        p.fns = vec![PlotFn { expr: "x^2 - 1".into(), color: 0xFFD0_2020 }, PlotFn { expr: "sin x".into(), color: 0xFF20_20D0 }];
+        p.grid = true;
+        let id = s.add_plot(&p).unwrap();
+        let got = s.plots();
+        assert_eq!(got.len(), 1);
+        let mut want = p.clone();
+        want.id = id.clone();
+        assert_eq!(got[0], want);
+        // Not an image (nothing to fetch for it), but a box like one: moved, stretched, shifted.
+        assert!(s.images().is_empty());
+        s.transform(&[id.clone()], 10.0, 0.0, 0.5, 100.0, 200.0).unwrap();
+        let q = &s.plots()[0];
+        assert_eq!((q.x, q.y, q.w, q.h), (110.0, 200.0, 120.0, 80.0));
+        s.stretch(&[id.clone()], 110.0, 200.0, 2.0, 1.0).unwrap();
+        assert_eq!(s.plots()[0].w, 240.0);
+        s.shift_below(150.0, 30.0).unwrap();
+        assert_eq!(s.plots()[0].y, 230.0);
+        // Edited in one step, undone in one.
+        let mut e = s.plots()[0].clone();
+        e.fns.truncate(1);
+        e.x_max = 10.0;
+        s.set_plot(&e).unwrap();
+        assert_eq!(s.plots()[0].fns.len(), 1);
+        s.undo().unwrap();
+        assert_eq!(s.plots()[0].fns.len(), 2);
+        assert_eq!(s.plots()[0].x_max, 6.0);
+        // Drawn as ink for the export; gone with remove; survives a reload.
+        assert!(s.plot_strokes().len() > 20);
+        let b = Sheet::load(2, &s.snapshot().unwrap()).unwrap();
+        assert_eq!(b.plots()[0].fns, s.plots()[0].fns);
+        s.remove(&[id]).unwrap();
+        assert!(s.plots().is_empty());
+        // An empty range is no plot.
+        let mut bad = p.clone();
+        bad.x_max = bad.x_min;
+        assert!(s.add_plot(&bad).is_err());
     }
 
     #[test]

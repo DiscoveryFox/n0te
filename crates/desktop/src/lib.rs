@@ -13,6 +13,7 @@ pub mod mdstyle;
 pub mod pages;
 pub mod palette;
 pub mod pdf;
+pub mod plots;
 pub mod search;
 pub mod settings;
 pub mod sidebar;

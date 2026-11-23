@@ -194,6 +194,11 @@ pub enum Message {
     Reveal(String, [f32; 4]),
     /// Headings read in the background: the notebook, each sheet's headings.
     Headings(String, Vec<(String, Vec<Heading>)>),
+    /// Coordinate systems: a click on one (sheet, plot) opens its dialog; a new one on the page
+    /// in view; the dialog's fields and buttons.
+    EditPlot(String, String),
+    InsertPlot,
+    Plot(crate::plots::Msg),
 }
 
 /// The text box being edited: its sheet stays open while typing.
@@ -361,6 +366,8 @@ pub struct App {
     /// Look for sheets whose headings weren't read yet (new pages).
     headings_check: bool,
     headings_reading: bool,
+    /// The "Koordinatensystem" dialog, open for one plot.
+    pub plot_edit: Option<crate::plots::Editor>,
 }
 
 /// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
@@ -468,6 +475,7 @@ impl App {
             headings_due: HashSet::new(),
             headings_check: false,
             headings_reading: false,
+            plot_edit: None,
         };
         app.refresh();
         app
@@ -553,6 +561,7 @@ impl App {
                         texts: s.text_boxes(),
                         body: s.page_text(),
                         images: s.images().into_iter().filter_map(|i| lib.blob_path(&i.blob).ok().map(|p| (i, p))).collect(),
+                        plots: s.plots(),
                     })
                     .unwrap_or_default()
             }),
@@ -566,6 +575,7 @@ impl App {
         if self.notebook_id().as_deref() != Some(id) {
             self.search.clear();
             self.headings.clear();
+            self.plot_edit = None;
         }
         self.search.stale = true;
         self.headings_all = true;
@@ -596,6 +606,7 @@ impl App {
             Message::Back => {
                 self.finish_text();
                 self.close_text_page();
+                self.plot_edit = None;
                 self.live_session = None;
                 self.share = None;
                 self.history = None;
@@ -1397,8 +1408,124 @@ impl App {
                     return self.open_notes(true);
                 }
             }
+            Message::EditPlot(sheet, id) => return self.edit_plot(&sheet, &id),
+            Message::InsertPlot => return self.insert_plot(),
+            Message::Plot(m) => {
+                use crate::plots::Reply;
+                let Some(e) = &mut self.plot_edit else { return Task::none() };
+                match e.update(m) {
+                    Reply::None => {}
+                    Reply::Focus(i) => return iced::widget::operation::focus(crate::plots::expr_id(i)),
+                    Reply::Cancel => self.plot_edit = None,
+                    Reply::Delete => {
+                        if let Some(e) = self.plot_edit.take()
+                            && self.edit_sheet(&e.sheet_id, |s| s.remove(std::slice::from_ref(&e.original.id)))
+                        {
+                            self.say("Koordinatensystem gelöscht");
+                        }
+                    }
+                    Reply::Apply(p) => {
+                        if let Some(e) = self.plot_edit.take()
+                            && p != e.original
+                        {
+                            let mut gone = false;
+                            self.edit_sheet(&e.sheet_id, |s| {
+                                gone = !s.plots().iter().any(|q| q.id == p.id);
+                                if gone {
+                                    return Err(n0te_core::Error::NotFound(p.id.clone()));
+                                }
+                                s.set_plot(&p)
+                            });
+                            if gone {
+                                self.say("Das Koordinatensystem wurde inzwischen auf einem anderen Gerät gelöscht");
+                            }
+                        }
+                    }
+                }
+            }
         }
         Task::none()
+    }
+
+    /// The paper a sheet shows under its ink (boards: dots; PDF pages: none of ours).
+    fn paper_of(&self, sheet_id: &str) -> (Background, f32) {
+        let Screen::Notebook(o) = &self.screen else { return (Background::Blank, 0.0) };
+        match o.pages.pages.iter().map(|p| &p.placed).find(|p| p.sheet_id == sheet_id) {
+            Some(p) if p.is_board() => (Background::Dots, p.spec.spacing),
+            Some(p) if p.spec.pdf.is_some() => (Background::Blank, 0.0),
+            Some(p) => (p.spec.background, p.spec.spacing),
+            None => (Background::Blank, 0.0),
+        }
+    }
+
+    /// Opens the dialog for a plot (as stored now).
+    fn edit_plot(&mut self, sheet_id: &str, plot_id: &str) -> Task<Message> {
+        if self.read_only() {
+            self.say("Nur lesen: Koordinatensysteme ändert, wer dich eingeladen hat");
+            return Task::none();
+        }
+        self.finish_text();
+        let Some(nb) = self.notebook_id() else { return Task::none() };
+        let Some(plot) = self.lib.load_sheet(&nb, sheet_id).ok().and_then(|s| s.plots().into_iter().find(|p| p.id == plot_id)) else { return Task::none() };
+        let paper = self.paper_of(sheet_id);
+        self.plot_edit = Some(crate::plots::Editor::new(sheet_id, plot, paper));
+        iced::widget::operation::focus(crate::plots::expr_id(0))
+    }
+
+    /// A new coordinate system in the middle of the view, on the page there (else the current
+    /// one), stored at once; its dialog opens with the first function to type.
+    fn insert_plot(&mut self) -> Task<Message> {
+        if self.read_only() {
+            self.say("Nur lesen: einfügen kann, wer dich eingeladen hat");
+            return Task::none();
+        }
+        self.finish_text();
+        let Screen::Notebook(o) = &self.screen else { return Task::none() };
+        let c = o.camera;
+        let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
+        let Some(page) = o.pages.sheet_at(cx, cy).or_else(|| o.pages.index_of_number(o.pages.current_number(&c)).map(|i| &o.pages.pages[i].placed)) else { return Task::none() };
+        if page.spec.background == Background::Text && !page.is_board() {
+            self.say("Auf einer Textseite geht das nicht: Koordinatensysteme gehören auf Papierseiten");
+            return Task::none();
+        }
+        let sheet_id = page.sheet_id.clone();
+        let (pw, ph) = (page.rect.width(), page.rect.height());
+        let (cx, cy) = (cx - page.rect.x0, cy - page.rect.y0);
+        let paper = self.paper_of(&sheet_id);
+        let mut plot = crate::plots::fresh(cx, cy, pw, ph, paper.0, paper.1);
+        let mut id = String::new();
+        if !self.edit_sheet(&sheet_id, |s| {
+            id = s.add_plot(&plot)?;
+            Ok(())
+        }) {
+            return Task::none();
+        }
+        plot.id = id;
+        self.plot_edit = Some(crate::plots::Editor::new(&sheet_id, plot, paper));
+        iced::widget::operation::focus(crate::plots::expr_id(0))
+    }
+
+    /// Changes a sheet of the open notebook and stores it (it syncs from there); false if it
+    /// didn't work (said in the status bar).
+    fn edit_sheet(&mut self, sheet_id: &str, f: impl FnOnce(&Sheet) -> n0te_core::Result<()>) -> bool {
+        if self.read_only() {
+            self.say("Nur lesen: ändern kann, wer dich eingeladen hat");
+            return false;
+        }
+        let Some(nb) = self.notebook_id() else { return false };
+        let sheet = match self.lib.load_sheet(&nb, sheet_id) {
+            Ok(s) => s,
+            Err(e) => {
+                self.say(format!("Seite nicht lesbar: {e}"));
+                return false;
+            }
+        };
+        if let Err(e) = f(&sheet) {
+            self.say(format!("Nicht geändert: {e}"));
+            return false;
+        }
+        self.store_sheet(sheet_id, &sheet);
+        true
     }
 
     /// What the last message left to do in the background: headings to read (one read at a
@@ -1822,6 +1949,7 @@ impl App {
             Command::Library => self.handle(Message::Back),
             Command::NewTextPage => self.handle(Message::NewTextPage),
             Command::Notes => self.handle(Message::ToggleNotes),
+            Command::InsertPlot => self.handle(Message::InsertPlot),
             Command::NewTextBox => {
                 let ev = keyboard::Event::KeyPressed {
                     key: Key::Character("t".into()),
@@ -2172,7 +2300,7 @@ impl App {
                 let p = Point::new(x - c.origin.x, y - c.origin.y);
                 // Only over the pages (not the sidebar, the bars or a panel).
                 let over = p.x >= 0.0 && p.y >= 0.0 && p.x <= c.viewport.width && p.y <= c.viewport.height;
-                let panel = self.page_panel || self.share.is_some() || self.history.is_some() || self.export.is_some() || self.show_settings;
+                let panel = self.page_panel || self.share.is_some() || self.history.is_some() || self.export.is_some() || self.show_settings || self.plot_edit.is_some();
                 self.pinch = (over && !panel).then_some((c.zoom, p));
                 Task::none()
             }
@@ -2459,6 +2587,13 @@ impl App {
                 _ => Task::none(),
             };
         }
+        // The plot dialog is open: Esc cancels, the rest waits until it's closed.
+        if self.plot_edit.is_some() {
+            return match key.as_ref() {
+                Key::Named(Named::Escape) => self.handle(Message::Plot(crate::plots::Msg::Cancel)),
+                _ => Task::none(),
+            };
+        }
         if self.show_help || self.show_settings {
             if let Key::Named(Named::Escape | Named::F1) = key.as_ref() {
                 self.show_help = false;
@@ -2569,6 +2704,9 @@ impl App {
             Some(self.settings_view())
         } else if let (Screen::Notebook(o), Some(picked)) = (&self.screen, &self.export) {
             Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera)))
+        } else if let (Screen::Notebook(_), Some(e)) = (&self.screen, &self.plot_edit) {
+            // Esc in a field cancels too (the field would only let go of the focus).
+            Some(Element::from(crate::widgets::on_escape(e.view(), crate::plots::Msg::Cancel)).map(Message::Plot))
         } else {
             None
         };
@@ -2796,6 +2934,7 @@ impl App {
             ("Strg + Mausrad, Strg + / −", "Zoomen, Strg 0: 100 %"),
             ("Strg R", "Seite drehen (hoch ↔ quer)"),
             ("Doppelklick · Strg T", "Textfeld"),
+            ("Klick auf ein Koordinatensystem", "Funktionen und Bereich ändern (Strg K: einfügen)"),
             ("Strg N", "Neue Textseite (Bibliothek: neues Notizbuch)"),
             ("Strg M", "Notizen neben der Seite"),
             ("Strg O", "PDF einfügen / importieren (oder Datei ins Fenster ziehen)"),
@@ -2941,7 +3080,7 @@ impl App {
 
     fn notebook_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
         let current = o.pages.current_number(&o.camera);
-        let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold).on_double_click(Message::NewText);
+        let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold).on_double_click(Message::NewText).on_plot_click(Message::EditPlot);
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
@@ -3023,6 +3162,8 @@ impl App {
                     .style(theme::tab(self.page_panel)),
                 Space::new().width(14),
                 button(theme::btn("+ Textseite")).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
+                Space::new().width(6),
+                button(theme::btn("+ Koordinatensystem")).padding(theme::pad()).on_press(Message::InsertPlot).style(theme::tab(false)),
                 Space::new().width(6),
                 button(theme::btn("Notizen")).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(self.text_page.as_ref().is_some_and(|t| t.docked))),
                 Space::new().width(6),

@@ -1,6 +1,7 @@
 //! Headless screenshots of the screens outside the editor in every design (never opens a
 //! window): library, settings, export, the page panel, a turned page, the outline with
-//! headings, search results and a found spot lighting up.
+//! headings, search results and a found spot lighting up, a page with coordinate systems and
+//! the dialog for one (on the GPU renderer if there is one: the software one draws no ink).
 //!
 //!   cargo run --profile fast -p n0te-desktop --example styles -- <out-dir> [theme ids…]
 
@@ -24,6 +25,7 @@ fn main() {
     let lib = Library::open(&root).unwrap();
     let id = demo::save_into(&lib);
     mark_up(&lib, &id);
+    let (plot_sheet, plot_id) = plot_page(&lib, &id);
     for (title, folder, cover) in [("Lineare Algebra", "WS26", "initial"), ("Analysis I", "WS26", "dots"), ("Physik Praktikum", "WS26", "blue"), ("Ideen", "", "stripes")] {
         let nb = lib.create_notebook(title).unwrap();
         nb.set_cover(cover).unwrap();
@@ -31,6 +33,7 @@ fn main() {
         lib.save_notebook(&nb).unwrap();
     }
     let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1440.0, 900.0), 1.0).expect("renderer");
+    let mut gpu = Harness::new(App::new(&root), "wgpu", Size::new(1440.0, 900.0), 1.0);
     for t in theme::PALETTES {
         if !wanted.is_empty() && !wanted.iter().any(|w| w == t.id) {
             continue;
@@ -77,8 +80,50 @@ fn main() {
         h.message(Message::SearchClear);
         h.events(&[]);
         h.screenshot(out.join(format!("{}-7-headings.png", t.id)));
+        // Coordinate systems on squared paper, then the dialog for one.
+        let g = match gpu.as_mut() {
+            Some(g) => g,
+            None => &mut h,
+        };
+        g.message(Message::SetTheme(t.id));
+        g.message(Message::Open(id.clone()));
+        g.events(&[]);
+        g.message(Message::Jump(plot_sheet.clone()));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8-plots.png", t.id)));
+        g.message(Message::EditPlot(plot_sheet.clone(), plot_id.clone()));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8b-plot-dialog.png", t.id)));
+        g.message(Message::Plot(n0te_desktop::plots::Msg::Expr(1, "2sin x +".into())));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8c-plot-mistake.png", t.id)));
+        g.message(Message::Plot(n0te_desktop::plots::Msg::Cancel));
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// A page of squared paper at the end with two coordinate systems: (sheet, the first plot).
+fn plot_page(lib: &Library, id: &str) -> (String, String) {
+    use n0te_core::notebook::{Background, SheetSpec};
+    use n0te_core::plot::PlotFn;
+    use n0te_desktop::plots::{self, INKS};
+    let nb = lib.load_notebook(id).unwrap();
+    let (_, end) = n0te_desktop::pdf::position_after(&nb, None);
+    let (node, sheet_id) = nb.add_sheet(None, end, &SheetSpec { spacing: 17.0, ..SheetSpec::a4(Background::Grid) }).unwrap();
+    nb.set_title_of(&node, "Funktionen").unwrap();
+    lib.save_notebook(&nb).unwrap();
+    let sheet = lib.load_sheet(id, &sheet_id).unwrap();
+    let mut p = plots::fresh(297.0, 250.0, 595.0, 842.0, Background::Grid, 17.0);
+    p.fns = vec![PlotFn { expr: "0,5x^2 - 2".into(), color: INKS[1] }, PlotFn { expr: "2sin x".into(), color: INKS[2] }];
+    let first = sheet.add_plot(&p).unwrap();
+    let mut q = plots::fresh(297.0, 560.0, 595.0, 842.0, Background::Blank, 0.0);
+    q.grid = false;
+    q.clean = true;
+    (q.y_min, q.y_max) = (-1.0, 7.0);
+    q.fns = vec![PlotFn { expr: "e^-x".into(), color: INKS[3] }, PlotFn { expr: "|x| - 1".into(), color: INKS[4] }];
+    sheet.add_plot(&q).unwrap();
+    lib.save_sheet(id, &sheet_id, &sheet).unwrap();
+    (sheet_id, first)
 }
 
 /// What the tablet adds that the demo lacks: headings and handwriting it read (on the demo's
