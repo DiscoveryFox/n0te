@@ -2,11 +2,12 @@
 //! core as ink ([`n0te_core::plot::render`]: axes, numbers, curves, points, drawn as if by hand)
 //! and is drawn like strokes, worked out once per plot value. A click on one opens the
 //! "Koordinatensystem" panel ([`Editor`]): the algebra view (one row per object as GeoGebra
-//! lists it; a click edits its definition, the dot shows or hides it, a slider drags), the
-//! input line with the tablet's commands, the properties of the selected object, the look of
-//! the system ("Grafik") and a live preview (a click selects an object, points and sliders
-//! drag). Drawing and tapping tools are the tablet's. The palette and the top bar insert a new,
-//! empty one ([`fresh`]).
+//! lists it, the value with how it came about under it; a click edits its definition, the dot
+//! shows or hides it, a slider drags), the input line with the tablet's commands (and the
+//! commands that fit what is being typed, as GeoGebra suggests them), the properties of the
+//! selected object, the look of the system ("Grafik") and a live preview (the selected object
+//! bolder; a click selects an object, points and sliders drag). Drawing and tapping tools are
+//! the tablet's. The palette and the top bar insert a new, empty one ([`fresh`]).
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -19,7 +20,8 @@ use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
 use iced::advanced::widget::{self, Widget, tree};
 use iced::advanced::{Clipboard, Shell, mouse};
-use iced::widget::{Row, Space, button, canvas, column, container, row, scrollable, slider, svg, text, text_input, toggler, tooltip};
+use iced::widget::{Column, Row, Space, button, canvas, column, container, row, scrollable, slider, svg, text, text_input, toggler, tooltip};
+use iced::keyboard::{self, key::Named};
 use iced::{Alignment, Border, Color, Element, Event, Length, Padding, Point, Rectangle, Size, Task, Theme, Vector};
 
 use n0te_core::ink::{Brush, InkPoint, Rect};
@@ -265,11 +267,15 @@ fn plain_number(o: &Obj) -> bool {
     }
 }
 
-/// Whether object `i` can be dragged in the preview: a slider, a free point, a point on an
-/// object (not when fixed).
-fn draggable(p: &Plot, i: usize) -> bool {
+/// Whether object `i` is one that drags: a slider, a free point, a point on an object.
+fn movable(p: &Plot, i: usize) -> bool {
     let o = &p.objs[i];
-    !o.style.fixed && (o.style.slider.is_some() || plot::free_point(&o.def) || plot::moved_on(&o.def, 0.0).is_some())
+    o.style.slider.is_some() || plot::free_point(&o.def) || plot::moved_on(&o.def, 0.0).is_some()
+}
+
+/// Whether object `i` can be dragged in the preview: [`movable`] and not fixed.
+fn draggable(p: &Plot, i: usize) -> bool {
+    !p.objs[i].style.fixed && movable(p, i)
 }
 
 /// "g", "g und S", "g, h und S".
@@ -297,7 +303,95 @@ pub const QUICK: [(&str, &str, &str); 10] = [
 ];
 
 /// What the help line says before a command button is pressed.
-pub const HELP: &str = "Zum Beispiel A = (1|2), f(x) = 0,5x^2 − 3, g: y = 2x + 1, Schneide(f, g) oder a = 2. Befehle auf Deutsch oder Englisch, mit ( ) oder [ ].";
+pub const HELP: &str = "Zum Beispiel f(x) = x^2 − 3, A = (1|2) oder a = 2. Befehle schlägt die Zeile beim Tippen vor.";
+
+/// The commands the input line suggests while one is typed, like GeoGebra's: the German name,
+/// the English one (the core takes both), example arguments, what it makes. The core's
+/// [`lang::COMMANDS`], written as GeoGebra writes them.
+pub const COMMANDS: [(&str, &str, &str, &str); 35] = [
+    ("Punkt", "Point", "f, 1", "ein Punkt auf f, zum Ziehen"),
+    ("Gerade", "Line", "A, B", "durch zwei Punkte"),
+    ("Strecke", "Segment", "A, B", "von A nach B"),
+    ("Strahl", "Ray", "A, B", "ab A durch B"),
+    ("Vektor", "Vector", "A, B", "von A nach B"),
+    ("Kreis", "Circle", "M, 3", "um M mit Radius 3"),
+    ("Vieleck", "Polygon", "A, B, C", "durch seine Ecken"),
+    ("Mittelpunkt", "Midpoint", "A, B", "zwischen A und B"),
+    ("Schneide", "Intersect", "f, g", "die Schnittpunkte"),
+    ("Nullstelle", "Root", "f", "die Nullstellen"),
+    ("Extremum", "Extremum", "f", "die Hoch- und Tiefpunkte"),
+    ("Wendepunkt", "InflectionPoint", "f", "die Wendepunkte"),
+    ("Ableitung", "Derivative", "f", "die Ableitung"),
+    ("Integral", "Integral", "f, 0, 2", "die Fläche unter f"),
+    ("IntegralZwischen", "IntegralBetween", "f, g, 0, 2", "die Fläche zwischen f und g"),
+    ("Tangente", "Tangent", "1, f", "an f bei x = 1"),
+    ("Senkrechte", "PerpendicularLine", "A, g", "durch A senkrecht zu g"),
+    ("Parallele", "Parallel", "A, g", "durch A parallel zu g"),
+    ("Mittelsenkrechte", "PerpendicularBisector", "A, B", "der Strecke von A nach B"),
+    ("Winkelhalbierende", "AngleBisector", "A, B, C", "des Winkels bei B"),
+    ("Abstand", "Distance", "A, B", "zwischen Punkten, Punkt und Gerade"),
+    ("Länge", "Length", "A, B", "einer Strecke"),
+    ("Steigung", "Slope", "g", "einer Geraden"),
+    ("Winkel", "Angle", "A, B, C", "bei B"),
+    ("Funktion", "Function", "f, 0, 2", "f nur von 0 bis 2"),
+    ("Wenn", "If", "x < 0, -x, x", "je nach Bedingung"),
+    ("Kurve", "Curve", "cos(t), sin(t), t, 0, 2π", "in Parameterform"),
+    ("Text", "Text", "\"…\"", "ein Text im Bild"),
+    ("Schieberegler", "Slider", "-5, 5, 0.1", "eine Zahl zum Ziehen"),
+    ("Spiegle", "Reflect", "A, g", "an einer Geraden oder einem Punkt"),
+    ("Verschiebe", "Translate", "A, v", "um einen Vektor"),
+    ("Drehe", "Rotate", "A, 90°, M", "um einen Punkt"),
+    ("Fläche", "Area", "A, B, C", "eines Vielecks"),
+    ("Min", "Min", "a, b", "die kleinere Zahl"),
+    ("Max", "Max", "a, b", "die größere Zahl"),
+];
+
+/// How many suggestions show at most.
+const SUGGESTIONS: usize = 5;
+
+/// A command suggested under the input line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Suggestion {
+    /// As shown and inserted: the German name, or the English one when that is being typed.
+    pub name: &'static str,
+    /// The German name (the command buttons go by it).
+    pub de: &'static str,
+    pub args: &'static str,
+    pub about: &'static str,
+}
+
+impl Suggestion {
+    /// How it goes: "Schneide(f, g)".
+    pub fn usage(&self) -> String {
+        format!("{}({})", self.name, self.args)
+    }
+}
+
+/// The commands starting with `typed` (at least two letters, case and "ae" for "ä" don't
+/// matter), the German names first, an exact match before the others.
+pub fn suggest(typed: &str) -> Vec<Suggestion> {
+    let t = typed.to_lowercase();
+    if t.chars().count() < 2 {
+        return Vec::new();
+    }
+    let starts = |name: &str| {
+        let n = name.to_lowercase();
+        n.starts_with(&t) || n.replace('ä', "ae").starts_with(&t)
+    };
+    let mut found: Vec<(bool, bool, usize, Suggestion)> = Vec::new();
+    for (k, &(de, en, args, about)) in COMMANDS.iter().enumerate() {
+        let name = if starts(de) {
+            de
+        } else if starts(en) {
+            en
+        } else {
+            continue;
+        };
+        found.push((name.to_lowercase() != t, name != de, k, Suggestion { name, de, args, about }));
+    }
+    found.sort_by_key(|f| (f.0, f.1, f.2));
+    found.into_iter().take(SUGGESTIONS).map(|f| f.3).collect()
+}
 
 /// What a function marks by itself, as the panel names it.
 pub const MARKS: [(u8, &str); 4] = [(MARK_ZEROS, "Nullstellen"), (MARK_EXTREMA, "Hoch- und Tiefpunkte"), (MARK_CROSSINGS, "Schnittpunkte"), (MARK_TURNS, "Wendepunkte")];
@@ -339,6 +433,11 @@ pub fn focus<M: Send + 'static>(id: iced::widget::Id, at: Option<usize>) -> Task
     iced::widget::operation::focus(id).chain(place)
 }
 
+/// Puts the cursor into field `id` with characters `from` … `to` selected (typing replaces them).
+pub fn select<M: Send + 'static>(id: iced::widget::Id, from: usize, to: usize) -> Task<M> {
+    iced::widget::operation::focus(id.clone()).chain(iced::widget::operation::select_range(id, from, to))
+}
+
 // --- the panel -----------------------------------------------------------------------------
 
 /// A row of the algebra view being edited: the object, what the field says, what is wrong.
@@ -363,6 +462,10 @@ pub enum Tab {
 pub enum Msg {
     /// The input line typed.
     Input(String),
+    /// Where the input line's cursor is now (characters), after a key or click it took.
+    Cursor(usize),
+    /// A suggestion taken (index into [`Editor::suggestions`]; Tab takes the first).
+    Complete(usize),
     /// Enter in the input line: a new object.
     InputSubmit,
     /// A command button (index into [`QUICK`]).
@@ -410,6 +513,8 @@ pub enum Msg {
     // The coordinate system.
     /// Range field (0 x from, 1 x to, 2 y from, 3 y to) typed.
     Range(usize, String),
+    /// The ranges back to those the panel opened with.
+    ResetView,
     FitY,
     EqualUnits,
     /// The x axis in steps of π.
@@ -422,7 +527,8 @@ pub enum Msg {
     Snap(Snap),
     Clean(bool),
     Interactive(bool),
-    /// Esc: leaves a row being edited (or the question), else like Abbrechen.
+    /// Esc: hides the suggestions, leaves a row being edited (or the question), else like
+    /// Abbrechen.
     Escape,
     Delete,
     Cancel,
@@ -435,6 +541,8 @@ pub enum Reply {
     None,
     /// Put the cursor in a field (at that many characters, else at the end): see [`focus`].
     Focus(iced::widget::Id, Option<usize>),
+    /// Put the cursor in a field with those characters selected: see [`select`].
+    Select(iced::widget::Id, usize, usize),
     Cancel,
     Delete,
     /// Store this plot (one step).
@@ -452,6 +560,10 @@ pub struct Editor {
     /// What the input line says, and what is wrong with it after Enter.
     pub input: String,
     pub input_error: Option<String>,
+    /// Where the input line's cursor is (characters; None: at the end).
+    pub cursor: Option<usize>,
+    /// Whether commands may be suggested: the input line was typed in last.
+    pub suggesting: bool,
     /// What the help line says (the last command button's usage; None: [`HELP`]).
     pub hint: Option<&'static str>,
     /// The selected object (its properties show).
@@ -478,6 +590,8 @@ impl Editor {
             plot,
             input: String::new(),
             input_error: None,
+            cursor: None,
+            suggesting: false,
             hint: None,
             selected: None,
             editing: None,
@@ -530,6 +644,7 @@ impl Editor {
                 let id = p.objs.last().map(|o| o.id.clone());
                 self.plot = p;
                 self.input.clear();
+                self.cursor = None;
                 self.input_error = None;
                 self.hint = None;
                 self.select(id);
@@ -623,16 +738,78 @@ impl Editor {
         }
     }
 
+    /// The word at the input line's cursor (a run of letters), in characters: where it starts,
+    /// the cursor, where it ends.
+    fn word(&self) -> (usize, usize, usize) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let at = self.cursor.unwrap_or(chars.len()).min(chars.len());
+        let start = chars[..at].iter().rposition(|c| !c.is_alphabetic()).map_or(0, |i| i + 1);
+        let end = chars[at..].iter().position(|c| !c.is_alphabetic()).map_or(chars.len(), |i| at + i);
+        (start, at, end)
+    }
+
+    /// The commands suggested for what is being typed at the cursor, like GeoGebra's (none
+    /// while the input line isn't being typed in).
+    pub fn suggestions(&self) -> Vec<Suggestion> {
+        if !self.suggesting {
+            return Vec::new();
+        }
+        let (start, at, _) = self.word();
+        suggest(&self.input.chars().skip(start).take(at - start).collect::<String>())
+    }
+
+    /// Suggestion `k` in place of the word at the cursor: its usage with the example arguments
+    /// selected (typing replaces them), or just its name when brackets follow already.
+    fn complete(&mut self, k: usize) -> Reply {
+        let Some(s) = self.suggestions().get(k).copied() else { return Reply::None };
+        let (start, _, end) = self.word();
+        let chars: Vec<char> = self.input.chars().collect();
+        let (before, after): (String, String) = (chars[..start].iter().collect(), chars[end..].iter().collect());
+        let brackets = after.starts_with(['(', '[']);
+        let insert = if brackets { s.name.to_string() } else { s.usage() };
+        self.input = format!("{before}{insert}{after}");
+        self.input_error = None;
+        self.suggesting = false;
+        self.hint = QUICK.iter().find(|q| q.0 == s.de).map(|q| q.2);
+        // Just after the opening bracket.
+        let inside = start + s.name.chars().count() + 1;
+        if brackets {
+            self.cursor = Some(inside);
+            return Reply::Focus(input_id(), Some(inside));
+        }
+        // A text's quotes stay.
+        let (from, to) = match s.args.strip_prefix('"').and_then(|a| a.strip_suffix('"')) {
+            Some(a) => (inside + 1, inside + 1 + a.chars().count()),
+            None => (inside, inside + s.args.chars().count()),
+        };
+        self.cursor = Some(to);
+        Reply::Select(input_id(), from, to)
+    }
+
+    /// Whether the ranges (as typed) are not those the panel opened with.
+    pub fn view_changed(&self) -> bool {
+        let o = &self.original;
+        [o.x_min, o.x_max, o.y_min, o.y_max].iter().zip(&self.ranges).any(|(v, f)| f.value() != Some(*v))
+    }
+
     pub fn update(&mut self, msg: Msg) -> Reply {
+        // Suggestions show while the input line is being typed in; anything else hides them.
+        if !matches!(msg, Msg::Input(_) | Msg::Cursor(_) | Msg::Complete(_) | Msg::Escape) {
+            self.suggesting = false;
+        }
         match msg {
             Msg::Input(s) => {
                 self.input = s;
                 self.input_error = None;
+                self.suggesting = true;
+                // Until the line says where its cursor is.
+                self.cursor = None;
             }
+            Msg::Cursor(at) => self.cursor = Some(at),
+            Msg::Complete(k) => return self.complete(k),
             Msg::InputSubmit => {
                 let added = !self.input.trim().is_empty();
-                // The new row above the line moves it in the widget tree, which loses its
-                // focus: the cursor goes back for the next object.
+                // The cursor stays in the line for the next object.
                 if self.take_input() && added {
                     return Reply::Focus(input_id(), None);
                 }
@@ -643,7 +820,9 @@ impl Editor {
                     self.input_error = None;
                     self.hint = Some(usage);
                     // Between the brackets.
-                    return Reply::Focus(input_id(), Some(self.input.chars().count() - 1));
+                    let at = self.input.chars().count() - 1;
+                    self.cursor = Some(at);
+                    return Reply::Focus(input_id(), Some(at));
                 }
             }
             Msg::Edit(id) => {
@@ -819,6 +998,11 @@ impl Editor {
                 self.ranges[i].text = s;
                 self.take_range(i / 2);
             }
+            Msg::ResetView => {
+                let o = &self.original;
+                (self.plot.x_min, self.plot.x_max, self.plot.y_min, self.plot.y_max) = (o.x_min, o.x_max, o.y_min, o.y_max);
+                self.ranges = [NumField::of(o.x_min, self.plot.pi), NumField::of(o.x_max, self.plot.pi), NumField::of(o.y_min, false), NumField::of(o.y_max, false)];
+            }
             Msg::FitY => {
                 if let Some((lo, hi)) = self.plot.fit_y() {
                     self.set_y(lo, hi);
@@ -847,7 +1031,10 @@ impl Editor {
             Msg::Clean(on) => self.plot.clean = on,
             Msg::Interactive(on) => self.plot.interactive = on,
             Msg::Escape => {
-                if self.editing.take().is_none() && self.confirm.take().is_none() {
+                // The suggestions first (the line keeps its cursor: see [`InputLine`]).
+                if !self.suggestions().is_empty() {
+                    self.suggesting = false;
+                } else if self.editing.take().is_none() && self.confirm.take().is_none() {
                     return Reply::Cancel;
                 }
             }
@@ -948,15 +1135,20 @@ impl Editor {
             Tab::Graphics => self.graphics(),
         };
         let right = column![
-            container(Preview { plot: &self.plot, paper: self.paper, cache: &self.preview, size: Size::new(RIGHT, 250.0) }).id(preview_id()),
+            container(Preview { plot: &self.plot, drawn: highlighted(&self.plot, self.selected_index()), paper: self.paper, cache: &self.preview, size: Size::new(RIGHT, 250.0) }).id(preview_id()),
             row![tab("Eigenschaften", Tab::Object), tab("Grafik", Tab::Graphics)].spacing(6),
             scrollable(container(side).padding(Padding { right: 12.0, ..Padding::ZERO })).style(theme::scroll_dark).height(Length::Shrink),
         ]
         .spacing(12)
         .width(Length::Fixed(RIGHT));
-        let left = container(self.algebra(&vals)).padding(Padding { right: 14.0, ..Padding::ZERO });
-        // Both sides scroll when they don't fit; the buttons stay.
-        let body = row![scrollable(left).style(theme::scroll_dark).width(Length::Fill).height(Length::Shrink), Space::new().width(22), right];
+        // The objects scroll when they don't fit; the input line under them always shows.
+        let gutter = Padding { right: 14.0, ..Padding::ZERO };
+        let left = Footed {
+            parts: [scrollable(container(self.algebra(&vals)).padding(gutter)).style(theme::scroll_dark).width(Length::Fill).height(Length::Shrink).into(), container(self.input_line()).padding(gutter).into()],
+            gap: 10.0,
+        };
+        // The properties scroll too; the buttons stay.
+        let body = row![left, Space::new().width(22), right];
         let result = self.result();
         // Why OK is off, when the Grafik side isn't showing it.
         let why = if self.tab == Tab::Graphics { None } else { result.as_ref().err().cloned() };
@@ -965,7 +1157,7 @@ impl Editor {
             crate::widgets::leave_room(body, 80.0),
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
             row![
-                button(theme::btn("Löschen")).padding(theme::pad()).on_press(Msg::Delete).style(theme::ghost),
+                button(theme::btn("Koordinatensystem löschen")).padding(theme::pad()).on_press(Msg::Delete).style(theme::ghost),
                 Space::new().width(Length::Fill),
                 text(why.unwrap_or_default()).size(12).color(theme::p().accent),
                 Space::new().width(12),
@@ -981,12 +1173,12 @@ impl Editor {
         iced::widget::mouse_area(container(card).padding(Padding { top: 56.0, right: 16.0, bottom: 16.0, left: 16.0 }).center_x(Length::Fill).height(Length::Fill)).interaction(mouse::Interaction::Idle).into()
     }
 
-    /// The algebra view: the objects (helpers last), the input line, the command buttons, the
-    /// help line.
+    /// The algebra view: the objects, helpers last.
     fn algebra(&self, vals: &[Result<Val, String>]) -> Element<'_, Msg> {
         let objs = &self.plot.objs;
         let mut order: Vec<usize> = (0..objs.len()).collect();
         order.sort_by(|&a, &b| objs[a].style.aux.cmp(&objs[b].style.aux).then(objs[a].order.total_cmp(&objs[b].order)));
+        let known: HashSet<String> = objs.iter().map(|o| o.name()).collect();
         let mut col = column![theme::caption("Algebra")].spacing(4);
         if objs.is_empty() {
             col = col.push(container(text("Noch leer. Unten eingeben, z. B. f(x) = x^2 oder A = (1|2), und Enter.").size(13).color(theme::p().muted)).padding([6, 4]));
@@ -997,12 +1189,23 @@ impl Editor {
                 helpers = true;
                 col = col.push(container(theme::caption("Hilfsobjekte")).padding(Padding { top: 8.0, ..Padding::ZERO }));
             }
-            col = col.push(self.row(i, &vals[i]));
+            col = col.push(self.row(i, &vals[i], &known));
         }
-        let input = text_input("Eingabe …", &self.input).id(input_id()).on_input(Msg::Input).on_submit(Msg::InputSubmit).font(theme::MONO).padding(9).size(14).style(theme::field);
-        col = col.push(Space::new().height(8)).push(input);
+        col.into()
+    }
+
+    /// The input line, what is wrong with it, and under it the command buttons with the help
+    /// line, or the commands that fit what is being typed.
+    fn input_line(&self) -> Element<'_, Msg> {
+        let suggestions = self.suggestions();
+        let field = text_input("Eingabe …", &self.input).id(input_id()).on_input(Msg::Input).on_submit(Msg::InputSubmit).font(theme::MONO).padding(9).size(14).style(theme::field);
+        let mut col = column![InputLine { field: field.into(), value: &self.input, suggesting: !suggestions.is_empty() }].spacing(4);
         if let Some(e) = &self.input_error {
             col = col.push(container(text(e.clone()).size(12.5).color(theme::p().accent)).padding([2, 4]));
+        }
+        // While a command is being typed, the commands that fit take the place of the buttons.
+        if !suggestions.is_empty() {
+            return col.push(Space::new().height(2)).push(suggestion_list(&suggestions)).into();
         }
         let quick = Row::with_children(QUICK.iter().enumerate().map(|(k, &(label, _, usage))| {
             let b = button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Insert(k)).style(theme::secondary);
@@ -1014,9 +1217,10 @@ impl Editor {
         col.push(Space::new().height(4)).push(quick).push(container(text(self.hint.unwrap_or(HELP)).size(12).color(theme::p().muted)).padding([2, 2])).into()
     }
 
-    /// One object of the algebra view: its dot, how it is listed (or its definition being
-    /// edited), ×; a slider under it; what is wrong; the question before deleting.
-    fn row(&self, i: usize, v: &Result<Val, String>) -> Element<'_, Msg> {
+    /// One object of the algebra view: its dot, its value with how it came about under it (or
+    /// its definition being edited), × while selected; a slider under it; what is wrong; the
+    /// question before deleting.
+    fn row(&self, i: usize, v: &Result<Val, String>, known: &HashSet<String>) -> Element<'_, Msg> {
         let o = &self.plot.objs[i];
         let id = o.id.clone();
         let selected = self.selected.as_deref() == Some(o.id.as_str());
@@ -1028,14 +1232,23 @@ impl Editor {
                 if v.is_err() {
                     t = t.color(theme::p().muted);
                 }
-                button(t).width(Length::Fill).padding([6, 8]).on_press(Msg::Edit(id.clone())).style(theme::row(selected)).into()
+                let mut lines = column![t].spacing(1);
+                if let Some(d) = row_definition(o, v, known) {
+                    lines = lines.push(text(d).font(theme::SANS).size(12).color(theme::p().muted).wrapping(text::Wrapping::WordOrGlyph));
+                }
+                button(lines).width(Length::Fill).padding([6, 8]).on_press(Msg::Edit(id.clone())).style(theme::row(selected)).into()
             }
         };
         let deps = self.names_of(&self.plot.dependents(&o.id));
-        let tip = if deps.is_empty() { "Löschen".to_string() } else { format!("Löschen, mit {}", and_list(&deps)) };
-        let x = tooltip(button(text("×").size(16)).padding([2, 9]).on_press(Msg::AskRemove(id.clone())).style(theme::ghost), container(text(tip).size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Left).gap(4);
-        let mut cell = column![row![dot(o), body, x].spacing(6).align_y(Alignment::Center)].spacing(4);
-        let indent = |e: Element<'static, Msg>| -> Element<'static, Msg> { container(e).padding(Padding { left: 36.0, right: 40.0, ..Padding::ZERO }).into() };
+        // Only the selected row can be deleted (fewer ×); the others keep its room.
+        let x: Element<'_, Msg> = if selected {
+            let tip = if deps.is_empty() { "Löschen".to_string() } else { format!("Löschen, mit {}", and_list(&deps)) };
+            tooltip(button(text("×").size(16)).padding([2, 9]).on_press(Msg::AskRemove(id.clone())).style(theme::ghost), container(text(tip).size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Left).gap(4).into()
+        } else {
+            Space::new().into()
+        };
+        let mut cell = column![row![dot(o), body, container(x).center_x(Length::Fixed(DELETE))].spacing(6).align_y(Alignment::Center)].spacing(4);
+        let indent = |e: Element<'static, Msg>| -> Element<'static, Msg> { container(e).padding(Padding { left: 36.0, right: DELETE + 8.0, ..Padding::ZERO }).into() };
         if let (Some(s), Ok(Val::Num(value)), None) = (o.style.slider, v, editing) {
             let (lo, hi) = (s.min.min(s.max), s.max.max(s.min));
             let step = if s.step > 0.0 { s.step } else { ((hi - lo) / 200.0).max(1e-9) };
@@ -1086,7 +1299,7 @@ impl Editor {
             col = col.push(section("Linie", column![styles, width].spacing(8).into()));
         }
         if matches!(kind, Some(Kind::Point | Kind::Points)) {
-            let size = if s.size > 0.0 { s.size } else { ((self.plot.w.min(self.plot.h) * 0.045).clamp(5.0, 8.0) * 0.42).max(2.2) };
+            let size = if s.size > 0.0 { s.size } else { point_size(&self.plot) };
             let styles = row![point_style(PointStyle::Dot, s.point, s.color), point_style(PointStyle::Cross, s.point, s.color), point_style(PointStyle::Ring, s.point, s.color)].spacing(4);
             let size = row![slider(1.0..=8.0, size.clamp(1.0, 8.0), Msg::Size).step(0.1f32).style(theme::slider_style), value(plot::fmt_num(size as f64))].spacing(10).align_y(Alignment::Center);
             col = col.push(section("Punkt", column![styles, size].spacing(8).into()));
@@ -1122,8 +1335,12 @@ impl Editor {
         } else if kind == Some(Kind::Number) && plain_number(o) {
             col = col.push(switch(false, "Als Schieberegler", Msg::MakeSlider));
         }
-        col = col.push(column![switch(s.visible, "Sichtbar", Msg::Shown), switch(s.fixed, "Fixiert (lässt sich nicht ziehen)", Msg::Fixed), switch(s.aux, "Hilfsobjekt", Msg::Aux)].spacing(8));
-        col.into()
+        let mut last = column![switch(s.visible, "Sichtbar", Msg::Shown)].spacing(8);
+        // Only what drags can be held in place.
+        if movable(&self.plot, i) || s.fixed {
+            last = last.push(switch(s.fixed, "Fixiert (lässt sich nicht ziehen)", Msg::Fixed));
+        }
+        col.push(last.push(switch(s.aux, "Hilfsobjekt", Msg::Aux))).into()
     }
 
     /// The coordinate system: ranges, axes, grid, Punktfang, the look.
@@ -1142,14 +1359,11 @@ impl Editor {
             .spacing(7)
             .align_y(Alignment::Center)
         };
+        let small = |label: &str, msg: Option<Msg>| button(theme::btn_small(label)).padding(theme::pad()).on_press_maybe(msg).style(theme::secondary);
         let mut range = column![
             axis_row(0),
             axis_row(1),
-            row![
-                button(theme::btn_small("y passend")).padding(theme::pad()).on_press_maybe(self.plot.fit_y().is_some().then_some(Msg::FitY)).style(theme::secondary),
-                button(theme::btn_small("Gleiche Einheiten")).padding(theme::pad()).on_press(Msg::EqualUnits).style(theme::secondary),
-            ]
-            .spacing(8),
+            row![small("y passend", self.plot.fit_y().is_some().then_some(Msg::FitY)), small("Gleiche Einheiten", Some(Msg::EqualUnits))].spacing(8),
             switch(self.plot.pi, "x in π", Msg::Pi),
         ]
         .spacing(8);
@@ -1158,29 +1372,42 @@ impl Editor {
                 range = range.push(text(e).size(12.5).color(theme::p().accent));
             }
         }
+        // Back to the ranges the panel opened with: next to the heading, once they changed.
+        let reset: Element<'_, Msg> = if self.view_changed() {
+            button(theme::btn_small("Ansicht zurücksetzen")).padding([2, 8]).on_press(Msg::ResetView).style(theme::ghost).into()
+        } else {
+            Space::new().into()
+        };
+        let heading = row![theme::caption("Bereich"), Space::new().width(Length::Fill), reset].align_y(Alignment::Center).height(Length::Fixed(20.0));
         let name = |value: &str, hint: &'static str, f: fn(String) -> Msg| text_input(hint, value).on_input(f).font(theme::MONO).padding(6).size(13).width(Length::Fixed(82.0)).style(theme::field);
-        let axes = column![
-            switch(self.plot.axes, "Achsen", Msg::Axes),
-            row![
-                theme::caption("Namen"),
-                Space::new().width(4),
-                text("x").font(theme::MONO_BOLD).size(14).color(theme::p().text),
-                name(&self.plot.x_name, "x", Msg::XName),
-                text("y").font(theme::MONO_BOLD).size(14).color(theme::p().text),
-                name(&self.plot.y_name, "y", Msg::YName),
-            ]
-            .spacing(7)
-            .align_y(Alignment::Center),
-        ]
-        .spacing(8);
-        let grid = column![switch(self.plot.grid, "Raster", Msg::Grid), switch(self.plot.minor, "Nebenraster", Msg::Minor)].spacing(8);
+        // What only matters with the axes (their names) or the grid (the finer one) shows with them.
+        let mut axes = column![switch(self.plot.axes, "Achsen", Msg::Axes)].spacing(8);
+        if self.plot.axes {
+            axes = axes.push(
+                row![
+                    theme::caption("Namen"),
+                    Space::new().width(4),
+                    text("x").font(theme::MONO_BOLD).size(14).color(theme::p().text),
+                    name(&self.plot.x_name, "x", Msg::XName),
+                    text("y").font(theme::MONO_BOLD).size(14).color(theme::p().text),
+                    name(&self.plot.y_name, "y", Msg::YName),
+                ]
+                .spacing(7)
+                .align_y(Alignment::Center),
+            );
+        }
+        let mut grid = column![switch(self.plot.grid, "Raster", Msg::Grid)].spacing(8);
+        if self.plot.grid {
+            grid = grid.push(switch(self.plot.minor, "Feines Raster dazwischen", Msg::Minor));
+        }
         let snap = Row::with_children([(Snap::Auto, "automatisch"), (Snap::Grid, "am Raster"), (Snap::Off, "aus")].map(|(s, label)| button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Snap(s)).style(theme::option(self.plot.snap == s)).into())).spacing(5);
+        let page = column![switch(self.plot.clean, "Wie mit dem Lineal gezeichnet", Msg::Clean), switch(self.plot.interactive, "Punkte und Schieberegler ziehen", Msg::Interactive)].spacing(8);
         column![
-            section("Bereich", range.into()),
+            column![heading, range].spacing(7),
             section("Achsen", axes.into()),
             section("Raster", grid.into()),
             section("Punktfang", snap.into()),
-            column![switch(self.plot.clean, "Wie mit dem Lineal", Msg::Clean), switch(self.plot.interactive, "Interaktiv: Punkte und Schieberegler auf der Seite ziehen", Msg::Interactive)].spacing(8),
+            section("Auf der Seite", page.into()),
         ]
         .spacing(16)
         .into()
@@ -1189,6 +1416,58 @@ impl Editor {
 
 /// The width of the right side (preview, properties).
 const RIGHT: f32 = 360.0;
+
+/// The room for a row's × (only the selected row shows it).
+const DELETE: f32 = 32.0;
+
+/// How an object came about, said under its value in the algebra view ("Schneide(f, c, 1)",
+/// "f'(x)"): only where the value doesn't say it all (not for free objects, sliders, or objects
+/// with a mistake, whose definition is the row itself).
+fn row_definition(o: &Obj, v: &Result<Val, String>, known: &HashSet<String>) -> Option<String> {
+    if v.is_err() || o.style.slider.is_some() {
+        return None;
+    }
+    plot::definition(&o.def, known)
+}
+
+/// The size of a point without a size of its own, as the core draws it.
+fn point_size(p: &Plot) -> f32 {
+    ((p.w.min(p.h) * 0.045).clamp(5.0, 8.0) * 0.42).max(2.2)
+}
+
+/// The plot as the preview draws it: the selected object bolder (its lines 2.2 times as wide,
+/// its points 1.4 times as big), so it is easy to find. The draft itself stays as it is.
+fn highlighted(p: &Plot, selected: Option<usize>) -> Plot {
+    let mut q = p.clone();
+    if let Some(o) = selected.and_then(|i| q.objs.get_mut(i)) {
+        let s = &mut o.style;
+        s.width = (if s.width > 0.0 { s.width } else { p.width }) * 2.2;
+        s.size = (if s.size > 0.0 { s.size } else { point_size(p) }) * 1.4;
+    }
+    q
+}
+
+/// The commands suggested under the input line, in a frame: each as it goes ("Schneide(f, g)")
+/// with what it makes. A click takes one; Tab takes the first, which is marked.
+fn suggestion_list<'a>(list: &[Suggestion]) -> Element<'a, Msg> {
+    // The usages as a column: the font is a mono one (each character 0.61 of its size wide).
+    let width = list.iter().map(|s| s.usage().chars().count()).max().unwrap_or(0) as f32 * 13.5 * 0.61 + 4.0;
+    let rows = list.iter().enumerate().map(|(k, s)| {
+        let usage = row![text(s.name).font(theme::MONO_BOLD).size(13.5).color(theme::p().text), text(format!("({})", s.args)).font(theme::MONO).size(13.5).color(theme::p().muted)].width(Length::Fixed(width));
+        let mut line = row![usage, Space::new().width(14), text(s.about).size(12.5).color(theme::p().muted).width(Length::Fill)].align_y(Alignment::Center);
+        if k == 0 {
+            // The key that takes it, as a key cap.
+            let cap = |_: &Theme| container::Style { text_color: Some(theme::p().muted), border: Border { radius: 4.0.into(), width: 1.0, color: theme::p().border }, ..Default::default() };
+            line = line.push(container(text("Tab").font(theme::MONO).size(11)).padding([1, 6]).style(cap));
+        }
+        button(line).width(Length::Fill).padding([5, 8]).on_press(Msg::Complete(k)).style(theme::row(k == 0)).into()
+    });
+    container(Column::with_children(rows).spacing(2))
+        .padding(4)
+        .width(Length::Fill)
+        .style(|_| container::Style { border: Border { radius: theme::s().card.min(10.0).into(), width: 1.0, color: theme::p().border }, ..Default::default() })
+        .into()
+}
 
 /// A row's dot: filled while the object shows, hollow while hidden (like GeoGebra), in its ink
 /// on a bit of paper (so dark inks show on dark designs too).
@@ -1281,13 +1560,197 @@ const DOT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 
 const CROSS: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><path d="M8.5 2.5L15.5 9.5M15.5 2.5L8.5 9.5" stroke="#000" stroke-width="2" stroke-linecap="round"/></svg>"##;
 const RING: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 12"><circle cx="12" cy="6" r="3.6" fill="none" stroke="#000" stroke-width="1.8"/></svg>"##;
 
+// --- the input line ------------------------------------------------------------------------
+
+/// The input line's text field with what the suggestions need: after every key or click it
+/// takes, it says where its cursor is ([`Msg::Cursor`]: the suggestions follow the word there);
+/// while suggestions show, Tab takes the first and Esc only hides them (the field keeps its
+/// cursor; the panel hears that Esc through the [`crate::widgets::on_escape`] around it).
+struct InputLine<'a> {
+    field: Element<'a, Msg>,
+    /// What the field says.
+    value: &'a str,
+    suggesting: bool,
+}
+
+/// The state iced keeps for a text field.
+type FieldState = iced::widget::text_input::State<<iced::Renderer as iced::advanced::text::Renderer>::Paragraph>;
+
+/// What the input line's field was typed to since the panel last drew it: (what it said then,
+/// what it says now). Several events can come before the panel draws again.
+#[derive(Default)]
+struct Typed(Option<(String, String)>);
+
+impl<'a> Widget<Msg, Theme, iced::Renderer> for InputLine<'a> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Typed>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(Typed::default())
+    }
+
+    fn children(&self) -> Vec<widget::Tree> {
+        vec![widget::Tree::new(&self.field)]
+    }
+
+    fn diff(&self, tree: &mut widget::Tree) {
+        tree.diff_children(std::slice::from_ref(&self.field));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.field.as_widget().size()
+    }
+
+    fn layout(&mut self, tree: &mut widget::Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.field.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(&mut self, tree: &mut widget::Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn widget::Operation) {
+        self.field.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(&mut self, tree: &mut widget::Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor, renderer: &iced::Renderer, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Msg>, viewport: &Rectangle) {
+        let focused = tree.children[0].state.downcast_ref::<FieldState>().is_focused();
+        if focused
+            && self.suggesting
+            && !shell.is_event_captured()
+            && let Event::Keyboard(keyboard::Event::KeyPressed { key: keyboard::Key::Named(key @ (Named::Tab | Named::Escape)), modifiers, .. }) = event
+            && (*key == Named::Escape || modifiers.is_empty())
+        {
+            if *key == Named::Tab {
+                shell.publish(Msg::Complete(0));
+            }
+            shell.capture_event();
+            return;
+        }
+        // What the field publishes (to know what it says after this event).
+        let mut published = Vec::new();
+        let mut inner = Shell::new(&mut published);
+        self.field.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, &mut inner, viewport);
+        let took = inner.is_event_captured();
+        let typed: RefCell<Option<String>> = RefCell::new(None);
+        shell.merge(inner, |m| {
+            if let Msg::Input(s) = &m {
+                *typed.borrow_mut() = Some(s.clone());
+            }
+            m
+        });
+        let since = tree.state.downcast_mut::<Typed>();
+        if let Some(t) = typed.into_inner() {
+            since.0 = Some((self.value.to_string(), t));
+        }
+        let now = match &since.0 {
+            Some((then, now)) if then == self.value => now.as_str(),
+            _ => self.value,
+        };
+        let field = tree.children[0].state.downcast_ref::<FieldState>();
+        if took && field.is_focused() {
+            let at = match field.cursor().state(&iced::widget::text_input::Value::new(now)) {
+                iced::widget::text_input::cursor::State::Index(i) => i,
+                iced::widget::text_input::cursor::State::Selection { end, .. } => end,
+            };
+            shell.publish(Msg::Cursor(at));
+        }
+    }
+
+    fn mouse_interaction(&self, tree: &widget::Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &iced::Renderer) -> mouse::Interaction {
+        self.field.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+    }
+
+    fn draw(&self, tree: &widget::Tree, renderer: &mut iced::Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
+        self.field.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn overlay<'b>(&'b mut self, tree: &'b mut widget::Tree, layout: Layout<'b>, renderer: &iced::Renderer, viewport: &Rectangle, translation: Vector) -> Option<iced::advanced::overlay::Element<'b, Msg, Theme, iced::Renderer>> {
+        self.field.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a> From<InputLine<'a>> for Element<'a, Msg> {
+    fn from(w: InputLine<'a>) -> Self {
+        Element::new(w)
+    }
+}
+
+/// Two parts one above the other, where the lower one (the input line and what is under it)
+/// always shows: it is laid out first, and the upper one (the objects, scrolling) gets the
+/// height that is left.
+struct Footed<'a> {
+    parts: [Element<'a, Msg>; 2],
+    gap: f32,
+}
+
+impl<'a> Widget<Msg, Theme, iced::Renderer> for Footed<'a> {
+    fn children(&self) -> Vec<widget::Tree> {
+        self.parts.iter().map(widget::Tree::new).collect()
+    }
+
+    fn diff(&self, tree: &mut widget::Tree) {
+        tree.diff_children(&self.parts);
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Shrink)
+    }
+
+    fn layout(&mut self, tree: &mut widget::Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        let max = limits.max();
+        let [top, foot] = &mut self.parts;
+        let foot = foot.as_widget_mut().layout(&mut tree.children[1], renderer, &layout::Limits::new(Size::ZERO, max));
+        let room = (max.height - foot.size().height - self.gap).max(0.0);
+        let top = top.as_widget_mut().layout(&mut tree.children[0], renderer, &layout::Limits::new(Size::ZERO, Size::new(max.width, room)));
+        let (t, f) = (top.size(), foot.size());
+        let size = limits.resolve(Length::Fill, Length::Shrink, Size::new(t.width.max(f.width), t.height + self.gap + f.height));
+        layout::Node::with_children(size, vec![top, foot.move_to(Point::new(0.0, t.height + self.gap))])
+    }
+
+    fn operate(&mut self, tree: &mut widget::Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn widget::Operation) {
+        operation.container(None, layout.bounds());
+        operation.traverse(&mut |operation| {
+            for ((part, tree), layout) in self.parts.iter_mut().zip(&mut tree.children).zip(layout.children()) {
+                part.as_widget_mut().operate(tree, layout, renderer, operation);
+            }
+        });
+    }
+
+    fn update(&mut self, tree: &mut widget::Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor, renderer: &iced::Renderer, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Msg>, viewport: &Rectangle) {
+        for ((part, tree), layout) in self.parts.iter_mut().zip(&mut tree.children).zip(layout.children()) {
+            part.as_widget_mut().update(tree, event, layout, cursor, renderer, clipboard, shell, viewport);
+        }
+    }
+
+    fn mouse_interaction(&self, tree: &widget::Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &iced::Renderer) -> mouse::Interaction {
+        self.parts.iter().zip(&tree.children).zip(layout.children()).map(|((part, tree), layout)| part.as_widget().mouse_interaction(tree, layout, cursor, viewport, renderer)).max().unwrap_or_default()
+    }
+
+    fn draw(&self, tree: &widget::Tree, renderer: &mut iced::Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
+        for ((part, tree), layout) in self.parts.iter().zip(&tree.children).zip(layout.children()) {
+            part.as_widget().draw(tree, renderer, theme, style, layout, cursor, viewport);
+        }
+    }
+
+    fn overlay<'b>(&'b mut self, tree: &'b mut widget::Tree, layout: Layout<'b>, renderer: &iced::Renderer, viewport: &Rectangle, translation: Vector) -> Option<iced::advanced::overlay::Element<'b, Msg, Theme, iced::Renderer>> {
+        iced::advanced::overlay::from_children(&mut self.parts, tree, layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a> From<Footed<'a>> for Element<'a, Msg> {
+    fn from(w: Footed<'a>) -> Self {
+        Element::new(w)
+    }
+}
+
 // --- the preview ---------------------------------------------------------------------------
 
 /// The live preview: the plot on a piece of its paper, scaled to fit. Drawn as paths (both
 /// renderers draw those; the software one skips meshes), redrawn when the plot changes. A click
 /// on an object selects it; points and sliders drag.
 struct Preview<'a> {
+    /// The draft (where things are, what a click hits).
     plot: &'a Plot,
+    /// What is drawn: the draft with the selected object bolder ([`highlighted`]).
+    drawn: Plot,
     paper: (Background, f32),
     cache: &'a RefCell<Option<(Plot, canvas::Cache)>>,
     size: Size,
@@ -1354,7 +1817,7 @@ impl<'a> Preview<'a> {
             }
         }
         // The ink: each stroke's outline (the core's, as for every stroke), filled.
-        for (brush, pts) in look(self.plot).iter() {
+        for (brush, pts) in look(&self.drawn).iter() {
             let poly = n0te_core::ink::outline(pts, brush);
             if poly.len() < 6 {
                 continue;
@@ -1438,8 +1901,8 @@ impl<'a> Widget<Msg, Theme, iced::Renderer> for Preview<'a> {
             renderer::Quad { bounds: b, border: Border { color: theme::p().border, width: 1.0, radius: theme::s().card.min(6.0).into() }, ..Default::default() },
             theme::p().paper,
         );
-        if !matches!(self.cache.borrow().as_ref(), Some((p, _)) if p == self.plot) {
-            *self.cache.borrow_mut() = Some((self.plot.clone(), canvas::Cache::new()));
+        if !matches!(self.cache.borrow().as_ref(), Some((p, _)) if *p == self.drawn) {
+            *self.cache.borrow_mut() = Some((self.drawn.clone(), canvas::Cache::new()));
         }
         let cache = self.cache.borrow();
         let Some((_, cache)) = cache.as_ref() else { return };
@@ -1863,6 +2326,159 @@ mod tests {
         e.update(Msg::AskRemove(p.objs[4].id.clone()));
         e.update(Msg::KeepIt);
         assert_eq!(e.update(Msg::Ok), Reply::Apply(p));
+    }
+
+    fn suggested(e: &Editor) -> Vec<&'static str> {
+        e.suggestions().iter().map(|s| s.name).collect()
+    }
+
+    #[test]
+    fn the_suggested_commands_are_the_cores_with_usages_that_read() {
+        assert_eq!(COMMANDS.len(), lang::COMMANDS.len());
+        let known: HashSet<String> = ["A", "B", "C", "M", "f", "g", "v", "a", "b"].map(String::from).into();
+        for (&(de, en, args, about), &(core_de, core_en)) in COMMANDS.iter().zip(lang::COMMANDS) {
+            assert_eq!((de.to_lowercase().as_str(), en.to_lowercase().as_str()), (core_de, core_en), "in the core's order");
+            assert_eq!((lang::command(de), lang::command(en)), (Some(core_en), Some(core_en)));
+            let usage = format!("{de}({args})");
+            assert!(lang::parse_input(&usage, &known).is_ok(), "{usage} reads");
+            assert!(!about.is_empty() && about.chars().count() <= 36, "{de}: {about}");
+        }
+        // Every command button is one of them.
+        assert!(QUICK.iter().all(|q| COMMANDS.iter().any(|c| c.0 == q.0)));
+    }
+
+    #[test]
+    fn typing_a_command_suggests_it_like_geogebra() {
+        assert_eq!(suggest("s").len(), 0, "one letter: not yet");
+        assert_eq!(suggest("sch").iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Schneide", "Schieberegler"]);
+        assert_eq!(suggest("Sch")[0].usage(), "Schneide(f, g)");
+        assert_eq!(suggest("INTER").iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Intersect"], "English too, written as GeoGebra writes it");
+        assert_eq!(suggest("tang").iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Tangente"], "one command once, German first");
+        assert_eq!(suggest("laen").iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Länge"], "ae for ä");
+        assert_eq!(suggest("winkel").iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Winkel", "Winkelhalbierende"], "what was typed first");
+        assert_eq!(suggest("in").iter().map(|s| s.name).collect::<Vec<_>>(), vec!["Integral", "IntegralZwischen", "Intersect", "InflectionPoint"]);
+        assert!(suggest("sin").is_empty() && suggest("x^").is_empty());
+
+        let mut e = Editor::new("s", empty(), paper());
+        e.update(Msg::Input("S = Sch".into()));
+        assert_eq!(suggested(&e), vec!["Schneide", "Schieberegler"], "the word at the end, where the cursor is");
+        // A click (or Tab) puts in the usage with the example arguments selected.
+        assert_eq!(e.update(Msg::Complete(0)), Reply::Select(input_id(), 13, 17));
+        assert_eq!(e.input, "S = Schneide(f, g)");
+        assert_eq!(e.hint, Some(QUICK[3].2), "the help line says how it goes");
+        assert!(suggested(&e).is_empty(), "and the suggestions go");
+        // In the middle of the line: the word at the cursor.
+        e.update(Msg::Input("Schneide(Ab)".into()));
+        assert_eq!(suggested(&e), Vec::<&str>::new(), "the line ends with a bracket");
+        e.update(Msg::Cursor(11));
+        assert_eq!(suggested(&e), vec!["Ableitung", "Abstand"]);
+        assert_eq!(e.update(Msg::Complete(0)), Reply::Select(input_id(), 19, 20));
+        assert_eq!(e.input, "Schneide(Ableitung(f))");
+        // Brackets already there: only the name; a text keeps its quotes.
+        e.update(Msg::Input("Tan(1, f)".into()));
+        e.update(Msg::Cursor(2));
+        assert_eq!(suggested(&e), vec!["Tangente"], "what is before the cursor counts");
+        assert_eq!(e.update(Msg::Complete(0)), Reply::Focus(input_id(), Some(9)));
+        assert_eq!(e.input, "Tangente(1, f)");
+        e.update(Msg::Input("t = te".into()));
+        assert_eq!(e.update(Msg::Complete(0)), Reply::Select(input_id(), 10, 11));
+        assert_eq!(e.input, "t = Text(\"…\")");
+        // Esc hides them first, then leaves the panel.
+        e.update(Msg::Input("Sch".into()));
+        assert_eq!(e.update(Msg::Escape), Reply::None);
+        assert!(suggested(&e).is_empty());
+        assert_eq!(e.input, "Sch", "what was typed stays");
+        assert_eq!(e.update(Msg::Escape), Reply::Cancel);
+        // Anything else done in the panel hides them; typing brings them back.
+        e.update(Msg::Input("Sch".into()));
+        e.update(Msg::Tab(Tab::Graphics));
+        assert!(suggested(&e).is_empty());
+        assert_eq!(e.update(Msg::Complete(0)), Reply::None, "nothing to take");
+        // Enter still adds what is typed.
+        e.update(Msg::Input("Max(1, 2)".into()));
+        e.update(Msg::Cursor(3));
+        assert_eq!(suggested(&e), vec!["Max"]);
+        e.update(Msg::InputSubmit);
+        assert_eq!(e.plot.objs.last().map(|o| o.def.as_str()), Some("a = Max(1, 2)"));
+        assert!(e.input.is_empty() && suggested(&e).is_empty());
+    }
+
+    #[test]
+    fn rows_say_how_an_object_came_about_unless_its_value_says_it_all() {
+        let mut e = Editor::new("s", empty(), paper());
+        for s in ["a = Schieberegler(0, 5, 1)", "A = (1, 2)", "f(x) = a x^2", "g(x) = x + 2", "Schneide(f, g)", "h = Ableitung(f)", "k = 1"] {
+            enter(&mut e, s);
+        }
+        // A mistake (as it can come from another device).
+        e.plot.objs[7].def = "k = q + 1".into();
+        let known: HashSet<String> = e.plot.objs.iter().map(|o| o.name()).collect();
+        let vals = e.plot.values();
+        let lines: Vec<(String, Option<String>)> = e.plot.objs.iter().zip(&vals).map(|(o, v)| (listing(o, v), row_definition(o, v, &known))).collect();
+        assert_eq!(
+            lines,
+            vec![
+                ("a = 1".to_string(), None),
+                ("A = (1 | 2)".to_string(), None),
+                ("f(x) = x²".to_string(), Some("a x²".to_string())),
+                ("g(x) = x + 2".to_string(), None),
+                ("B = (−1 | 1)".to_string(), Some("Schneide(f, g, 1)".to_string())),
+                ("C = (2 | 4)".to_string(), Some("Schneide(f, g, 2)".to_string())),
+                ("h(x) = 2x".to_string(), Some("Ableitung(f)".to_string())),
+                ("k = q + 1".to_string(), None),
+            ],
+            "a slider, a free point and a function of its own say it with their value; a mistake shows as typed"
+        );
+        assert!(vals[7].is_err());
+    }
+
+    #[test]
+    fn the_selected_object_is_drawn_bolder_in_the_preview_only() {
+        let mut e = Editor::new("s", empty(), paper());
+        enter(&mut e, "f(x) = x^2 - 1");
+        enter(&mut e, "A = (1, 2)");
+        enter(&mut e, "g(x) = x");
+        e.plot.objs[2].style.width = 2.0;
+        let p = e.plot.clone();
+        let size = point_size(&p);
+        let width = |q: &Plot, color: u32| look(q).iter().filter(|(b, _)| b.color == color).map(|(b, _)| b.width).fold(0.0f32, f32::max);
+        for (i, w, s) in [(0, p.width * 2.2, size * 1.4), (1, p.width * 2.2, size * 1.4), (2, 4.4, size * 1.4)] {
+            let h = highlighted(&p, Some(i));
+            assert!((h.objs[i].style.width - w).abs() < 1e-5 && (h.objs[i].style.size - s).abs() < 1e-5, "{:?}", h.objs[i].style);
+            for j in (0..3).filter(|&j| j != i) {
+                assert_eq!(h.objs[j], p.objs[j], "the others as they are");
+            }
+        }
+        // The curve really is drawn wider; nothing selected: as it is.
+        let solo = empty().add("f(x) = x^2 - 1").unwrap();
+        let f = solo.objs[0].style.color;
+        assert!(width(&highlighted(&solo, Some(0)), f) > width(&solo, f) * 2.0);
+        assert_eq!(highlighted(&p, None), p);
+        // Selecting changes nothing of what is stored.
+        e.update(Msg::Pick(p.objs[0].id.clone()));
+        assert_eq!(e.plot, p);
+        let Reply::Apply(stored) = e.update(Msg::Ok) else { panic!() };
+        assert_eq!(stored.objs, p.objs);
+    }
+
+    #[test]
+    fn the_view_goes_back_to_how_it_was() {
+        let mut e = Editor::new("s", empty().add("x^2").unwrap(), paper());
+        assert!(!e.view_changed());
+        e.update(Msg::Range(0, "-10".into()));
+        e.update(Msg::FitY);
+        assert!(e.view_changed());
+        e.update(Msg::ResetView);
+        assert!(!e.view_changed());
+        assert_eq!((e.plot.x_min, e.plot.x_max, e.plot.y_min, e.plot.y_max), (-6.0, 6.0, -4.0, 4.0));
+        assert_eq!(e.ranges.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(), vec!["-6", "6", "-4", "4"]);
+        // Also from a half-typed range, and in π when the x axis is.
+        e.update(Msg::Pi(true));
+        e.update(Msg::Range(1, "".into()));
+        assert!(e.view_changed() && e.result().is_err());
+        e.update(Msg::ResetView);
+        assert!(e.result().is_ok());
+        assert_eq!((e.plot.x_min, e.plot.x_max), (-6.0, 6.0));
+        assert!(e.plot.pi, "only the ranges go back");
     }
 
     #[test]

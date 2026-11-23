@@ -381,6 +381,9 @@ pub struct FfiObjInfo {
     pub slider_value: Option<f64>,
     /// "f(x) = 0,5x² − 3", "A = (1 | 2)", "g: y = 2x + 1": the object as GeoGebra lists it.
     pub shown: String,
+    /// How it came about ("Schneide(f, c, 1)", "f'(x)"), for objects that depend on others;
+    /// empty for free ones, where the value says it all.
+    pub definition: String,
 }
 
 /// A plot as ink (page points), ready to draw like strokes.
@@ -398,6 +401,7 @@ pub fn plot_info(plot: FfiPlot) -> Vec<FfiObjInfo> {
     use n0te_core::plot::{Kind, Val, format_val, free_point, moved_on};
     let p: n0te_core::plot::Plot = plot.into();
     let vals = p.values();
+    let known: std::collections::HashSet<String> = p.objs.iter().map(|o| o.name()).collect();
     p.objs
         .iter()
         .zip(vals)
@@ -443,6 +447,7 @@ pub fn plot_info(plot: FfiPlot) -> Vec<FfiObjInfo> {
                     (Ok(Val::Num(x)), Some(_)) => Some(*x),
                     _ => None,
                 },
+                definition: if o.style.slider.is_some() { String::new() } else { n0te_core::plot::definition(&o.def, &known).unwrap_or_default() },
                 value,
                 error: v.err(),
                 shown,

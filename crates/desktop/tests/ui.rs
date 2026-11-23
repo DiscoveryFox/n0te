@@ -1186,6 +1186,14 @@ fn clicking_a_plot_opens_its_panel_and_the_input_line_adds_named_objects() {
     assert!(h.find("f(x) = 2").is_some(), "its row");
     let green = h.frame_rgba().0.chunks_exact(4).filter(|p| is_curve(p)).count();
     assert!(green > 300, "the preview shows the curve: {green} green pixels");
+    // Selected, it is drawn bolder there (only there: the plot stays as it is).
+    let f = panel(&h).plot.objs[0].id.clone();
+    h.message(Message::Plot(n0te_desktop::plots::Msg::Pick(f)));
+    let bold = h.frame_rgba().0.chunks_exact(4).filter(|p| is_curve(p)).count();
+    assert!(bold as f32 > green as f32 * 1.6, "the selected curve stands out: {green} -> {bold} green pixels");
+    assert_eq!(panel(&h).plot, stored_plots(&root, &nb, &sheet)[0]);
+    h.message(Message::Plot(n0te_desktop::plots::Msg::Tab(n0te_desktop::plots::Tab::Graphics)));
+    h.task(n0te_desktop::plots::focus(n0te_desktop::plots::input_id(), None));
     // The cursor is in the input line: a point, a function, where they meet.
     assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::input_id()));
     for s in ["A = (1|2)", "x^2", "Schneide(f, g)"] {
@@ -1200,6 +1208,9 @@ fn clicking_a_plot_opens_its_panel_and_the_input_line_adds_named_objects() {
     for row in ["A = (1 | 2)", "g(x) = x²", "B = (−1,41 | 2)", "C = (1,41 | 2)"] {
         assert!(h.find(row).is_some(), "{row} is listed");
     }
+    // Under a point's value, how it came about; not under what its value says.
+    assert!(h.find("Schneide(f, g, 1)").is_some() && h.find("Schneide(f, g, 2)").is_some());
+    assert!(h.find("A = (1|2)").is_none() && h.find("g = x^2").is_none(), "no definitions as typed");
     let ok = h.find("OK").expect("the OK button");
     h.click(ok.center());
     assert!(h.app.plot_edit.is_none(), "OK closes the panel");
@@ -1226,9 +1237,11 @@ fn a_mistake_is_said_rows_edit_and_esc_and_loeschen_work() {
     assert!(h.app.plot_edit.is_some(), "OK doesn't close it");
     assert_eq!(stored_plots(&root, &nb, &sheet)[0], before, "nothing stored");
     h.message(Message::Plot(Msg::Input(String::new())));
+    assert!(h.find("×").is_none(), "no × while nothing is selected");
     // A click on a row: its definition to edit, the cursor in it; Enter takes it.
     let row = h.find("f(x) = 2").expect("the row");
     h.click(row.center());
+    assert!(h.find("×").is_some(), "the selected row can be deleted");
     let e = panel(&h);
     assert_eq!(e.editing.as_ref().map(|r| r.text.as_str()), Some("f(x) = 2"));
     assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::edit_id()));
@@ -1314,6 +1327,79 @@ fn inserting_from_the_palette_puts_an_empty_construction_on_the_squares() {
     h.click(ok.center());
     assert!(h.app.plot_edit.is_none());
     assert_eq!(defs(&stored_plots(&root, &nb, &sheet)[0]), vec!["f = sin(x)", "g = Tangente(0, f)"]);
+}
+
+#[test]
+fn typing_a_command_suggests_it_tab_takes_it_and_esc_hides_it() {
+    use iced::keyboard::key::Named;
+    let (mut h, root, nb, sheet) = plot_page("plotsuggest", n0te_core::notebook::Background::Blank, true);
+    let id = stored_plots(&root, &nb, &sheet)[0].id.clone();
+    h.message(Message::EditPlot(sheet.clone(), id));
+    let names = |h: &Harness| panel(h).suggestions().iter().map(|s| s.name).collect::<Vec<_>>();
+    let input = |h: &mut Harness| h.bounds_of(n0te_desktop::plots::input_id());
+    h.type_text("x^2");
+    h.press(Named::Enter);
+    // Two letters of a command: the commands that fit, under the line in place of the buttons.
+    h.type_text("S = Sch");
+    assert_eq!(names(&h), vec!["Schneide", "Schieberegler"]);
+    assert!(h.find("Schneide").is_some() && h.find("die Schnittpunkte").is_some(), "shown with what they make");
+    assert!(h.find(n0te_desktop::theme::cased("Punkt").as_str()).is_none(), "the buttons make room");
+    // Tab takes the first: its usage with the example arguments selected, typing replaces them.
+    h.press(Named::Tab);
+    assert_eq!(panel(&h).input, "S = Schneide(f, g)");
+    assert_eq!(h.find(iced_test::selector::is_focused()), input(&mut h), "the cursor stays in the line");
+    h.type_text("g, f");
+    assert_eq!(panel(&h).input, "S = Schneide(g, f)");
+    assert!(names(&h).is_empty());
+    h.press(Named::Enter);
+    let d = defs(&panel(&h).plot);
+    assert_eq!(&d[2..], ["S_1 = Schneide(g, f, 1)", "S_2 = Schneide(g, f, 2)"], "Enter adds it");
+    // In the middle of the line: the word at the cursor; a click takes a suggestion.
+    h.type_text("Tangente()");
+    h.press(Named::ArrowLeft);
+    h.type_text("Ab");
+    assert_eq!((panel(&h).input.as_str(), names(&h)), ("Tangente(Ab)", vec!["Ableitung", "Abstand"]));
+    let derivative = h.find("Ableitung").expect("the suggestion");
+    h.click(derivative.center());
+    assert_eq!(panel(&h).input, "Tangente(Ableitung(f))");
+    h.type_text("g");
+    assert_eq!(panel(&h).input, "Tangente(Ableitung(g))", "the cursor is back in the line, f selected");
+    // Esc hides them first (the line keeps the cursor and what it says), then closes the panel.
+    h.message(Message::Plot(n0te_desktop::plots::Msg::Input(String::new())));
+    h.type_text("Abs");
+    assert_eq!(names(&h), vec!["Abstand"]);
+    h.press(Named::Escape);
+    assert!(h.app.plot_edit.is_some() && names(&h).is_empty(), "Esc hides the suggestions");
+    assert_eq!(panel(&h).input, "Abs");
+    assert_eq!(h.find(iced_test::selector::is_focused()), input(&mut h));
+    assert!(h.find(n0te_desktop::theme::cased("Punkt").as_str()).is_some(), "the buttons are back");
+    h.press(Named::Escape);
+    assert!(h.app.plot_edit.is_none(), "then Esc closes the panel");
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0].objs.len(), 1, "nothing stored");
+}
+
+#[test]
+fn ansicht_zuruecksetzen_brings_the_ranges_back() {
+    use n0te_desktop::plots::{Msg, Tab};
+    let (mut h, root, nb, sheet) = plot_page("plotreset", n0te_core::notebook::Background::Blank, true);
+    let before = stored_plots(&root, &nb, &sheet)[0].clone();
+    h.message(Message::EditPlot(sheet.clone(), before.id.clone()));
+    h.message(Message::Plot(Msg::Tab(Tab::Graphics)));
+    let label = n0te_desktop::theme::cased("Ansicht zurücksetzen");
+    assert!(h.find(label.as_str()).is_none(), "nothing to reset yet");
+    h.message(Message::Plot(Msg::Range(0, "-20".into())));
+    h.message(Message::Plot(Msg::EqualUnits));
+    let p = &panel(&h).plot;
+    assert!(p.x_min == -20.0 && p.y_max != before.y_max, "{p:?}");
+    let reset = h.find(label.as_str()).expect("the button, now that the view changed");
+    h.click(reset.center());
+    let p = &panel(&h).plot;
+    assert_eq!((p.x_min, p.x_max, p.y_min, p.y_max), (before.x_min, before.x_max, before.y_min, before.y_max));
+    assert_eq!(panel(&h).ranges.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(), vec!["-6", "6", "-4", "4"]);
+    assert!(h.find(label.as_str()).is_none(), "and goes");
+    h.message(Message::Plot(Msg::Ok));
+    assert!(h.app.plot_edit.is_none());
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], before, "nothing changed");
 }
 
 #[test]

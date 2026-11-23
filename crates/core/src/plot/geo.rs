@@ -1687,6 +1687,89 @@ pub fn moved_point(def: &str, x: f64, y: f64) -> String {
     format!("{name} = ({}, {})", fmt_plain(x), fmt_plain(y))
 }
 
+/// How an object came about, written like GeoGebra lists it under the value ("Schneide(f, c, 1)",
+/// "f'(x)", "k sin(x)"); None for a free object (a number, a point, a function or equation of
+/// its own), where the value says it all. `known`: the names of the construction.
+pub fn definition(def: &str, known: &HashSet<String>) -> Option<String> {
+    let input = lang::parse_input(def, known).ok()?;
+    let own = input.name.clone().unwrap_or_default();
+    let mut refs = Vec::new();
+    refs_of(&input, &mut refs);
+    let command = match &input.body {
+        Body::Expr(Node::Call(c, _, _)) => lang::command(c).filter(|c| !matches!(*c, "text" | "slider")),
+        _ => None,
+    };
+    if command.is_none() && !refs.iter().any(|r| *r != own && known.contains(r)) {
+        return None;
+    }
+    Some(match &input.body {
+        Body::Expr(n) => pretty(n, 0),
+        Body::Equation(l, r) => format!("{} = {}", pretty(l, 0), pretty(r, 0)),
+    })
+}
+
+/// A parsed input written out for reading: German decimal comma, ² ³, implicit products
+/// (2x, k sin(x)), √, π, (a | b).
+fn pretty(n: &Node, ctx: u8) -> String {
+    let atom = |n: &Node| matches!(n, Node::Num(_) | Node::Var(_) | Node::Name(_) | Node::Call(..) | Node::Point(..) | Node::List(_) | Node::Text(_));
+    let (s, prec) = match n {
+        Node::Num(v) => {
+            let t = fmt_plain(*v).replace('.', ",");
+            (if t.starts_with('-') { t.replacen('-', "−", 1) } else { t }, 5)
+        }
+        Node::Var(c) => (c.to_string(), 5),
+        Node::Name(s) => (if s == "pi" { "π".into() } else { s.clone() }, 5),
+        Node::Neg(a) => (format!("−{}", pretty(a, 3)), 3),
+        Node::Bin(Op::Add, a, b) => match &**b {
+            Node::Neg(c) => (format!("{} − {}", pretty(a, 1), pretty(c, 2)), 1),
+            _ => (format!("{} + {}", pretty(a, 1), pretty(b, 1)), 1),
+        },
+        Node::Bin(Op::Sub, a, b) => (format!("{} − {}", pretty(a, 1), pretty(b, 2)), 1),
+        Node::Bin(Op::Mul, a, b) => {
+            let (l, r) = (pretty(a, 2), pretty(b, 2));
+            let letter_first = r.starts_with(|c: char| c.is_alphabetic() || c == '(' || c == '√' || c == 'π');
+            let tight = matches!(**a, Node::Num(_)) && letter_first && matches!(**b, Node::Var(_) | Node::Bin(Op::Pow, ..) | Node::Name(_));
+            let spaced = matches!(**a, Node::Num(_) | Node::Name(_) | Node::Var(_)) && letter_first && (atom(b) || matches!(**b, Node::Bin(Op::Pow, ..)));
+            (if tight { format!("{l}{r}") } else if spaced { format!("{l} {r}") } else { format!("{l} · {r}") }, 2)
+        }
+        Node::Bin(Op::Div, a, b) => (format!("{} / {}", pretty(a, 2), pretty(b, 3)), 2),
+        Node::Bin(Op::Pow, a, b) => {
+            let base = pretty(a, 5);
+            (match **b {
+                Node::Num(e) if e == 2.0 => format!("{base}²"),
+                Node::Num(e) if e == 3.0 => format!("{base}³"),
+                _ => format!("{base}^{}", pretty(b, 5)),
+            }, 4)
+        }
+        Node::Call(name, primes, args) => {
+            let list = args.iter().map(|a| pretty(a, 0)).collect::<Vec<_>>().join(", ");
+            (match name.to_lowercase().as_str() {
+                "sqrt" => format!("√({list})"),
+                "abs" => format!("|{list}|"),
+                _ => format!("{name}{}({list})", "'".repeat(*primes as usize)),
+            }, 5)
+        }
+        Node::Point(a, b) => (format!("({} | {})", pretty(a, 0), pretty(b, 0)), 5),
+        Node::Chain(items, cmps) => {
+            let mut out = pretty(&items[0], 1);
+            for (c, it) in cmps.iter().zip(&items[1..]) {
+                let sym = match c {
+                    Cmp::Lt => "<",
+                    Cmp::Le => "≤",
+                    Cmp::Gt => ">",
+                    Cmp::Ge => "≥",
+                    Cmp::Eq => "=",
+                };
+                out = format!("{out} {sym} {}", pretty(it, 1));
+            }
+            (out, 0)
+        }
+        Node::Text(t) => (format!("\"{t}\""), 5),
+        Node::List(items) => (format!("{{{}}}", items.iter().map(|a| pretty(a, 0)).collect::<Vec<_>>().join(", ")), 5),
+    };
+    if prec < ctx { format!("({s})") } else { s }
+}
+
 /// A point on an object (Punkt(f, 1.5)): its definition with the place on the object changed.
 pub fn moved_on(def: &str, t: f64) -> Option<String> {
     let eq = def.find('=')?;
@@ -1702,6 +1785,24 @@ pub fn moved_on(def: &str, t: f64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn definitions_show_how_dependent_objects_came_about() {
+        let known: HashSet<String> = ["f", "g", "c", "A", "B", "k", "p", "h"].iter().map(|s| s.to_string()).collect();
+        let d = |s: &str| definition(s, &known);
+        assert_eq!(d("A = (1, 1)"), None, "free: the value says it");
+        assert_eq!(d("f(x) = 0.25x^3-2x"), None);
+        assert_eq!(d("g: y = 2x + 1"), None);
+        assert_eq!(d("k = 4.5"), None);
+        assert_eq!(d("t = Text(\"Hallo\")"), None);
+        assert_eq!(d("B = Schneide(f,c, 1)").as_deref(), Some("Schneide(f, c, 1)"));
+        assert_eq!(d("g(x) = f'(x)").as_deref(), Some("f'(x)"));
+        assert_eq!(d("p(x)=k*sin(x)").as_deref(), Some("k sin(x)"));
+        assert_eq!(d("h(x) = 0.5f(x) + k x^2 - 1").as_deref(), Some("0,5 f(x) + k x² − 1"));
+        assert_eq!(d("c = Kreis((0,0), 3)").as_deref(), Some("Kreis((0 | 0), 3)"), "a command, even without objects");
+        assert_eq!(d("h = Gerade(A, B)").as_deref(), Some("Gerade(A, B)"));
+        assert_eq!(d("p(x) = sqrt(x - k) / (2 + k)").as_deref(), Some("√(x − k) / (2 + k)"));
+    }
+
     use super::*;
 
     fn obj(def: &str) -> Obj {

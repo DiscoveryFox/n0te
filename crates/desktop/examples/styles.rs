@@ -2,7 +2,8 @@
 //! window): library, settings, export, the page panel, a turned page, the outline with
 //! headings, search results and a found spot lighting up, a page with coordinate systems
 //! (constructions: a triangle with its circumcircle, a function with a tangent and a slider) and
-//! the panel for them (on the GPU renderer if there is one: the software one draws no ink).
+//! the panel for them, also with commands suggested while one is typed (on the GPU renderer if
+//! there is one: the software one draws no ink).
 //!
 //!   cargo run --profile fast -p n0te-desktop --example styles -- <out-dir> [theme ids…]
 
@@ -122,6 +123,10 @@ fn main() {
         g.message(Message::Plot(Msg::InputSubmit));
         g.events(&[]);
         g.screenshot(out.join(format!("{}-8d-plot-mistake.png", t.id)));
+        // A command being typed: the commands that fit under the line.
+        g.message(Message::Plot(Msg::Input("S = Mi".into())));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8j-plot-suggest.png", t.id)));
         g.message(Message::Plot(Msg::Input(String::new())));
         let a = g.app.plot_edit.as_ref().map(|e| e.plot.objs[0].id.clone()).unwrap();
         g.message(Message::Plot(Msg::Edit(a.clone())));
@@ -131,6 +136,7 @@ fn main() {
         g.message(Message::Plot(Msg::Escape));
         g.message(Message::Plot(Msg::AskRemove(a)));
         g.message(Message::Plot(Msg::Tab(Tab::Graphics)));
+        g.message(Message::Plot(Msg::Range(1, "8".into())));
         g.events(&[]);
         g.screenshot(out.join(format!("{}-8h-plot-delete-graphics.png", t.id)));
         g.message(Message::Plot(Msg::Cancel));

@@ -783,6 +783,8 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
     let gap_of = |o: &Obj| (cap * 0.95 * (1.0 - o.style.fill.clamp(0.0, 1.0) * 0.62)).max(1.6);
     let mut labels: Vec<Label> = Vec::new();
     let mut ink: Vec<(f32, f32)> = Vec::new();
+    // Where words are written already (axis numbers and names, sliders, texts): labels keep off.
+    let mut reserved: Vec<(f32, f32, f32, f32)> = Vec::new();
     // Fills first: areas, polygons, circles, angles.
     for (i, o) in p.objs.iter().enumerate() {
         let Ok(v) = &vals[i] else { continue };
@@ -882,6 +884,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
             }
             let tw = text_width(t, cap);
             let shift = if t.starts_with('-') { text_width("-", cap) * 0.5 + 0.08 * cap } else { 0.0 };
+            reserved.push((x - tw / 2.0 - shift, below, x + tw / 2.0 - shift, below + cap * 1.3));
             for s in hand.write(t, x - tw / 2.0 - shift, below, cap) {
                 out.push((label, s));
             }
@@ -898,16 +901,21 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                 continue;
             }
             let tw = text_width(t, cap);
+            reserved.push((ax_x - tick - gap - tw, y - cap / 2.0, ax_x - tick - gap, y + cap * 0.8));
             for s in hand.write(t, ax_x - tick - gap - tw, y - cap / 2.0, cap) {
                 out.push((label, s));
             }
         }
         let xn = if p.x_name.trim().is_empty() { "x" } else { p.x_name.trim() };
         let yn = if p.y_name.trim().is_empty() { "y" } else { p.y_name.trim() };
-        for s in hand.write(xn, tip_x.0 - text_width(xn, cap) - cap * 0.1, ax_y - tick - gap * 0.6 - cap, cap) {
+        let (nx, ny) = (tip_x.0 - text_width(xn, cap) - cap * 0.1, ax_y - tick - gap * 0.6 - cap);
+        reserved.push((nx, ny, nx + text_width(xn, cap), ny + cap * 1.3));
+        for s in hand.write(xn, nx, ny, cap) {
             out.push((label, s));
         }
-        for s in hand.write(yn, tip_y.0 + tick + gap, tip_y.1 - cap * 0.3, cap) {
+        let (mx, my) = (tip_y.0 + tick + gap, tip_y.1 - cap * 0.3);
+        reserved.push((mx, my, mx + text_width(yn, cap), my + cap * 1.3));
+        for s in hand.write(yn, mx, my, cap) {
             out.push((label, s));
         }
     }
@@ -1193,6 +1201,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
             let kb = Brush { width: cap * 0.75, thinning: 0.0, color: o.style.color, kind: KIND_PEN };
             out.push((kb, hand.stroke(&[(kx - 0.02, sy0), (kx + 0.02, sy0)], 0.0)));
             let text = format!("{} = {}", o.name(), fmt_num(*value));
+            reserved.push((sx0, sy0 - cap * 1.9, sx1.max(sx0 + text_width(&text, cap * 0.85)), sy0 + cap * 0.5));
             for st in hand.write(&text, sx0, sy0 - cap * 1.9, cap * 0.85) {
                 out.push((Brush { color: o.style.color, ..label }, st));
             }
@@ -1202,17 +1211,20 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
             && shown(i)
         {
             let (fx, fy) = o.style.at.unwrap_or((0.04, 0.06));
-            for st in hand.write(t, p.x + fx * p.w, p.y + fy * p.h, cap) {
+            let (tx, ty) = (p.x + fx * p.w, p.y + fy * p.h);
+            reserved.push((tx, ty, tx + text_width(t, cap), ty + cap * 1.3));
+            for st in hand.write(t, tx, ty, cap) {
                 out.push((Brush { color: o.style.color, ..label }, st));
             }
         }
     }
     // Labels: points first (they sit right by their point), then the rest.
-    let mut placed: Vec<(f32, f32, f32, f32)> = Vec::new();
+    let mut placed = reserved;
+    let words = placed.len();
     for (l, pc) in pt_labels.iter().map(|l| (l, cap * 0.85)).chain(labels.iter().map(|l| (l, cap))) {
         let tw = text_width(&l.text, pc);
         let lb = Brush { width: label.width * 0.95, color: l.color, ..label };
-        if let Some((lx, ly)) = spot(l.x, l.y, tw, pc, l.off.max(cap * 0.2), bx, &placed, &ink) {
+        if let Some((lx, ly)) = spot(l.x, l.y, tw, pc, l.off.max(cap * 0.2), bx, &placed, words, &ink) {
             placed.push((lx, ly, lx + tw, ly + pc * 1.3));
             for s in hand.write(&l.text, lx, ly, pc) {
                 out.push((lb, s));
@@ -1244,12 +1256,18 @@ fn span(piece: &[(f32, f32)]) -> f32 {
 }
 
 /// Where to write a label of width `tw` at a point: up-right of it, else up-left, down-right,
-/// down-left — the first spot inside the box that covers no label already written and no ink
-/// (`ink`: points of the curves and axes); failing that, the one that touches the least ink.
+/// down-left (then the same a line further out) — the first spot inside the box that covers
+/// no words already written and no ink (`ink`: points of the curves and axes); failing that,
+/// the one that touches the least ink. The first `words` of `placed` are axis numbers and
+/// such, not labels.
 #[allow(clippy::too_many_arguments)]
-fn spot(x: f32, y: f32, tw: f32, cap: f32, off: f32, bx: (f32, f32, f32, f32), placed: &[(f32, f32, f32, f32)], ink: &[(f32, f32)]) -> Option<(f32, f32)> {
+fn spot(x: f32, y: f32, tw: f32, cap: f32, off: f32, bx: (f32, f32, f32, f32), placed: &[(f32, f32, f32, f32)], words: usize, ink: &[(f32, f32)]) -> Option<(f32, f32)> {
     let h = cap * 1.3;
-    let cands = [(x + off, y - off - h), (x - off - tw, y - off - h), (x + off, y + off), (x - off - tw, y + off)];
+    let far = off + h * 0.9;
+    let cands = [
+        (x + off, y - off - h), (x - off - tw, y - off - h), (x + off, y + off), (x - off - tw, y + off),
+        (x + off, y - far - h), (x - off - tw, y - far - h), (x + off, y + far), (x - off - tw, y + far),
+    ];
     let inside = |&(lx, ly): &(f32, f32)| lx >= bx.0 && lx + tw <= bx.2 + cap && ly >= bx.1 - cap * 0.5 && ly + h <= bx.3 + cap * 0.5;
     let free = |&(lx, ly): &(f32, f32)| !placed.iter().any(|r| lx < r.2 && lx + tw > r.0 && ly < r.3 && ly + h > r.1);
     let pad = cap * 0.15;
@@ -1261,7 +1279,7 @@ fn spot(x: f32, y: f32, tw: f32, cap: f32, off: f32, bx: (f32, f32, f32, f32), p
     if let Some(c) = ok.iter().min_by_key(|c| hits(c)) {
         return Some(**c);
     }
-    cands.first().filter(|_| placed.is_empty()).copied()
+    cands.first().filter(|_| placed.len() == words).copied()
 }
 
 #[cfg(test)]

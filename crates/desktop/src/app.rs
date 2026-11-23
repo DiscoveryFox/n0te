@@ -1416,6 +1416,7 @@ impl App {
                 match e.update(m) {
                     Reply::None => {}
                     Reply::Focus(id, at) => return crate::plots::focus(id, at),
+                    Reply::Select(id, from, to) => return crate::plots::select(id, from, to),
                     Reply::Cancel => self.plot_edit = None,
                     Reply::Delete => {
                         if let Some(e) = self.plot_edit.take()
