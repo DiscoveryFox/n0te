@@ -10,7 +10,7 @@ use loro::{Container, ExportMode, LoroDoc, LoroMap, LoroText, LoroValue, UndoMan
 use crate::error::{Error, Result};
 use crate::ids;
 use crate::ink::{self, Brush, InkPoint, Rect};
-use crate::plot::{Area, LineStyle, Plot, PlotFn, PlotPoint};
+use crate::plot::{LabelMode, LineStyle, Obj, Plot, PointStyle, Slider, Snap, Style};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -832,14 +832,11 @@ impl Sheet {
                 y += rows * line_h;
             }
         }
-        // The functions of coordinate systems ("sin" finds the graph of 2sin x), by their name.
+        // The objects of coordinate systems ("sin" finds f(x) = 2sin x, "Schneide" finds S).
         for p in self.plots() {
-            for (i, f) in p.fns.iter().enumerate() {
-                let text = format!("{}(x) = {}", crate::plot::fn_name(i), f.expr.trim());
-                if !f.expr.trim().is_empty()
-                    && let Some(slips) = score(&w, &normalize(&f.expr))
-                {
-                    out.push(Hit { kind: HitKind::Plot, text, x0: p.x, y0: p.y, x1: p.x + p.w, y1: p.y + p.h, slips });
+            for o in &p.objs {
+                if let Some(slips) = score(&w, &normalize(&o.def)) {
+                    out.push(Hit { kind: HitKind::Plot, text: o.def.trim().to_string(), x0: p.x, y0: p.y, x1: p.x + p.w, y1: p.y + p.h, slips });
                 }
             }
         }
@@ -909,61 +906,152 @@ fn map_bool(m: &LoroMap, key: &str) -> Option<bool> {
     }
 }
 
-/// A plot's fields into its map. Functions are one string ("expr␟color␟style␟area␞…"),
-/// points another ("name␟x␟y␞…"): a plot's functions are edited together, in its dialog.
-/// Older apps read the first two fields of a function and skip the keys they don't know.
+/// A plot's fields into its map: the view as keys, each object as an entry of the map "objs"
+/// (its id → "definition␟order␟style"), so two devices editing different objects merge.
 fn write_plot(m: &LoroMap, p: &Plot) -> Result<()> {
-    for (k, v) in [("x", p.x as f64), ("y", p.y as f64), ("w", p.w as f64), ("h", p.h as f64), ("x0", p.x_min), ("x1", p.x_max), ("y0", p.y_min), ("y1", p.y_max), ("color", p.color as f64), ("width", p.width as f64), ("marks", p.marks as f64)] {
+    for (k, v) in [("x", p.x as f64), ("y", p.y as f64), ("w", p.w as f64), ("h", p.h as f64), ("x0", p.x_min), ("x1", p.x_max), ("y0", p.y_min), ("y1", p.y_max), ("color", p.color as f64), ("width", p.width as f64)] {
         m.insert(k, v)?;
     }
-    for (k, v) in [("grid", p.grid), ("clean", p.clean), ("names", p.names), ("pi", p.pi), ("coords", p.coords)] {
+    for (k, v) in [("axes", p.axes), ("grid", p.grid), ("minor", p.minor), ("clean", p.clean), ("pi", p.pi), ("align", p.align), ("interactive", p.interactive)] {
         m.insert(k, v)?;
     }
     let clean = |s: &str| s.replace([SEP_FIELD, SEP_ITEM], " ");
     m.insert("xname", clean(&p.x_name))?;
     m.insert("yname", clean(&p.y_name))?;
-    let fns: Vec<String> = p
-        .fns
-        .iter()
-        .map(|f| {
-            let area = f.area.as_ref().map(|a| format!("{};{};{}", a.from, a.to, a.to_fn.map(|j| j.to_string()).unwrap_or_default())).unwrap_or_default();
-            format!("{}{SEP_FIELD}{:08x}{SEP_FIELD}{}{SEP_FIELD}{}", clean(&f.expr), f.color, f.style.code(), area)
-        })
-        .collect();
-    m.insert("fns", fns.join(&SEP_ITEM.to_string()))?;
-    let pts: Vec<String> = p.points.iter().map(|q| format!("{}{SEP_FIELD}{}{SEP_FIELD}{}", clean(&q.name), q.x, q.y)).collect();
-    m.insert("pts", pts.join(&SEP_ITEM.to_string()))?;
+    m.insert("snap", p.snap.code())?;
+    let objs = m.ensure_mergeable_map("objs")?;
+    let mut keep = std::collections::HashSet::new();
+    for o in &p.objs {
+        let v = format!("{}{SEP_FIELD}{}{SEP_FIELD}{}", clean(&o.def), o.order, encode_style(&o.style));
+        keep.insert(o.id.clone());
+        if map_str(&objs, &o.id).as_deref() != Some(v.as_str()) {
+            objs.insert(&o.id, v)?;
+        }
+    }
+    let mut gone = Vec::new();
+    objs.for_each(|k, _| {
+        if !keep.contains(k) {
+            gone.push(k.to_string());
+        }
+    });
+    for k in gone {
+        objs.delete(&k)?;
+    }
     Ok(())
+}
+
+const SEP_STYLE: char = '\u{1d}';
+
+fn encode_style(s: &Style) -> String {
+    let mut kv: Vec<String> = vec![format!("c={:08x}", s.color)];
+    if s.width > 0.0 {
+        kv.push(format!("w={}", s.width));
+    }
+    if s.line != LineStyle::Solid {
+        kv.push(format!("l={}", s.line.code()));
+    }
+    match s.point {
+        PointStyle::Dot => {}
+        PointStyle::Cross => kv.push("p=cross".into()),
+        PointStyle::Ring => kv.push("p=ring".into()),
+    }
+    if s.size > 0.0 {
+        kv.push(format!("s={}", s.size));
+    }
+    if s.fill > 0.0 {
+        kv.push(format!("f={}", s.fill));
+    }
+    kv.push(format!(
+        "lb={}",
+        match s.label {
+            LabelMode::Off => "off",
+            LabelMode::Name => "name",
+            LabelMode::NameValue => "nv",
+            LabelMode::Value => "val",
+            LabelMode::Caption => "cap",
+        }
+    ));
+    if !s.caption.is_empty() {
+        kv.push(format!("cap={}", s.caption.replace([SEP_STYLE, SEP_FIELD, SEP_ITEM], " ")));
+    }
+    if !s.visible {
+        kv.push("v=0".into());
+    }
+    if s.aux {
+        kv.push("aux=1".into());
+    }
+    if s.fixed {
+        kv.push("fix=1".into());
+    }
+    if let Some(sl) = s.slider {
+        kv.push(format!("sl={},{},{}", sl.min, sl.max, sl.step));
+    }
+    if s.special != 0 {
+        kv.push(format!("sp={}", s.special));
+    }
+    if s.coords {
+        kv.push("co=1".into());
+    }
+    if let Some((x, y)) = s.at {
+        kv.push(format!("at={x},{y}"));
+    }
+    kv.join(&SEP_STYLE.to_string())
+}
+
+fn decode_style(src: &str) -> Style {
+    let mut s = Style::default();
+    for kv in src.split(SEP_STYLE) {
+        let Some((k, v)) = kv.split_once('=') else { continue };
+        let nums = |v: &str| v.split(',').filter_map(|x| x.parse::<f64>().ok()).collect::<Vec<_>>();
+        match k {
+            "c" => s.color = u32::from_str_radix(v, 16).unwrap_or(s.color),
+            "w" => s.width = v.parse().unwrap_or(0.0),
+            "l" => s.line = LineStyle::from_code(v),
+            "p" => {
+                s.point = match v {
+                    "cross" => PointStyle::Cross,
+                    "ring" => PointStyle::Ring,
+                    _ => PointStyle::Dot,
+                }
+            }
+            "s" => s.size = v.parse().unwrap_or(0.0),
+            "f" => s.fill = v.parse().unwrap_or(0.0),
+            "lb" => {
+                s.label = match v {
+                    "name" => LabelMode::Name,
+                    "nv" => LabelMode::NameValue,
+                    "val" => LabelMode::Value,
+                    "cap" => LabelMode::Caption,
+                    _ => LabelMode::Off,
+                }
+            }
+            "cap" => s.caption = v.to_string(),
+            "v" => s.visible = v != "0",
+            "aux" => s.aux = v == "1",
+            "fix" => s.fixed = v == "1",
+            "sl" => {
+                let n = nums(v);
+                if n.len() == 3 {
+                    s.slider = Some(Slider { min: n[0], max: n[1], step: n[2] });
+                }
+            }
+            "sp" => s.special = v.parse().unwrap_or(0),
+            "co" => s.coords = v == "1",
+            "at" => {
+                let n = nums(v);
+                if n.len() == 2 {
+                    s.at = Some((n[0] as f32, n[1] as f32));
+                }
+            }
+            _ => {}
+        }
+    }
+    s
 }
 
 fn read_plot(id: &str, m: &LoroMap) -> Plot {
     let f = |k: &str, d: f64| map_f64(m, k).unwrap_or(d);
-    let fns = map_str(m, "fns")
-        .unwrap_or_default()
-        .split(SEP_ITEM)
-        .filter(|s| !s.is_empty())
-        .map(|item| {
-            let mut parts = item.split(SEP_FIELD);
-            let expr = parts.next().unwrap_or("").to_string();
-            let color = parts.next().and_then(|c| u32::from_str_radix(c, 16).ok()).unwrap_or(0xFF20_2428);
-            let style = LineStyle::from_code(parts.next().unwrap_or(""));
-            let area = parts.next().filter(|a| !a.is_empty()).and_then(|a| {
-                let v: Vec<&str> = a.split(';').collect();
-                Some(Area { from: v.first()?.parse().ok()?, to: v.get(1)?.parse().ok()?, to_fn: v.get(2).and_then(|j| j.parse().ok()) })
-            });
-            PlotFn { expr, color, style, area }
-        })
-        .collect();
-    let points = map_str(m, "pts")
-        .unwrap_or_default()
-        .split(SEP_ITEM)
-        .filter(|s| !s.is_empty())
-        .filter_map(|item| {
-            let v: Vec<&str> = item.split(SEP_FIELD).collect();
-            Some(PlotPoint { name: v.first()?.to_string(), x: v.get(1)?.parse().ok()?, y: v.get(2)?.parse().ok()? })
-        })
-        .collect();
-    Plot {
+    let mut p = Plot {
         id: id.to_string(),
         x: f("x", 0.0) as f32,
         y: f("y", 0.0) as f32,
@@ -973,19 +1061,90 @@ fn read_plot(id: &str, m: &LoroMap) -> Plot {
         x_max: f("x1", 5.0),
         y_min: f("y0", -5.0),
         y_max: f("y1", 5.0),
+        axes: map_bool(m, "axes").unwrap_or(true),
         grid: map_bool(m, "grid").unwrap_or(false),
+        minor: map_bool(m, "minor").unwrap_or(false),
         clean: map_bool(m, "clean").unwrap_or(false),
         color: f("color", 0xFF20_2428u32 as f64) as u32,
         width: f("width", 1.2) as f32,
-        fns,
-        names: map_bool(m, "names").unwrap_or(false),
         pi: map_bool(m, "pi").unwrap_or(false),
         x_name: map_str(m, "xname").unwrap_or_default(),
         y_name: map_str(m, "yname").unwrap_or_default(),
-        marks: f("marks", 0.0) as u8,
-        coords: map_bool(m, "coords").unwrap_or(false),
-        points,
+        snap: Snap::from_code(&map_str(m, "snap").unwrap_or_default()),
+        align: map_bool(m, "align").unwrap_or(true),
+        interactive: map_bool(m, "interactive").unwrap_or(false),
+        objs: Vec::new(),
+    };
+    if let Some(ValueOrContainer::Container(Container::Map(objs))) = m.get("objs") {
+        objs.for_each(|k, v| {
+            if let ValueOrContainer::Value(LoroValue::String(s)) = v {
+                let mut parts = s.split(SEP_FIELD);
+                let def = parts.next().unwrap_or("").to_string();
+                let order = parts.next().and_then(|o| o.parse().ok()).unwrap_or(0.0);
+                let style = decode_style(parts.next().unwrap_or(""));
+                p.objs.push(Obj { id: k.to_string(), def, style, order });
+            }
+        });
+        p.objs.sort_by(|a, b| a.order.total_cmp(&b.order).then(a.id.cmp(&b.id)));
+    } else {
+        p.objs = legacy_objs(id, m);
     }
+    p
+}
+
+/// A plot of n0te 0.22–0.23 (functions in one string, marks, points) as objects.
+fn legacy_objs(id: &str, m: &LoroMap) -> Vec<Obj> {
+    let names = ["f", "g", "h", "k", "p", "q", "r", "s"];
+    let marks = map_f64(m, "marks").unwrap_or(0.0) as u8;
+    let coords = map_bool(m, "coords").unwrap_or(false);
+    let named = map_bool(m, "names").unwrap_or(false);
+    let mut out = Vec::new();
+    let mut order = 0.0;
+    let mut next = |out: &mut Vec<Obj>, def: String, style: Style| {
+        order += 1.0;
+        out.push(Obj { id: format!("{id}-{}", out.len()), def, style, order });
+    };
+    let mut areas = Vec::new();
+    for (i, item) in map_str(m, "fns").unwrap_or_default().split(SEP_ITEM).filter(|s| !s.is_empty()).enumerate() {
+        let mut parts = item.split(SEP_FIELD);
+        let expr = parts.next().unwrap_or("").trim().to_string();
+        let color = parts.next().and_then(|c| u32::from_str_radix(c, 16).ok()).unwrap_or(0xFF20_2428);
+        let line = LineStyle::from_code(parts.next().unwrap_or(""));
+        let area = parts.next().filter(|a| !a.is_empty()).map(|a| a.split(';').map(|x| x.to_string()).collect::<Vec<_>>());
+        let n = names.get(i).copied().unwrap_or("f");
+        if expr.is_empty() {
+            continue;
+        }
+        let def = match expr.split_once('=') {
+            Some((lhs, rhs)) if lhs.trim().eq_ignore_ascii_case("x") => format!("{n}: x = {}", rhs.trim()),
+            Some((_, rhs)) => format!("{n}(x) = {}", rhs.trim()),
+            None => format!("{n}(x) = {expr}"),
+        };
+        let style = Style { color, line, special: marks, coords, label: if named { LabelMode::Name } else { LabelMode::Off }, ..Style::default() };
+        next(&mut out, def, style);
+        if let Some(a) = area
+            && a.len() >= 2
+        {
+            areas.push((n.to_string(), a, color));
+        }
+    }
+    for (k, (n, a, color)) in areas.into_iter().enumerate() {
+        let to = a.get(2).and_then(|j| j.parse::<usize>().ok()).and_then(|j| names.get(j));
+        let def = match to {
+            Some(g) => format!("fläche{} = IntegralZwischen({n}, {g}, {}, {})", k + 1, a[0], a[1]),
+            None => format!("fläche{} = Integral({n}, {}, {})", k + 1, a[0], a[1]),
+        };
+        let label = if coords { LabelMode::Value } else { LabelMode::Off };
+        next(&mut out, def, Style { color, fill: 0.5, label, ..Style::default() });
+    }
+    for item in map_str(m, "pts").unwrap_or_default().split(SEP_ITEM).filter(|s| !s.is_empty()) {
+        let v: Vec<&str> = item.split(SEP_FIELD).collect();
+        if v.len() == 3 {
+            let style = Style { color: 0xFF15_65C0, label: if coords { LabelMode::NameValue } else { LabelMode::Name }, ..Style::default() };
+            next(&mut out, format!("{} = ({}, {})", v[0], v[1], v[2]), style);
+        }
+    }
+    out
 }
 
 fn map_f64(m: &LoroMap, key: &str) -> Option<f64> {
@@ -1262,14 +1421,19 @@ mod tests {
     fn plots_are_boxes_that_keep_their_settings() {
         let s = Sheet::create(1).unwrap();
         let mut p = Plot::centered(100.0, 200.0, 240.0, 160.0, 20.0, 0xFF22_2222, 1.2);
-        p.fns = vec![PlotFn::new("x^2 - 1", 0xFFD0_2020), PlotFn { style: LineStyle::Dashed, area: Some(Area { from: -1.0, to: 2.5, to_fn: Some(0) }), ..PlotFn::new("sin x", 0xFF20_20D0) }];
+        for i in ["A = (1, 2)", "f(x) = x^2 - 1", "g(x) = sin(x)", "S = Schneide(f, g)", "a = Schieberegler(0, 5, 0.5)"] {
+            p = p.add(i).unwrap();
+        }
+        p.objs[1].style.line = LineStyle::Dashed;
+        p.objs[1].style.special = crate::plot::MARK_ZEROS;
+        p.objs[2].style.label = LabelMode::NameValue;
+        p.objs[2].style.caption = "Welle; hoch".into();
+        p.objs[0].style.at = Some((0.25, 0.5));
         p.grid = true;
-        p.names = true;
         p.pi = true;
         p.x_name = "t".into();
-        p.marks = crate::plot::MARK_ZEROS | crate::plot::MARK_CROSSINGS;
-        p.coords = true;
-        p.points = vec![PlotPoint { name: "A".into(), x: 1.5, y: -0.25 }];
+        p.snap = Snap::Grid;
+        p.interactive = true;
         let id = s.add_plot(&p).unwrap();
         let got = s.plots();
         assert_eq!(got.len(), 1);
@@ -1286,28 +1450,46 @@ mod tests {
         s.shift_below(150.0, 30.0).unwrap();
         assert_eq!(s.plots()[0].y, 230.0);
         // Edited in one step, undone in one.
-        let mut e = s.plots()[0].clone();
-        e.fns.truncate(1);
-        e.x_max = 10.0;
+        let e = s.plots()[0].remove(&s.plots()[0].objs[1].id);
+        assert_eq!(e.objs.len(), 3, "f goes and the intersections with it");
         s.set_plot(&e).unwrap();
-        assert_eq!(s.plots()[0].fns.len(), 1);
+        assert_eq!(s.plots()[0].objs.len(), 3);
         s.undo().unwrap();
-        assert_eq!(s.plots()[0].fns.len(), 2);
-        assert_eq!(s.plots()[0].x_max, 6.0);
-        // Its functions are found.
-        let hits = s.search("sin", 595.0);
-        assert_eq!(hits.len(), 1);
-        assert_eq!((hits[0].kind, hits[0].text.as_str()), (crate::search::HitKind::Plot, "g(x) = sin x"));
-        // Drawn as ink for the export; gone with remove; survives a reload.
+        assert_eq!(s.plots()[0].objs.len(), 6);
+        // Its objects are found (each intersection is a point of its own).
+        let hits = s.search("Schneide", 595.0);
+        assert_eq!(hits.len(), 2);
+        assert_eq!((hits[0].kind, hits[0].text.as_str()), (crate::search::HitKind::Plot, "S_1 = Schneide(f, g, 1)"));
+        // Drawn as ink for the export; survives a reload; gone with remove.
         assert!(s.plot_strokes().len() > 20);
         let b = Sheet::load(2, &s.snapshot().unwrap()).unwrap();
-        assert_eq!(b.plots()[0].fns, s.plots()[0].fns);
+        assert_eq!(b.plots()[0].objs, s.plots()[0].objs);
         s.remove(&[id]).unwrap();
         assert!(s.plots().is_empty());
-        // An empty range is no plot.
         let mut bad = p.clone();
         bad.x_max = bad.x_min;
         assert!(s.add_plot(&bad).is_err());
+    }
+
+    #[test]
+    fn plots_of_0_23_become_objects() {
+        let s = Sheet::create(1).unwrap();
+        let m = s.objects.insert_container("old", LoroMap::new()).unwrap();
+        m.insert("kind", "plot").unwrap();
+        for (k, v) in [("x", 10.0), ("y", 20.0), ("w", 240.0), ("h", 160.0), ("x0", -6.0), ("x1", 6.0), ("y0", -4.0), ("y1", 4.0), ("marks", 1.0)] {
+            m.insert(k, v).unwrap();
+        }
+        m.insert("coords", true).unwrap();
+        m.insert("fns", format!("x^2 - 1{SEP_FIELD}ffd02020{SEP_FIELD}dash{SEP_FIELD}-1;1;{SEP_ITEM}f'(x){SEP_FIELD}ff2020d0{SEP_FIELD}{SEP_FIELD}{SEP_ITEM}x = 2{SEP_FIELD}ff202020")).unwrap();
+        m.insert("pts", format!("A{SEP_FIELD}1{SEP_FIELD}2")).unwrap();
+        s.doc.commit();
+        let p = &s.plots()[0];
+        let defs: Vec<&str> = p.objs.iter().map(|o| o.def.as_str()).collect();
+        assert_eq!(defs, vec!["f(x) = x^2 - 1", "g(x) = f'(x)", "h: x = 2", "fläche1 = Integral(f, -1, 1)", "A = (1, 2)"]);
+        assert!(p.errors().iter().all(|e| e.is_none()), "{:?}", p.errors());
+        assert_eq!(p.objs[0].style.line, LineStyle::Dashed);
+        assert_eq!(p.objs[0].style.special, crate::plot::MARK_ZEROS);
+        assert!(p.objs[0].style.coords);
     }
 
     #[test]

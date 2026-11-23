@@ -23,12 +23,39 @@ pub enum Func {
     Sgn,
     Floor,
     Ceil,
+    Round,
+}
+
+/// A comparison (in conditions: Wenn, a domain).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cmp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+}
+
+impl Cmp {
+    pub fn holds(self, a: f64, b: f64) -> bool {
+        match self {
+            Cmp::Lt => a < b,
+            Cmp::Le => a <= b + 1e-12 * (1.0 + b.abs()),
+            Cmp::Gt => a > b,
+            Cmp::Ge => a + 1e-12 * (1.0 + b.abs()) >= b,
+            Cmp::Eq => (a - b).abs() <= 1e-9 * (1.0 + a.abs().max(b.abs())),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Num(f64),
     X,
+    /// The second variable (equations in x and y: circles, any curve).
+    Y,
+    /// If the chain `items[0] ops[0] items[1] …` holds, the first, else the second (NaN: undefined).
+    If(Vec<Expr>, Vec<Cmp>, Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Add(Box<Expr>, Box<Expr>),
     Sub(Box<Expr>, Box<Expr>),
@@ -47,18 +74,32 @@ fn b(e: Expr) -> Box<Expr> {
 impl Expr {
     /// The value at `x` (NaN outside the domain, ±∞ at poles; NaN for an unresolved reference).
     pub fn eval(&self, x: f64) -> f64 {
+        self.eval2(x, f64::NAN)
+    }
+
+    /// The value at (x, y).
+    pub fn eval2(&self, x: f64, y: f64) -> f64 {
         match self {
             Expr::Num(v) => *v,
             Expr::X => x,
-            Expr::Neg(a) => -a.eval(x),
-            Expr::Add(a, b) => a.eval(x) + b.eval(x),
-            Expr::Sub(a, b) => a.eval(x) - b.eval(x),
-            Expr::Mul(a, b) => a.eval(x) * b.eval(x),
-            Expr::Div(a, b) => a.eval(x) / b.eval(x),
-            Expr::Pow(a, b) => pow(a.eval(x), b.eval(x)),
+            Expr::Y => y,
+            Expr::If(items, ops, a, b) => {
+                let vals: Vec<f64> = items.iter().map(|e| e.eval2(x, y)).collect();
+                if vals.iter().all(|v| v.is_finite()) && ops.iter().enumerate().all(|(i, op)| op.holds(vals[i], vals[i + 1])) {
+                    a.eval2(x, y)
+                } else {
+                    b.eval2(x, y)
+                }
+            }
+            Expr::Neg(a) => -a.eval2(x, y),
+            Expr::Add(a, b) => a.eval2(x, y) + b.eval2(x, y),
+            Expr::Sub(a, b) => a.eval2(x, y) - b.eval2(x, y),
+            Expr::Mul(a, b) => a.eval2(x, y) * b.eval2(x, y),
+            Expr::Div(a, b) => a.eval2(x, y) / b.eval2(x, y),
+            Expr::Pow(a, b) => pow(a.eval2(x, y), b.eval2(x, y)),
             Expr::Ref(..) => f64::NAN,
             Expr::Call(f, a) => {
-                let v = a.eval(x);
+                let v = a.eval2(x, y);
                 match f {
                     Func::Sin => v.sin(),
                     Func::Cos => v.cos(),
@@ -86,8 +127,20 @@ impl Expr {
                     }
                     Func::Floor => v.floor(),
                     Func::Ceil => v.ceil(),
+                    Func::Round => v.round(),
                 }
             }
+        }
+    }
+
+    /// Whether it depends on y.
+    pub fn has_y(&self) -> bool {
+        match self {
+            Expr::Y => true,
+            Expr::Num(_) | Expr::X => false,
+            Expr::If(items, _, a, b) => items.iter().any(|e| e.has_y()) || a.has_y() || b.has_y(),
+            Expr::Neg(a) | Expr::Call(_, a) | Expr::Ref(_, _, a) => a.has_y(),
+            Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => a.has_y() || b.has_y(),
         }
     }
 
@@ -95,7 +148,8 @@ impl Expr {
     pub fn has_x(&self) -> bool {
         match self {
             Expr::X => true,
-            Expr::Num(_) => false,
+            Expr::Num(_) | Expr::Y => false,
+            Expr::If(items, _, a, b) => items.iter().any(|e| e.has_x()) || a.has_x() || b.has_x(),
             Expr::Neg(a) | Expr::Call(_, a) => a.has_x(),
             Expr::Ref(_, _, a) => a.has_x(),
             Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => a.has_x() || b.has_x(),
@@ -106,6 +160,8 @@ impl Expr {
     pub fn at(&self, by: &Expr) -> Expr {
         match self {
             Expr::X => by.clone(),
+            Expr::Y => Expr::Y,
+            Expr::If(items, ops, a, c) => Expr::If(items.iter().map(|e| e.at(by)).collect(), ops.clone(), b(a.at(by)), b(c.at(by))),
             Expr::Num(v) => Expr::Num(*v),
             Expr::Neg(a) => Expr::Neg(b(a.at(by))),
             Expr::Add(l, r) => Expr::Add(b(l.at(by)), b(r.at(by))),
@@ -122,8 +178,9 @@ impl Expr {
     pub fn derive(&self) -> Expr {
         use Expr::*;
         let d = match self {
-            Num(_) => Num(0.0),
+            Num(_) | Y => Num(0.0),
             X => Num(1.0),
+            If(items, ops, a, c) => If(items.clone(), ops.clone(), b(a.derive()), b(c.derive())),
             Neg(a) => Neg(b(a.derive())),
             Add(l, r) => Add(b(l.derive()), b(r.derive())),
             Sub(l, r) => Sub(b(l.derive()), b(r.derive())),
@@ -153,7 +210,7 @@ impl Expr {
                     Func::Log => Div(b(Num(1.0)), b(Mul(a.clone(), b(Num(std::f64::consts::LN_10))))),
                     Func::Sqrt => Div(b(Num(1.0)), b(Mul(b(Num(2.0)), b(Call(Func::Sqrt, a.clone()))))),
                     Func::Abs => Call(Func::Sgn, a.clone()),
-                    Func::Sgn | Func::Floor | Func::Ceil => Num(0.0),
+                    Func::Sgn | Func::Floor | Func::Ceil | Func::Round => Num(0.0),
                 };
                 Mul(b(inner), b(da))
             }
@@ -196,7 +253,19 @@ impl Expr {
                     (Some(z), _) | (_, Some(z)) if z == 0.0 => Num(0.0),
                     (Some(o), _) if o == 1.0 => r,
                     (_, Some(o)) if o == 1.0 => l,
-                    _ => Mul(b(l), b(r)),
+                    // The number in front: x·3 → 3x; 0,25·(3x²) → 0,75x².
+                    (None, Some(k)) => Mul(b(Num(k)), b(l)).simplified(),
+                    (Some(k), None) => match r {
+                        Mul(ref a, ref c) if num(a).is_some() => Mul(b(Num(k * num(a).unwrap())), c.clone()).simplified(),
+                        Neg(ref a) => Mul(b(Num(-k)), a.clone()).simplified(),
+                        _ => Mul(b(Num(k)), b(r)),
+                    },
+                    _ => match (&l, &r) {
+                        // (a·u)·v → a·(u·v): the number stays in front.
+                        (Mul(a, u), _) if num(a).is_some() => Mul(a.clone(), b(Mul(u.clone(), b(r.clone())))).simplified(),
+                        (_, Mul(a, v)) if num(a).is_some() => Mul(a.clone(), b(Mul(b(l.clone()), v.clone()))).simplified(),
+                        _ => Mul(b(l), b(r)),
+                    },
                 }
             }
             Div(l, r) => {
@@ -218,11 +287,12 @@ impl Expr {
                 }
             }
             Call(f, a) => match a.simplified() {
-                Num(v) if !matches!(f, Func::Floor | Func::Ceil | Func::Sgn) => Num(Call(*f, b(Num(v))).eval(0.0)),
+                Num(v) if !matches!(f, Func::Floor | Func::Ceil | Func::Sgn | Func::Round) => Num(Call(*f, b(Num(v))).eval(0.0)),
                 s => Call(*f, b(s)),
             },
+            If(items, ops, a, c) => If(items.iter().map(|e| e.simplified()).collect(), ops.clone(), b(a.simplified()), b(c.simplified())),
             Ref(i, n, a) => Ref(*i, *n, b(a.simplified())),
-            Num(_) | X => self.clone(),
+            Num(_) | X | Y => self.clone(),
         }
     }
 
@@ -230,7 +300,8 @@ impl Expr {
     pub fn resolve(&self, defs: &dyn Fn(usize) -> Option<Expr>) -> Result<Expr, usize> {
         use Expr::*;
         Ok(match self {
-            Num(_) | X => self.clone(),
+            Num(_) | X | Y => self.clone(),
+            If(items, ops, a, c) => If(items.iter().map(|e| e.resolve(defs)).collect::<Result<_, _>>()?, ops.clone(), b(a.resolve(defs)?), b(c.resolve(defs)?)),
             Neg(a) => Neg(b(a.resolve(defs)?)),
             Add(l, r) => Add(b(l.resolve(defs)?), b(r.resolve(defs)?)),
             Sub(l, r) => Sub(b(l.resolve(defs)?), b(r.resolve(defs)?)),
@@ -251,7 +322,12 @@ impl Expr {
     /// Which functions it refers to.
     pub fn refs(&self, out: &mut Vec<usize>) {
         match self {
-            Expr::Num(_) | Expr::X => {}
+            Expr::Num(_) | Expr::X | Expr::Y => {}
+            Expr::If(items, _, a, c) => {
+                items.iter().for_each(|e| e.refs(out));
+                a.refs(out);
+                c.refs(out);
+            }
             Expr::Neg(a) | Expr::Call(_, a) => a.refs(out),
             Expr::Ref(i, _, a) => {
                 out.push(*i);
@@ -875,8 +951,10 @@ mod tests {
                 assert!((a - n).abs() < 1e-4 * (1.0 + n.abs()), "{f} at {x}: {a} vs {n} ({d:?})");
             }
         }
-        // Simplified: the derivative of x² is 2x, not 2·x^1·1.
+        // Simplified: the derivative of x² is 2x, not 2·x^1·1; numbers come together in front.
         assert_eq!(parse("x^2").unwrap().derive(), Expr::Mul(b(Expr::Num(2.0)), b(Expr::X)));
+        assert_eq!(parse("0.25x^3").unwrap().derive(), Expr::Mul(b(Expr::Num(0.75)), b(Expr::Pow(b(Expr::X), b(Expr::Num(2.0))))));
+        assert_eq!(parse("x*3").unwrap().simplified(), Expr::Mul(b(Expr::Num(3.0)), b(Expr::X)));
         assert_eq!(parse("5").unwrap().derive(), Expr::Num(0.0));
     }
 

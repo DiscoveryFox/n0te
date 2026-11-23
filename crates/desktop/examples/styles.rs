@@ -1,8 +1,8 @@
 //! Headless screenshots of the screens outside the editor in every design (never opens a
 //! window): library, settings, export, the page panel, a turned page, the outline with
-//! headings, search results and a found spot lighting up, a page with coordinate systems (marks,
-//! a hatched area, names, an x axis in π) and the dialog for them (on the GPU renderer if there
-//! is one: the software one draws no ink).
+//! headings, search results and a found spot lighting up, a page with coordinate systems
+//! (constructions: a triangle with its circumcircle, a function with a tangent and a slider) and
+//! the panel for them (on the GPU renderer if there is one: the software one draws no ink).
 //!
 //!   cargo run --profile fast -p n0te-desktop --example styles -- <out-dir> [theme ids…]
 
@@ -92,7 +92,8 @@ fn main() {
         g.message(Message::Jump(plot_sheet.clone()));
         g.events(&[]);
         g.screenshot(out.join(format!("{}-8-plots.png", t.id)));
-        // Close up: how the core draws them (marks, the area, names, π, the point).
+        // Close up: how the core draws them (the triangle and its circle; the function, the
+        // slider, the tangent, the marked points).
         if let n0te_desktop::app::Screen::Notebook(o) = &g.app.screen {
             let page = o.pages.pages[o.pages.page_of_sheet(&plot_sheet).unwrap()].rect();
             let zoom = 3.2;
@@ -103,38 +104,56 @@ fn main() {
             g.screenshot(out.join(format!("{}-8f-plot-near.png", t.id)));
             g.message(Message::Camera(near2));
             g.events(&[]);
-            g.screenshot(out.join(format!("{}-8g-plot-near-pi.png", t.id)));
+            g.screenshot(out.join(format!("{}-8g-plot-near-2.png", t.id)));
             g.message(Message::Camera(before));
             g.events(&[]);
         }
+        // The panel: the triangle's construction with a row selected (its properties), a
+        // mistake in the input line, a row being edited, the question before deleting.
+        use n0te_desktop::plots::{Msg, Tab};
         g.message(Message::EditPlot(plot_sheet.clone(), plot_id.clone()));
         g.events(&[]);
-        g.screenshot(out.join(format!("{}-8b-plot-dialog.png", t.id)));
-        g.message(Message::Plot(n0te_desktop::plots::Msg::Expr(1, "2sin x +".into())));
+        g.screenshot(out.join(format!("{}-8b-plot-panel.png", t.id)));
+        let circle = g.app.plot_edit.as_ref().and_then(|e| e.plot.objs.iter().find(|o| o.name() == "c").map(|o| o.id.clone())).unwrap();
+        g.message(Message::Plot(Msg::Pick(circle)));
         g.events(&[]);
-        g.screenshot(out.join(format!("{}-8c-plot-mistake.png", t.id)));
-        g.message(Message::Plot(n0te_desktop::plots::Msg::Cancel));
-        // The second one: x in π, named axes, own points with coordinates; its sections folded.
+        g.screenshot(out.join(format!("{}-8c-plot-properties.png", t.id)));
+        g.message(Message::Plot(Msg::Input("Gerade(A)".into())));
+        g.message(Message::Plot(Msg::InputSubmit));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8d-plot-mistake.png", t.id)));
+        g.message(Message::Plot(Msg::Input(String::new())));
+        let a = g.app.plot_edit.as_ref().map(|e| e.plot.objs[0].id.clone()).unwrap();
+        g.message(Message::Plot(Msg::Edit(a.clone())));
+        g.message(Message::Plot(Msg::Insert(2)));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8e-plot-edit-row.png", t.id)));
+        g.message(Message::Plot(Msg::Escape));
+        g.message(Message::Plot(Msg::AskRemove(a)));
+        g.message(Message::Plot(Msg::Tab(Tab::Graphics)));
+        g.events(&[]);
+        g.screenshot(out.join(format!("{}-8h-plot-delete-graphics.png", t.id)));
+        g.message(Message::Plot(Msg::Cancel));
+        // The second one: the function with its slider (selected) and tangent.
         g.message(Message::EditPlot(plot_sheet.clone(), plot_id2.clone()));
+        let slider = g.app.plot_edit.as_ref().map(|e| e.plot.objs[0].id.clone()).unwrap();
+        g.message(Message::Plot(Msg::Pick(slider)));
         g.events(&[]);
-        g.screenshot(out.join(format!("{}-8d-plot-dialog-pi.png", t.id)));
-        g.message(Message::Plot(n0te_desktop::plots::Msg::Fold(0)));
-        g.message(Message::Plot(n0te_desktop::plots::Msg::Fold(1)));
-        g.events(&[]);
-        g.screenshot(out.join(format!("{}-8e-plot-dialog-folded.png", t.id)));
-        g.message(Message::Plot(n0te_desktop::plots::Msg::Cancel));
+        g.screenshot(out.join(format!("{}-8i-plot-panel-slider.png", t.id)));
+        g.message(Message::Plot(Msg::Cancel));
     }
     let _ = std::fs::remove_dir_all(root);
 }
 
-/// A page of squared paper at the end with two coordinate systems: (sheet, the first plot, the
-/// second). The first marks its zeros and extremes, hatches an area and names its curves (one
-/// a dashed derivative); the second has its x axis in π, named axes, a crossing and a point of
-/// its own with coordinates.
+/// A page of squared paper at the end with two coordinate systems, made as the tablet makes
+/// them (the core's `add`): (sheet, the first plot, the second). The first is a triangle with
+/// its circumcircle and centre (a hatched polygon, the perpendicular bisectors as dotted
+/// helpers, an angle); the second a function with a point on it moved by a slider and the
+/// tangent there, its zeros and lows marked, the x axis in π and named.
 fn plot_page(lib: &Library, id: &str) -> (String, String, String) {
     use n0te_core::notebook::{Background, SheetSpec};
-    use n0te_core::plot::{self, Area, LineStyle, PlotFn};
-    use n0te_desktop::plots::{self, INKS};
+    use n0te_core::plot::{LabelMode, LineStyle, MARK_EXTREMA, MARK_ZEROS};
+    use n0te_desktop::plots;
     let nb = lib.load_notebook(id).unwrap();
     let (_, end) = n0te_desktop::pdf::position_after(&nb, None);
     let (node, sheet_id) = nb.add_sheet(None, end, &SheetSpec { spacing: 17.0, ..SheetSpec::a4(Background::Grid) }).unwrap();
@@ -142,26 +161,29 @@ fn plot_page(lib: &Library, id: &str) -> (String, String, String) {
     lib.save_notebook(&nb).unwrap();
     let sheet = lib.load_sheet(id, &sheet_id).unwrap();
     let mut p = plots::fresh(297.0, 250.0, 595.0, 842.0, Background::Grid, 17.0);
-    p.fns = vec![
-        PlotFn { area: Some(Area { from: -2.0, to: 2.0, to_fn: None }), ..PlotFn::new("0,5x^2 - 2", INKS[1]) },
-        PlotFn::new("2sin x", INKS[2]),
-        PlotFn { style: LineStyle::Dashed, ..PlotFn::new("f'(x)", INKS[1]) },
-    ];
-    p.marks = plot::MARK_ZEROS | plot::MARK_EXTREMA;
-    p.names = true;
+    for s in ["A = (-3, -2)", "B = (4, -2)", "C = (1, 3)", "Vieleck(A, B, C)", "Kreis(A, B, C)", "M = Mittelpunkt(c)", "Mittelsenkrechte(A, B)", "Mittelsenkrechte(B, C)", "Winkel(B, A, C)"] {
+        p = p.add(s).unwrap();
+    }
+    for o in &mut p.objs[6..8] {
+        o.style.aux = true;
+        o.style.line = LineStyle::Dotted;
+    }
+    p.objs[4].style.label = LabelMode::Caption;
+    p.objs[4].style.caption = "Umkreis".into();
     let first = sheet.add_plot(&p).unwrap();
     let mut q = plots::fresh(297.0, 560.0, 595.0, 842.0, Background::Blank, 0.0);
     q.grid = false;
     q.clean = true;
-    q.pi = true;
-    let pi = std::f64::consts::PI;
-    (q.x_min, q.x_max, q.y_min, q.y_max) = (-2.0 * pi, 2.0 * pi, -1.5, 1.5);
-    q.fns = vec![PlotFn::new("sin x", INKS[3]), PlotFn { style: LineStyle::Dotted, ..PlotFn::new("cos x", INKS[4]) }];
-    q.marks = plot::MARK_CROSSINGS;
-    q.coords = true;
-    q.x_name = "t".into();
-    q.y_name = "U".into();
-    q.points = plot::parse_points("A(-4|-1)").unwrap();
+    for s in ["a = Schieberegler(-2, 3, 0.1)", "f(x) = 0.5x^2 - 2", "T = Punkt(f, a)", "Tangente(T, f)"] {
+        q = q.add(s).unwrap();
+    }
+    q = q.set_slider(&q.objs[0].id.clone(), 1.5).unwrap();
+    q.objs[1].style.special = MARK_ZEROS | MARK_EXTREMA;
+    q.objs[1].style.coords = true;
+    q.objs[1].style.label = LabelMode::NameValue;
+    q.objs[3].style.line = LineStyle::Dashed;
+    q.x_name = "x".into();
+    q.y_name = "y".into();
     let second = sheet.add_plot(&q).unwrap();
     lib.save_sheet(id, &sheet_id, &sheet).unwrap();
     (sheet_id, first, second)

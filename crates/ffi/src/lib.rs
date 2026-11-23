@@ -158,37 +158,48 @@ pub struct FfiImage {
     pub plot: Option<FfiPlot>,
 }
 
-/// One function of a plot: what was typed and its ink (0xAARRGGBB), its line (0 solid,
-/// 1 dashed, 2 dotted) and an area hatched under it.
+/// How an object of a construction is drawn (see the core's `Style`). line: 0 solid, 1 dashed,
+/// 2 dotted; point: 0 dot, 1 cross, 2 ring; label: 0 off, 1 name, 2 name & value, 3 value,
+/// 4 caption; special: zeros 1, highs and lows 2, crossings 4, turning points 8.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct FfiPlotFn {
-    pub expr: String,
+pub struct FfiStyle {
     pub color: u32,
-    #[uniffi(default = 0)]
-    pub style: u8,
-    #[uniffi(default)]
-    pub area: Option<FfiPlotArea>,
+    pub width: f32,
+    pub line: u8,
+    pub point: u8,
+    pub size: f32,
+    pub fill: f32,
+    pub label: u8,
+    pub caption: String,
+    pub visible: bool,
+    pub aux: bool,
+    pub fixed: bool,
+    pub slider: Option<FfiSlider>,
+    pub special: u8,
+    pub coords: bool,
+    /// Texts and sliders: where in the box (0…1 across, down); empty: by itself.
+    pub at: Vec<f32>,
 }
 
-/// An area hatched under a function over [from, to], down to the x axis (to_fn None) or to
-/// another of the plot's functions.
-#[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct FfiPlotArea {
-    pub from: f64,
-    pub to: f64,
-    pub to_fn: Option<u32>,
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct FfiSlider {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
 }
 
-/// A point marked by hand on a plot.
+/// One object of a construction: its definition as typed (name in front), its style, its place
+/// in the algebra view.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
-pub struct FfiPlotPoint {
-    pub name: String,
-    pub x: f64,
-    pub y: f64,
+pub struct FfiObj {
+    pub id: String,
+    pub def: String,
+    pub order: f64,
+    pub style: FfiStyle,
 }
 
 /// A coordinate system on a page (see the core's `Plot`): box in page points, ranges, look,
-/// functions.
+/// objects. snap: 0 automatic, 1 grid, 2 off.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct FfiPlot {
     pub id: String,
@@ -200,41 +211,98 @@ pub struct FfiPlot {
     pub x_max: f64,
     pub y_min: f64,
     pub y_max: f64,
+    pub axes: bool,
     pub grid: bool,
+    pub minor: bool,
     pub clean: bool,
     pub color: u32,
     pub width: f32,
-    pub fns: Vec<FfiPlotFn>,
-    /// Function names at the curves.
-    #[uniffi(default = false)]
-    pub names: bool,
-    /// The x axis in steps of π.
-    #[uniffi(default = false)]
     pub pi: bool,
-    #[uniffi(default = "")]
     pub x_name: String,
-    #[uniffi(default = "")]
     pub y_name: String,
-    /// What it marks by itself: 1 zeros, 2 highs and lows, 4 crossings, 8 turning points.
-    #[uniffi(default = 0)]
-    pub marks: u8,
-    /// Coordinates at marked points, sizes of areas.
-    #[uniffi(default = false)]
-    pub coords: bool,
-    #[uniffi(default)]
-    pub points: Vec<FfiPlotPoint>,
+    pub snap: u8,
+    pub align: bool,
+    pub interactive: bool,
+    pub objs: Vec<FfiObj>,
 }
 
-fn style_code(s: n0te_core::plot::LineStyle) -> u8 {
-    match s {
-        n0te_core::plot::LineStyle::Solid => 0,
-        n0te_core::plot::LineStyle::Dashed => 1,
-        n0te_core::plot::LineStyle::Dotted => 2,
+impl From<n0te_core::plot::Style> for FfiStyle {
+    fn from(s: n0te_core::plot::Style) -> Self {
+        use n0te_core::plot::{LabelMode, LineStyle, PointStyle};
+        FfiStyle {
+            color: s.color,
+            width: s.width,
+            line: match s.line {
+                LineStyle::Solid => 0,
+                LineStyle::Dashed => 1,
+                LineStyle::Dotted => 2,
+            },
+            point: match s.point {
+                PointStyle::Dot => 0,
+                PointStyle::Cross => 1,
+                PointStyle::Ring => 2,
+            },
+            size: s.size,
+            fill: s.fill,
+            label: match s.label {
+                LabelMode::Off => 0,
+                LabelMode::Name => 1,
+                LabelMode::NameValue => 2,
+                LabelMode::Value => 3,
+                LabelMode::Caption => 4,
+            },
+            caption: s.caption,
+            visible: s.visible,
+            aux: s.aux,
+            fixed: s.fixed,
+            slider: s.slider.map(|l| FfiSlider { min: l.min, max: l.max, step: l.step }),
+            special: s.special,
+            coords: s.coords,
+            at: s.at.map(|(x, y)| vec![x, y]).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<FfiStyle> for n0te_core::plot::Style {
+    fn from(s: FfiStyle) -> Self {
+        use n0te_core::plot::{LabelMode, LineStyle, PointStyle, Slider};
+        n0te_core::plot::Style {
+            color: s.color,
+            width: s.width,
+            line: match s.line {
+                1 => LineStyle::Dashed,
+                2 => LineStyle::Dotted,
+                _ => LineStyle::Solid,
+            },
+            point: match s.point {
+                1 => PointStyle::Cross,
+                2 => PointStyle::Ring,
+                _ => PointStyle::Dot,
+            },
+            size: s.size,
+            fill: s.fill,
+            label: match s.label {
+                1 => LabelMode::Name,
+                2 => LabelMode::NameValue,
+                3 => LabelMode::Value,
+                4 => LabelMode::Caption,
+                _ => LabelMode::Off,
+            },
+            caption: s.caption,
+            visible: s.visible,
+            aux: s.aux,
+            fixed: s.fixed,
+            slider: s.slider.map(|l| Slider { min: l.min, max: l.max, step: l.step }),
+            special: s.special,
+            coords: s.coords,
+            at: (s.at.len() == 2).then(|| (s.at[0], s.at[1])),
+        }
     }
 }
 
 impl From<n0te_core::plot::Plot> for FfiPlot {
     fn from(p: n0te_core::plot::Plot) -> Self {
+        use n0te_core::plot::Snap;
         FfiPlot {
             id: p.id,
             x: p.x,
@@ -245,28 +313,30 @@ impl From<n0te_core::plot::Plot> for FfiPlot {
             x_max: p.x_max,
             y_min: p.y_min,
             y_max: p.y_max,
+            axes: p.axes,
             grid: p.grid,
+            minor: p.minor,
             clean: p.clean,
             color: p.color,
             width: p.width,
-            fns: p
-                .fns
-                .into_iter()
-                .map(|f| FfiPlotFn { expr: f.expr, color: f.color, style: style_code(f.style), area: f.area.map(|a| FfiPlotArea { from: a.from, to: a.to, to_fn: a.to_fn.map(|j| j as u32) }) })
-                .collect(),
-            names: p.names,
             pi: p.pi,
             x_name: p.x_name,
             y_name: p.y_name,
-            marks: p.marks,
-            coords: p.coords,
-            points: p.points.into_iter().map(|q| FfiPlotPoint { name: q.name, x: q.x, y: q.y }).collect(),
+            snap: match p.snap {
+                Snap::Auto => 0,
+                Snap::Grid => 1,
+                Snap::Off => 2,
+            },
+            align: p.align,
+            interactive: p.interactive,
+            objs: p.objs.into_iter().map(|o| FfiObj { id: o.id, def: o.def, order: o.order, style: o.style.into() }).collect(),
         }
     }
 }
 
 impl From<FfiPlot> for n0te_core::plot::Plot {
     fn from(p: FfiPlot) -> Self {
+        use n0te_core::plot::Snap;
         n0te_core::plot::Plot {
             id: p.id,
             x: p.x,
@@ -277,36 +347,43 @@ impl From<FfiPlot> for n0te_core::plot::Plot {
             x_max: p.x_max,
             y_min: p.y_min,
             y_max: p.y_max,
+            axes: p.axes,
             grid: p.grid,
+            minor: p.minor,
             clean: p.clean,
             color: p.color,
             width: p.width,
-            fns: p
-                .fns
-                .into_iter()
-                .map(|f| n0te_core::plot::PlotFn {
-                    expr: f.expr,
-                    color: f.color,
-                    style: match f.style {
-                        1 => n0te_core::plot::LineStyle::Dashed,
-                        2 => n0te_core::plot::LineStyle::Dotted,
-                        _ => n0te_core::plot::LineStyle::Solid,
-                    },
-                    area: f.area.map(|a| n0te_core::plot::Area { from: a.from, to: a.to, to_fn: a.to_fn.map(|j| j as usize) }),
-                })
-                .collect(),
-            names: p.names,
             pi: p.pi,
             x_name: p.x_name,
             y_name: p.y_name,
-            marks: p.marks,
-            coords: p.coords,
-            points: p.points.into_iter().map(|q| n0te_core::plot::PlotPoint { name: q.name, x: q.x, y: q.y }).collect(),
+            snap: match p.snap {
+                1 => Snap::Grid,
+                2 => Snap::Off,
+                _ => Snap::Auto,
+            },
+            align: p.align,
+            interactive: p.interactive,
+            objs: p.objs.into_iter().map(|o| n0te_core::plot::Obj { id: o.id, def: o.def, order: o.order, style: o.style.into() }).collect(),
         }
     }
 }
 
-/// A plot as ink (page points): grid, axes, numbers, curves, ready to draw like strokes.
+/// An object as the algebra view shows it: name, what kind (German), its value, what is wrong,
+/// whether it can be dragged (a free point, a point on an object), a slider's value.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiObjInfo {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub value: String,
+    pub error: Option<String>,
+    pub draggable: bool,
+    pub slider_value: Option<f64>,
+    /// "f(x) = 0,5x² − 3", "A = (1 | 2)", "g: y = 2x + 1": the object as GeoGebra lists it.
+    pub shown: String,
+}
+
+/// A plot as ink (page points), ready to draw like strokes.
 #[uniffi::export]
 pub fn plot_strokes(plot: FfiPlot) -> Vec<FfiStroke> {
     n0te_core::plot::render(&plot.into())
@@ -315,48 +392,154 @@ pub fn plot_strokes(plot: FfiPlot) -> Vec<FfiStroke> {
         .collect()
 }
 
-/// What is wrong with a typed function (German), or None when it can be drawn.
+/// Every object as the algebra view shows it.
 #[uniffi::export]
-pub fn plot_check(expr: String) -> Option<String> {
-    n0te_core::plot::check(&expr).err()
+pub fn plot_info(plot: FfiPlot) -> Vec<FfiObjInfo> {
+    use n0te_core::plot::{Kind, Val, format_val, free_point, moved_on};
+    let p: n0te_core::plot::Plot = plot.into();
+    let vals = p.values();
+    p.objs
+        .iter()
+        .zip(vals)
+        .map(|(o, v)| {
+            let name = o.name();
+            let kind = match &v {
+                Ok(v) => match v.kind() {
+                    Kind::Number => if o.style.slider.is_some() { "Schieberegler" } else { "Zahl" },
+                    Kind::Bool => "Wahrheitswert",
+                    Kind::Point => "Punkt",
+                    Kind::Points => "Punkte",
+                    Kind::Vector => "Vektor",
+                    Kind::Function => "Funktion",
+                    Kind::Line => "Gerade",
+                    Kind::Lines => "Geraden",
+                    Kind::Segment => "Strecke",
+                    Kind::Ray => "Strahl",
+                    Kind::Circle => "Kreis",
+                    Kind::Polygon => "Vieleck",
+                    Kind::Curve => "Kurve",
+                    Kind::Implicit => "Kurve",
+                    Kind::Angle => "Winkel",
+                    Kind::Area => "Integral",
+                    Kind::Text => "Text",
+                },
+                Err(_) => "",
+            }
+            .to_string();
+            let value = v.as_ref().map(format_val).unwrap_or_default();
+            let shown = match &v {
+                Ok(Val::Func(_)) => format!("{name}(x) = {value}"),
+                Ok(Val::Line { .. } | Val::Lines(_) | Val::Circle(..) | Val::Implicit(_) | Val::Curve(..)) => format!("{name}: {value}"),
+                Ok(Val::Text(t)) => t.clone(),
+                Ok(_) => format!("{name} = {value}"),
+                Err(_) => o.def.clone(),
+            };
+            FfiObjInfo {
+                id: o.id.clone(),
+                name,
+                kind,
+                draggable: !o.style.fixed && (free_point(&o.def) || moved_on(&o.def, 0.0).is_some()),
+                slider_value: match (&v, o.style.slider) {
+                    (Ok(Val::Num(x)), Some(_)) => Some(*x),
+                    _ => None,
+                },
+                value,
+                error: v.err(),
+                shown,
+            }
+        })
+        .collect()
 }
 
-/// A y range that shows the plot's functions over its x range: [min, max], or empty.
+/// The plot with a new object from a line of input (GeoGebra's input bar); Err: what is wrong.
+#[uniffi::export]
+pub fn plot_add(plot: FfiPlot, input: String) -> R<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).add(&input).map(Into::into).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// The plot with a new point on the object `on` nearest to (x, y) (plot units).
+#[uniffi::export]
+pub fn plot_add_point_on(plot: FfiPlot, on: String, x: f64, y: f64) -> R<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).add_point_on(&on, x, y).map(Into::into).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// The plot with an object's definition changed; Err: what is wrong.
+#[uniffi::export]
+pub fn plot_set_def(plot: FfiPlot, id: String, def: String) -> R<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).set_def(&id, &def).map(Into::into).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// The plot without an object and what depends on it.
+#[uniffi::export]
+pub fn plot_remove(plot: FfiPlot, id: String) -> FfiPlot {
+    n0te_core::plot::Plot::from(plot).remove(&id).into()
+}
+
+/// The names of the objects that go with `id` when it is removed.
+#[uniffi::export]
+pub fn plot_dependents(plot: FfiPlot, id: String) -> Vec<String> {
+    let p = n0te_core::plot::Plot::from(plot);
+    let ids = p.dependents(&id);
+    p.objs.iter().filter(|o| ids.contains(&o.id)).map(|o| o.name()).collect()
+}
+
+/// The plot with an object dragged to (x, y) in plot units (free points snap); None: it can't.
+#[uniffi::export]
+pub fn plot_drag(plot: FfiPlot, id: String, x: f64, y: f64) -> Option<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).drag(&id, x, y).map(Into::into)
+}
+
+/// The plot with a slider set (in its range, on its steps).
+#[uniffi::export]
+pub fn plot_set_slider(plot: FfiPlot, id: String, value: f64) -> Option<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).set_slider(&id, value).map(Into::into)
+}
+
+/// The object under a page point (within `tol` page points), or None.
+#[uniffi::export]
+pub fn plot_hit(plot: FfiPlot, x: f32, y: f32, tol: f32) -> Option<String> {
+    let p = n0te_core::plot::Plot::from(plot);
+    n0te_core::plot::hit(&p, x, y, tol).map(|i| p.objs[i].id.clone())
+}
+
+/// A page point in plot units: [x, y].
+#[uniffi::export]
+pub fn plot_to_plot(plot: FfiPlot, x: f32, y: f32) -> Vec<f64> {
+    let (a, b) = n0te_core::plot::Plot::from(plot).to_plot(x, y);
+    vec![a, b]
+}
+
+/// Plot units on the page: [x, y].
+#[uniffi::export]
+pub fn plot_to_page(plot: FfiPlot, x: f64, y: f64) -> Vec<f32> {
+    let (a, b) = n0te_core::plot::Plot::from(plot).to_page(x, y);
+    vec![a, b]
+}
+
+/// Where a point put down at (x, y) lands with the plot's Punktfang: [x, y].
+#[uniffi::export]
+pub fn plot_snapped(plot: FfiPlot, x: f64, y: f64) -> Vec<f64> {
+    let (a, b) = n0te_core::plot::Plot::from(plot).snapped(x, y);
+    vec![a, b]
+}
+
+/// A slider's track on the page: [x0, x1, y], or empty.
+#[uniffi::export]
+pub fn plot_slider_track(plot: FfiPlot, id: String) -> Vec<f32> {
+    let p = n0te_core::plot::Plot::from(plot);
+    p.objs.iter().position(|o| o.id == id).and_then(|i| n0te_core::plot::slider_track(&p, i)).map(|(a, b, c)| vec![a, b, c]).unwrap_or_default()
+}
+
+/// A y range that shows the plot's functions and points over its x range: [min, max], or empty.
 #[uniffi::export]
 pub fn plot_fit_y(plot: FfiPlot) -> Vec<f64> {
     n0te_core::plot::Plot::from(plot).fit_y().map(|(a, b)| vec![a, b]).unwrap_or_default()
 }
 
-/// What is wrong with each of the plot's functions (None: fine), references to the others
-/// resolved (g(x) = f'(x) + 1).
-#[uniffi::export]
-pub fn plot_errors(plot: FfiPlot) -> Vec<Option<String>> {
-    n0te_core::plot::Plot::from(plot).errors()
-}
-
-/// LaTeX from the handwriting recogniser as a function to type; Err: why it can't be drawn.
+/// LaTeX from a handwriting recogniser as input for the plot; Err: why it can't be drawn.
 #[uniffi::export]
 pub fn plot_from_latex(latex: String) -> R<String> {
     n0te_core::plot::latex_to_expr(&latex).map_err(|msg| N0teError::Failed { msg })
-}
-
-/// Points typed by hand ("A(1|2); B(-1|0,5)"); Err: what is wrong.
-#[uniffi::export]
-pub fn plot_parse_points(text: String) -> R<Vec<FfiPlotPoint>> {
-    n0te_core::plot::parse_points(&text).map(|v| v.into_iter().map(|q| FfiPlotPoint { name: q.name, x: q.x, y: q.y }).collect()).map_err(|msg| N0teError::Failed { msg })
-}
-
-/// Points as they are typed.
-#[uniffi::export]
-pub fn plot_format_points(points: Vec<FfiPlotPoint>) -> String {
-    n0te_core::plot::format_points(&points.into_iter().map(|q| n0te_core::plot::PlotPoint { name: q.name, x: q.x, y: q.y }).collect::<Vec<_>>())
-}
-
-/// The plot without its function number `index`: later ones move up a name, references and
-/// areas follow.
-#[uniffi::export]
-pub fn plot_remove_fn(plot: FfiPlot, index: u32) -> FfiPlot {
-    n0te_core::plot::Plot::from(plot).remove_fn(index as usize).into()
 }
 
 /// The x range widened to whole π/2 (for an axis in steps of π): [min, max].

@@ -2,7 +2,7 @@
 //! graphs cross. Found numerically on the shown x range (the derivatives exactly, from the
 //! expressions), poles told apart from zeros.
 
-use super::expr::{Curve, Expr};
+use super::expr::Expr;
 use super::Plot;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,17 +159,6 @@ pub fn special_points(p: &Plot, curves: &[Option<Expr>], zeros: bool, extrema: b
     }
     out.retain(|s| seen(s.x, s.y));
     out
-}
-
-/// The resolved graphs of a plot's lines (None for vertical lines and lines with mistakes).
-pub fn graphs(curves: &[Result<Curve, String>]) -> Vec<Option<Expr>> {
-    curves
-        .iter()
-        .map(|c| match c {
-            Ok(Curve::Of(e)) => Some(e.clone()),
-            _ => None,
-        })
-        .collect()
 }
 
 /// ∫ |f − g| over [a, b] (g = 0: the area between f and the x axis), Simpson's rule.

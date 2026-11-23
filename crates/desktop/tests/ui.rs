@@ -1041,12 +1041,13 @@ fn is_curve(p: &[u8]) -> bool {
     p[0] < 70 && p[1] > 130 && p[2] < 70
 }
 
-/// y = 2 in thick green, ruler-straight, in a 240 × 160 pt box at (100, 200) with 20 pt to the
-/// unit: the curve runs along page y 240 from x 100 to 340.
+/// f(x) = 2 in thick green, ruler-straight, in a 240 × 160 pt box at (100, 200) with 20 pt to
+/// the unit: the curve runs along page y 240 from x 100 to 340.
 fn green_plot() -> n0te_core::plot::Plot {
     let mut p = n0te_core::plot::Plot::centered(100.0, 200.0, 240.0, 160.0, 20.0, n0te_desktop::plots::AXES, 4.0);
     p.clean = true;
-    p.fns = vec![n0te_core::plot::PlotFn::new("2", CURVE)];
+    let mut p = p.add("f(x) = 2").unwrap();
+    p.objs[0].style.color = CURVE;
     p
 }
 
@@ -1088,6 +1089,16 @@ fn screen_at(h: &Harness, x: f32, y: f32) -> Point {
 
 fn stored_plots(root: &std::path::Path, nb: &str, sheet: &str) -> Vec<n0te_core::plot::Plot> {
     Library::open(root).unwrap().load_sheet(nb, sheet).unwrap().plots()
+}
+
+/// The definitions of a plot's objects.
+fn defs(p: &n0te_core::plot::Plot) -> Vec<String> {
+    p.objs.iter().map(|o| o.def.clone()).collect()
+}
+
+/// The open panel.
+fn panel(h: &Harness) -> &n0te_desktop::plots::Editor {
+    h.app.plot_edit.as_ref().expect("the panel is open")
 }
 
 /// Curve-green pixels of a frame: (in the band along page y 236..244, x 96..344; elsewhere).
@@ -1159,50 +1170,74 @@ fn a_plot_on_a_page_is_drawn_also_when_it_comes_from_the_tablet() {
 }
 
 #[test]
-fn clicking_a_plot_opens_its_dialog_and_ok_stores_what_was_typed() {
+fn clicking_a_plot_opens_its_panel_and_the_input_line_adds_named_objects() {
+    use iced::keyboard::key::Named;
     let (mut h, root, nb, sheet) = plot_page("plotclick", n0te_core::notebook::Background::Lines, true);
     let id = stored_plots(&root, &nb, &sheet)[0].id.clone();
     // A click into the box (not a double click: no text box either).
     let at = screen_at(&h, 220.0, 300.0);
     h.click(at);
-    let e = h.app.plot_edit.as_ref().expect("the dialog opened");
+    let e = panel(&h);
     assert_eq!((e.sheet_id.as_str(), e.plot.id.as_str()), (sheet.as_str(), id.as_str()));
     assert!(h.app.editing.is_none());
     assert!(h.find("Koordinatensystem").is_some() || h.find("KOORDINATENSYSTEM").is_some() || h.find("koordinatensystem").is_some());
-    // Its preview draws the plot (as paths: the software renderer draws those, not the page's
-    // ink meshes, so the green is the preview's).
+    // The algebra view lists the function; the preview draws it (as paths: the software
+    // renderer draws those, not the page's ink meshes, so the green is the preview's).
+    assert!(h.find("f(x) = 2").is_some(), "its row");
     let green = h.frame_rgba().0.chunks_exact(4).filter(|p| is_curve(p)).count();
     assert!(green > 300, "the preview shows the curve: {green} green pixels");
-    // The cursor is in the first function's field: type, then OK.
-    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::expr_id(0)));
-    h.type_text("x - 1");
-    assert_eq!(h.app.plot_edit.as_ref().unwrap().plot.fns[0].expr, "2x - 1");
+    // The cursor is in the input line: a point, a function, where they meet.
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::input_id()));
+    for s in ["A = (1|2)", "x^2", "Schneide(f, g)"] {
+        h.type_text(s);
+        h.press(Named::Enter);
+    }
+    let e = panel(&h);
+    assert_eq!(defs(&e.plot), vec!["f(x) = 2", "A = (1|2)", "g = x^2", "B = Schneide(f, g, 1)", "C = Schneide(f, g, 2)"], "two intersections: two points");
+    assert_eq!(e.input, "", "the line is empty again");
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::input_id()), "and keeps the cursor");
     h.frame();
+    for row in ["A = (1 | 2)", "g(x) = x²", "B = (−1,41 | 2)", "C = (1,41 | 2)"] {
+        assert!(h.find(row).is_some(), "{row} is listed");
+    }
     let ok = h.find("OK").expect("the OK button");
     h.click(ok.center());
-    assert!(h.app.plot_edit.is_none(), "OK closes the dialog");
+    assert!(h.app.plot_edit.is_none(), "OK closes the panel");
     let p = &stored_plots(&root, &nb, &sheet)[0];
-    assert_eq!(p.fns, vec![n0te_core::plot::PlotFn::new("2x - 1", CURVE)]);
+    assert_eq!(defs(p), vec!["f(x) = 2", "A = (1|2)", "g = x^2", "B = Schneide(f, g, 1)", "C = Schneide(f, g, 2)"]);
     assert_eq!((p.x, p.y, p.w, p.h), (100.0, 200.0, 240.0, 160.0), "the box stays");
-    assert_eq!(open(&h).pages.plots_of(&sheet)[0].fns[0].expr, "2x - 1", "the page shows the new curve");
+    assert_eq!(open(&h).pages.plots_of(&sheet)[0].objs.len(), 5, "the page shows them");
 }
 
 #[test]
-fn a_function_with_a_mistake_says_why_and_ok_refuses_until_it_is_fixed() {
-    use n0te_desktop::plots::Msg;
+fn a_mistake_is_said_rows_edit_and_esc_and_loeschen_work() {
+    use iced::keyboard::key::Named;
+    use n0te_desktop::plots::{Msg, Tab};
     let (mut h, root, nb, sheet) = plot_page("plotbad", n0te_core::notebook::Background::Blank, true);
     let before = stored_plots(&root, &nb, &sheet)[0].clone();
     h.message(Message::EditPlot(sheet.clone(), before.id.clone()));
-    h.message(Message::Plot(Msg::Expr(0, "2x +".into())));
-    let why = n0te_core::plot::check("2x +").unwrap_err();
-    assert!(h.find(why.as_str()).is_some(), "the mistake shows under the field: {why}");
+    h.type_text("Schneide(f)");
+    h.press(Named::Enter);
+    assert!(h.find("So: Schneide(f, g)").is_some(), "the mistake shows under the line");
+    assert_eq!(panel(&h).plot.objs.len(), 1);
+    // OK waits while the line has a mistake.
     let ok = h.find("OK").unwrap();
     h.click(ok.center());
-    h.message(Message::Plot(Msg::Submit));
-    assert!(h.app.plot_edit.is_some(), "OK and Enter don't close it");
+    assert!(h.app.plot_edit.is_some(), "OK doesn't close it");
     assert_eq!(stored_plots(&root, &nb, &sheet)[0], before, "nothing stored");
-    // A range that isn't one: the same.
-    h.message(Message::Plot(Msg::Expr(0, "2x + 1".into())));
+    h.message(Message::Plot(Msg::Input(String::new())));
+    // A click on a row: its definition to edit, the cursor in it; Enter takes it.
+    let row = h.find("f(x) = 2").expect("the row");
+    h.click(row.center());
+    let e = panel(&h);
+    assert_eq!(e.editing.as_ref().map(|r| r.text.as_str()), Some("f(x) = 2"));
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::edit_id()));
+    h.message(Message::Plot(Msg::EditText("f(x) = x - 1".into())));
+    h.press(Named::Enter);
+    assert!(panel(&h).editing.is_none());
+    assert!(h.find("f(x) = x − 1").is_some(), "listed as GeoGebra lists it");
+    // A range that isn't one: said on the Grafik side, OK waits.
+    h.message(Message::Plot(Msg::Tab(Tab::Graphics)));
     h.message(Message::Plot(Msg::Range(1, "-7".into())));
     assert!(h.find("x bis muss größer sein als x von").is_some());
     h.message(Message::Plot(Msg::Ok));
@@ -1213,20 +1248,32 @@ fn a_function_with_a_mistake_says_why_and_ok_refuses_until_it_is_fixed() {
     h.message(Message::Plot(Msg::Ok));
     assert!(h.app.plot_edit.is_none());
     let p = stored_plots(&root, &nb, &sheet)[0].clone();
-    assert_eq!((p.fns[0].expr.as_str(), p.x_max, p.grid), ("2x + 1", 7.5, true));
-    // Esc (also from the field) cancels; Löschen removes it.
+    assert_eq!((p.objs[0].def.as_str(), p.x_max, p.grid), ("f(x) = x - 1", 7.5, true));
+    assert_eq!(n0te_core::plot::Plot { objs: before.objs.clone(), x_max: before.x_max, grid: before.grid, ..p.clone() }, before, "nothing else changed");
+    // Esc from the input line cancels.
     h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
-    h.message(Message::Plot(Msg::Expr(0, "x^3".into())));
-    h.press(iced::keyboard::key::Named::Escape);
+    h.type_text("x^3");
+    h.press(Named::Enter);
+    assert_eq!(panel(&h).plot.objs.len(), 2);
+    h.press(Named::Escape);
     assert!(h.app.plot_edit.is_none(), "Esc closed it");
     assert_eq!(stored_plots(&root, &nb, &sheet)[0], p, "unchanged");
+    // Esc in a row leaves the row only.
     h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
+    let row = h.find("f(x) = x − 1").unwrap();
+    h.click(row.center());
+    h.message(Message::Plot(Msg::EditText("f(x) = x".into())));
+    h.press(Named::Escape);
+    assert!(h.app.plot_edit.is_some() && panel(&h).editing.is_none(), "the row is left, the panel stays");
+    assert_eq!(panel(&h).plot.objs[0].def, "f(x) = x - 1", "what was typed in it is forgotten");
+    // Löschen removes the plot.
     h.message(Message::Plot(Msg::Delete));
     assert!(h.app.plot_edit.is_none() && stored_plots(&root, &nb, &sheet).is_empty());
 }
 
 #[test]
-fn inserting_from_the_palette_puts_a_plot_on_the_squares() {
+fn inserting_from_the_palette_puts_an_empty_construction_on_the_squares() {
+    use iced::keyboard::key::Named;
     let (mut h, root, nb, sheet) = plot_page("plotinsert", n0te_core::notebook::Background::Grid, false);
     h.message(Message::OpenPalette);
     h.type_text("koordinaten");
@@ -1239,19 +1286,34 @@ fn inserting_from_the_palette_puts_a_plot_on_the_squares() {
     assert!(p.x >= 0.0 && p.y >= 0.0 && p.x + p.w <= 595.0 && p.y + p.h <= 842.0);
     assert_eq!((p.x_min, p.x_max, p.y_min, p.y_max), (-6.0, 6.0, -4.0, 4.0), "a square is the unit");
     assert_eq!((p.color, p.width), (0xFF20_2428, 1.2));
+    assert!(p.objs.is_empty(), "an empty construction");
     // In the middle of the view, as far as the page goes (the view shows more than the page).
     let (c, page) = (open(&h).camera, open(&h).pages.pages[0].rect());
     let mid = (c.x + c.viewport.width / c.zoom / 2.0 - page.x0, c.y + c.viewport.height / c.zoom / 2.0 - page.y0);
     let want = ((mid.0 - p.w / 2.0).clamp(0.0, 595.0 - p.w), (mid.1 - p.h / 2.0).clamp(0.0, 842.0 - p.h));
     assert!((p.x - want.0).abs() <= 17.0 && (p.y - want.1).abs() <= 17.0, "{p:?} around {mid:?}");
-    // Its dialog is open with the first function to type; Enter stores it.
-    let e = h.app.plot_edit.as_ref().expect("the dialog opened");
-    assert_eq!((e.plot.fns.len(), e.plot.fns[0].expr.as_str()), (1, ""));
-    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::expr_id(0)));
-    h.type_text("sin x");
-    h.press(iced::keyboard::key::Named::Enter);
+    // Its panel is open with the cursor in the input line.
+    assert!(panel(&h).plot.objs.is_empty());
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(n0te_desktop::plots::input_id()));
+    assert!(h.find("Noch leer. Unten eingeben, z. B. f(x) = x^2 oder A = (1|2), und Enter.").is_some());
+    h.type_text("sin(x)");
+    h.press(Named::Enter);
+    h.press(Named::Enter);
+    assert_eq!(defs(&panel(&h).plot), vec!["f = sin(x)"], "Enter on an empty line adds nothing");
+    // A command button: the command in the line, the cursor between its brackets.
+    let tangent = h.find(n0te_desktop::theme::cased("Tangente").as_str()).expect("the Tangente button");
+    h.click(tangent.center());
+    assert_eq!(panel(&h).input, "Tangente()");
+    assert_eq!(panel(&h).hint, Some(n0te_desktop::plots::QUICK[6].2), "the help line says how it goes");
+    h.type_text("0, f");
+    h.press(Named::Enter);
+    assert_eq!(defs(&panel(&h).plot), vec!["f = sin(x)", "g = Tangente(0, f)"]);
+    h.frame();
+    assert!(h.find("g: y = x").is_some());
+    let ok = h.find("OK").unwrap();
+    h.click(ok.center());
     assert!(h.app.plot_edit.is_none());
-    assert_eq!(stored_plots(&root, &nb, &sheet)[0].fns, vec![n0te_core::plot::PlotFn::new("sin x", n0te_desktop::plots::INKS[1])]);
+    assert_eq!(defs(&stored_plots(&root, &nb, &sheet)[0]), vec!["f = sin(x)", "g = Tangente(0, f)"]);
 }
 
 #[test]
@@ -1281,71 +1343,74 @@ fn store_plot_from_tablet(h: &mut Harness, root: &std::path::Path, nb: &str, she
     h.message(Message::Live(n0te_desktop::live::LiveEvent::Changed { notebook: nb.to_string(), index: false, sheets: vec![sheet.to_string()] }));
 }
 
-#[test]
-fn ok_alone_keeps_everything_the_plot_has_and_a_mark_switched_on_is_stored() {
-    use n0te_core::plot::{Area, LineStyle, MARK_EXTREMA, MARK_ZEROS, PlotFn, PlotPoint};
-    let (mut h, root, nb, sheet) = plot_page("plotkeep", n0te_core::notebook::Background::Blank, true);
-    // From the tablet: marks with coordinates, an area between two functions, a dotted
-    // derivative, a point of its own, names, the x axis in π and named.
-    let mut p = stored_plots(&root, &nb, &sheet)[0].clone();
+/// A construction as the tablet makes it (with the core's `add`): a slider, a function with a
+/// point on it and its tangent there, a triangle with its circumcircle, styles set by hand.
+fn tablet_construction(mut p: n0te_core::plot::Plot) -> n0te_core::plot::Plot {
+    use n0te_core::plot::{LabelMode, LineStyle, MARK_EXTREMA};
+    p.objs.clear();
+    for s in ["a = Schieberegler(-1, 2, 0.1)", "f(x) = 0.5x^2 - 2", "T = Punkt(f, a)", "Tangente(T, f)", "A = (-2, -1)", "B = (3, -1)", "C = (0.5, 2.5)", "Vieleck(A, B, C)", "Kreis(A, B, C)", "M = Mittelpunkt(c)"] {
+        p = p.add(s).unwrap();
+    }
     let pi = std::f64::consts::PI;
-    p.fns = vec![PlotFn::new("x^2 - 1", CURVE), PlotFn { style: LineStyle::Dotted, area: Some(Area { from: -0.5, to: 1.0 / 3.0, to_fn: Some(0) }), ..PlotFn::new("f'(x)", 0xFF1E_5BD8) }];
     (p.x_min, p.x_max) = (-pi, 1.5 * pi);
-    p.marks = MARK_EXTREMA;
-    p.coords = true;
-    p.names = true;
     p.pi = true;
     p.x_name = "t".into();
-    p.points = vec![PlotPoint { name: "A".into(), x: 1.5, y: -0.25 }];
-    store_plot_from_tablet(&mut h, &root, &nb, &sheet, &p);
-    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p);
-    // Opened (every section drawn) and OK: the same plot.
-    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
-    h.frame();
-    // (Labels in the design's case: the mono designs shout.)
-    let cased = |s: &str| n0te_desktop::theme::cased(s);
-    assert!(h.find(cased("Eigene Punkte").as_str()).is_some() && h.find(cased("Namen").as_str()).is_some(), "the points and the axes are open");
-    let ok = h.find("OK").expect("the OK button");
-    h.click(ok.center());
-    assert!(h.app.plot_edit.is_none());
-    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p, "nothing it doesn't show is lost");
-    // "Nullstellen" switched on and OK: stored, the rest stays.
-    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
-    h.message(Message::Plot(n0te_desktop::plots::Msg::Mark(MARK_ZEROS, true)));
-    assert_eq!(h.app.plot_edit.as_ref().unwrap().plot.marks, MARK_EXTREMA | MARK_ZEROS);
-    let ok = h.find("OK").unwrap();
-    h.click(ok.center());
-    assert!(h.app.plot_edit.is_none());
-    assert_eq!(stored_plots(&root, &nb, &sheet)[0], n0te_core::plot::Plot { marks: MARK_EXTREMA | MARK_ZEROS, ..p });
+    p.objs[1].style.special = MARK_EXTREMA;
+    p.objs[1].style.coords = true;
+    p.objs[3].style.line = LineStyle::Dashed;
+    p.objs[8].style.label = LabelMode::Caption;
+    p.objs[8].style.caption = "Umkreis".into();
+    p.objs[9].style.aux = true;
+    p
 }
 
 #[test]
-fn an_area_and_a_derivative_from_the_dialog_are_stored() {
-    use n0te_core::plot::{Area, LineStyle, PlotFn};
+fn ok_alone_keeps_a_construction_from_the_tablet_and_what_the_panel_changes_is_stored() {
+    use n0te_core::plot::PALETTE;
     use n0te_desktop::plots::Msg;
-    let (mut h, root, nb, sheet) = plot_page("plotarea", n0te_core::notebook::Background::Blank, true);
-    let before = stored_plots(&root, &nb, &sheet)[0].clone();
-    h.message(Message::EditPlot(sheet.clone(), before.id.clone()));
+    let (mut h, root, nb, sheet) = plot_page("plotkeep", n0te_core::notebook::Background::Blank, true);
+    let p = tablet_construction(stored_plots(&root, &nb, &sheet)[0].clone());
+    store_plot_from_tablet(&mut h, &root, &nb, &sheet, &p);
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p);
+    // Opened (every row drawn, helpers last) and OK: the same plot.
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
     h.frame();
-    // "Fläche": over the middle half of the x range (y = 2 has no zeros), down to the x axis;
-    // its end typed.
-    h.message(Message::Plot(Msg::Area(0, true)));
-    assert_eq!(h.app.plot_edit.as_ref().unwrap().plot.fns[0].area, Some(Area { from: -3.0, to: 3.0, to_fn: None }));
-    h.message(Message::Plot(Msg::AreaRange(0, 1, "1,5".into())));
+    for row in ["a = 1", "f(x) = 0,5x² − 2", "T = (1 | −1,5)", "g: y = x − 2,5", "vieleck1 = 8,75", "c: (x − 0,5)² + (y + 0,14)² = 6,98", "M = (0,5 | −0,14)"] {
+        assert!(h.find(row).is_some(), "{row} is listed");
+    }
+    assert!(h.find(n0te_desktop::theme::cased("Hilfsobjekte").as_str()).is_some());
+    let ok = h.find("OK").expect("the OK button");
+    h.click(ok.center());
+    assert!(h.app.plot_edit.is_none());
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p, "nothing is lost");
+    // The slider dragged, f hidden by its dot, the tangent recoloured: stored in one go.
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
     h.frame();
-    // "Ableitung": a new row f'(x), dashed in the same ink.
-    let derive = h.find(n0te_desktop::theme::cased("Ableitung").as_str()).expect("the derivative button");
-    h.click(derive.center());
-    let e = h.app.plot_edit.as_ref().unwrap();
-    assert_eq!(e.plot.fns.len(), 2);
-    assert_eq!(e.plot.fns[1], PlotFn { style: LineStyle::Dashed, ..PlotFn::new("f'(x)", CURVE) });
-    h.frame();
-    assert!(h.find("g(x) =").is_some(), "its row shows");
-    h.message(Message::Plot(Msg::Ok));
+    let (a, f, g) = (p.objs[0].id.clone(), p.objs[1].id.clone(), p.objs[3].id.clone());
+    let track = h.bounds_of(n0te_desktop::plots::slider_id(&a)).expect("a's slider");
+    h.click(Point::new(track.x + track.width * 0.9, track.center_y()));
+    let now = panel(&h).plot.objs[0].def.clone();
+    assert!(now != "a = 1" && now.trim_start_matches("a = ").parse::<f64>().unwrap() > 1.5, "dragged to the right: {now}");
+    let dot = h.bounds_of(n0te_desktop::plots::dot_id(&f)).expect("f's dot");
+    h.click(dot.center());
+    assert!(!panel(&h).plot.objs[1].style.visible, "hidden");
+    h.message(Message::Plot(Msg::Pick(g.clone())));
+    h.message(Message::Plot(Msg::Color(PALETTE[4])));
+    let ok = h.find("OK").unwrap();
+    h.click(ok.center());
     assert!(h.app.plot_edit.is_none());
     let got = stored_plots(&root, &nb, &sheet)[0].clone();
-    assert_eq!(got.fns, vec![PlotFn { area: Some(Area { from: -3.0, to: 1.5, to_fn: None }), ..PlotFn::new("2", CURVE) }, PlotFn { style: LineStyle::Dashed, ..PlotFn::new("f'(x)", CURVE) }]);
-    assert_eq!(n0te_core::plot::Plot { fns: before.fns.clone(), ..got }, before, "nothing else changed");
+    let mut want = p.clone();
+    want.objs[0].def = now;
+    want.objs[1].style.visible = false;
+    want.objs[3].style.color = PALETTE[4];
+    assert_eq!(got, want);
+    // Abbrechen keeps what is stored.
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
+    h.message(Message::Plot(Msg::Remove(p.objs[4].id.clone())));
+    h.message(Message::Plot(Msg::Cancel));
+    assert!(h.app.plot_edit.is_none());
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], want);
 }
 
 #[test]
@@ -1356,8 +1421,11 @@ fn a_function_of_a_plot_is_found_listed_with_the_plot_icon_and_shown() {
     let (mut h, root, nb, sheet) = plot_page("plotsearch", n0te_core::notebook::Background::Blank, true);
     let id = stored_plots(&root, &nb, &sheet)[0].id.clone();
     h.message(Message::EditPlot(sheet.clone(), id));
-    h.message(Message::Plot(Msg::Expr(0, "2sin x".into())));
+    let f = h.app.plot_edit.as_ref().unwrap().plot.objs[0].id.clone();
+    h.message(Message::Plot(Msg::Edit(f)));
+    h.message(Message::Plot(Msg::EditText("f(x) = 2sin x".into())));
     h.message(Message::Plot(Msg::Ok));
+    assert!(h.app.plot_edit.is_none());
     // Zoomed in on the page's corner: showing the plot moves the view.
     let c = open(&h).camera;
     let page = open(&h).pages.pages[0].rect();

@@ -366,7 +366,7 @@ pub struct App {
     /// Look for sheets whose headings weren't read yet (new pages).
     headings_check: bool,
     headings_reading: bool,
-    /// The "Koordinatensystem" dialog, open for one plot.
+    /// The "Koordinatensystem" panel, open for one plot.
     pub plot_edit: Option<crate::plots::Editor>,
 }
 
@@ -1415,7 +1415,7 @@ impl App {
                 let Some(e) = &mut self.plot_edit else { return Task::none() };
                 match e.update(m) {
                     Reply::None => {}
-                    Reply::Focus(i) => return iced::widget::operation::focus(crate::plots::expr_id(i)),
+                    Reply::Focus(id, at) => return crate::plots::focus(id, at),
                     Reply::Cancel => self.plot_edit = None,
                     Reply::Delete => {
                         if let Some(e) = self.plot_edit.take()
@@ -1458,7 +1458,7 @@ impl App {
         }
     }
 
-    /// Opens the dialog for a plot (as stored now).
+    /// Opens the panel for a plot (as stored now), the cursor in its input line.
     fn edit_plot(&mut self, sheet_id: &str, plot_id: &str) -> Task<Message> {
         if self.read_only() {
             self.say("Nur lesen: Koordinatensysteme ändert, wer dich eingeladen hat");
@@ -1469,11 +1469,11 @@ impl App {
         let Some(plot) = self.lib.load_sheet(&nb, sheet_id).ok().and_then(|s| s.plots().into_iter().find(|p| p.id == plot_id)) else { return Task::none() };
         let paper = self.paper_of(sheet_id);
         self.plot_edit = Some(crate::plots::Editor::new(sheet_id, plot, paper));
-        iced::widget::operation::focus(crate::plots::expr_id(0))
+        crate::plots::focus(crate::plots::input_id(), None)
     }
 
     /// A new coordinate system in the middle of the view, on the page there (else the current
-    /// one), stored at once; its dialog opens with the first function to type.
+    /// one), stored at once; its panel opens with the cursor in the input line.
     fn insert_plot(&mut self) -> Task<Message> {
         if self.read_only() {
             self.say("Nur lesen: einfügen kann, wer dich eingeladen hat");
@@ -1502,7 +1502,7 @@ impl App {
         }
         plot.id = id;
         self.plot_edit = Some(crate::plots::Editor::new(&sheet_id, plot, paper));
-        iced::widget::operation::focus(crate::plots::expr_id(0))
+        crate::plots::focus(crate::plots::input_id(), None)
     }
 
     /// Changes a sheet of the open notebook and stores it (it syncs from there); false if it
@@ -2587,10 +2587,10 @@ impl App {
                 _ => Task::none(),
             };
         }
-        // The plot dialog is open: Esc cancels, the rest waits until it's closed.
+        // The plot panel is open: Esc leaves a row being edited or cancels, the rest waits.
         if self.plot_edit.is_some() {
             return match key.as_ref() {
-                Key::Named(Named::Escape) => self.handle(Message::Plot(crate::plots::Msg::Cancel)),
+                Key::Named(Named::Escape) => self.handle(Message::Plot(crate::plots::Msg::Escape)),
                 _ => Task::none(),
             };
         }
@@ -2706,7 +2706,7 @@ impl App {
             Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera)))
         } else if let (Screen::Notebook(_), Some(e)) = (&self.screen, &self.plot_edit) {
             // Esc in a field cancels too (the field would only let go of the focus).
-            Some(Element::from(crate::widgets::on_escape(e.view(), crate::plots::Msg::Cancel)).map(Message::Plot))
+            Some(Element::from(crate::widgets::on_escape(e.view(), crate::plots::Msg::Escape)).map(Message::Plot))
         } else {
             None
         };
