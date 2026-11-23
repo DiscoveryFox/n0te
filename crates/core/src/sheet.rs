@@ -10,7 +10,7 @@ use loro::{Container, ExportMode, LoroDoc, LoroMap, LoroText, LoroValue, UndoMan
 use crate::error::{Error, Result};
 use crate::ids;
 use crate::ink::{self, Brush, InkPoint, Rect};
-use crate::plot::{Plot, PlotFn};
+use crate::plot::{Area, LineStyle, Plot, PlotFn, PlotPoint};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -832,6 +832,17 @@ impl Sheet {
                 y += rows * line_h;
             }
         }
+        // The functions of coordinate systems ("sin" finds the graph of 2sin x), by their name.
+        for p in self.plots() {
+            for (i, f) in p.fns.iter().enumerate() {
+                let text = format!("{}(x) = {}", crate::plot::fn_name(i), f.expr.trim());
+                if !f.expr.trim().is_empty()
+                    && let Some(slips) = score(&w, &normalize(&f.expr))
+                {
+                    out.push(Hit { kind: HitKind::Plot, text, x0: p.x, y0: p.y, x1: p.x + p.w, y1: p.y + p.h, slips });
+                }
+            }
+        }
         out.sort_by(|a, b| a.slips.cmp(&b.slips).then(a.y0.total_cmp(&b.y0)));
         out
     }
@@ -898,16 +909,30 @@ fn map_bool(m: &LoroMap, key: &str) -> Option<bool> {
     }
 }
 
-/// A plot's fields into its map. Functions are one string ("expr␟color␞…"): a plot's
-/// functions are edited together, in its dialog.
+/// A plot's fields into its map. Functions are one string ("expr␟color␟style␟area␞…"),
+/// points another ("name␟x␟y␞…"): a plot's functions are edited together, in its dialog.
+/// Older apps read the first two fields of a function and skip the keys they don't know.
 fn write_plot(m: &LoroMap, p: &Plot) -> Result<()> {
-    for (k, v) in [("x", p.x as f64), ("y", p.y as f64), ("w", p.w as f64), ("h", p.h as f64), ("x0", p.x_min), ("x1", p.x_max), ("y0", p.y_min), ("y1", p.y_max), ("color", p.color as f64), ("width", p.width as f64)] {
+    for (k, v) in [("x", p.x as f64), ("y", p.y as f64), ("w", p.w as f64), ("h", p.h as f64), ("x0", p.x_min), ("x1", p.x_max), ("y0", p.y_min), ("y1", p.y_max), ("color", p.color as f64), ("width", p.width as f64), ("marks", p.marks as f64)] {
         m.insert(k, v)?;
     }
-    m.insert("grid", p.grid)?;
-    m.insert("clean", p.clean)?;
-    let fns: Vec<String> = p.fns.iter().map(|f| format!("{}{SEP_FIELD}{:08x}", f.expr.replace([SEP_FIELD, SEP_ITEM], " "), f.color)).collect();
+    for (k, v) in [("grid", p.grid), ("clean", p.clean), ("names", p.names), ("pi", p.pi), ("coords", p.coords)] {
+        m.insert(k, v)?;
+    }
+    let clean = |s: &str| s.replace([SEP_FIELD, SEP_ITEM], " ");
+    m.insert("xname", clean(&p.x_name))?;
+    m.insert("yname", clean(&p.y_name))?;
+    let fns: Vec<String> = p
+        .fns
+        .iter()
+        .map(|f| {
+            let area = f.area.as_ref().map(|a| format!("{};{};{}", a.from, a.to, a.to_fn.map(|j| j.to_string()).unwrap_or_default())).unwrap_or_default();
+            format!("{}{SEP_FIELD}{:08x}{SEP_FIELD}{}{SEP_FIELD}{}", clean(&f.expr), f.color, f.style.code(), area)
+        })
+        .collect();
     m.insert("fns", fns.join(&SEP_ITEM.to_string()))?;
+    let pts: Vec<String> = p.points.iter().map(|q| format!("{}{SEP_FIELD}{}{SEP_FIELD}{}", clean(&q.name), q.x, q.y)).collect();
+    m.insert("pts", pts.join(&SEP_ITEM.to_string()))?;
     Ok(())
 }
 
@@ -921,7 +946,21 @@ fn read_plot(id: &str, m: &LoroMap) -> Plot {
             let mut parts = item.split(SEP_FIELD);
             let expr = parts.next().unwrap_or("").to_string();
             let color = parts.next().and_then(|c| u32::from_str_radix(c, 16).ok()).unwrap_or(0xFF20_2428);
-            PlotFn { expr, color }
+            let style = LineStyle::from_code(parts.next().unwrap_or(""));
+            let area = parts.next().filter(|a| !a.is_empty()).and_then(|a| {
+                let v: Vec<&str> = a.split(';').collect();
+                Some(Area { from: v.first()?.parse().ok()?, to: v.get(1)?.parse().ok()?, to_fn: v.get(2).and_then(|j| j.parse().ok()) })
+            });
+            PlotFn { expr, color, style, area }
+        })
+        .collect();
+    let points = map_str(m, "pts")
+        .unwrap_or_default()
+        .split(SEP_ITEM)
+        .filter(|s| !s.is_empty())
+        .filter_map(|item| {
+            let v: Vec<&str> = item.split(SEP_FIELD).collect();
+            Some(PlotPoint { name: v.first()?.to_string(), x: v.get(1)?.parse().ok()?, y: v.get(2)?.parse().ok()? })
         })
         .collect();
     Plot {
@@ -939,6 +978,13 @@ fn read_plot(id: &str, m: &LoroMap) -> Plot {
         color: f("color", 0xFF20_2428u32 as f64) as u32,
         width: f("width", 1.2) as f32,
         fns,
+        names: map_bool(m, "names").unwrap_or(false),
+        pi: map_bool(m, "pi").unwrap_or(false),
+        x_name: map_str(m, "xname").unwrap_or_default(),
+        y_name: map_str(m, "yname").unwrap_or_default(),
+        marks: f("marks", 0.0) as u8,
+        coords: map_bool(m, "coords").unwrap_or(false),
+        points,
     }
 }
 
@@ -1216,8 +1262,14 @@ mod tests {
     fn plots_are_boxes_that_keep_their_settings() {
         let s = Sheet::create(1).unwrap();
         let mut p = Plot::centered(100.0, 200.0, 240.0, 160.0, 20.0, 0xFF22_2222, 1.2);
-        p.fns = vec![PlotFn { expr: "x^2 - 1".into(), color: 0xFFD0_2020 }, PlotFn { expr: "sin x".into(), color: 0xFF20_20D0 }];
+        p.fns = vec![PlotFn::new("x^2 - 1", 0xFFD0_2020), PlotFn { style: LineStyle::Dashed, area: Some(Area { from: -1.0, to: 2.5, to_fn: Some(0) }), ..PlotFn::new("sin x", 0xFF20_20D0) }];
         p.grid = true;
+        p.names = true;
+        p.pi = true;
+        p.x_name = "t".into();
+        p.marks = crate::plot::MARK_ZEROS | crate::plot::MARK_CROSSINGS;
+        p.coords = true;
+        p.points = vec![PlotPoint { name: "A".into(), x: 1.5, y: -0.25 }];
         let id = s.add_plot(&p).unwrap();
         let got = s.plots();
         assert_eq!(got.len(), 1);
@@ -1242,6 +1294,10 @@ mod tests {
         s.undo().unwrap();
         assert_eq!(s.plots()[0].fns.len(), 2);
         assert_eq!(s.plots()[0].x_max, 6.0);
+        // Its functions are found.
+        let hits = s.search("sin", 595.0);
+        assert_eq!(hits.len(), 1);
+        assert_eq!((hits[0].kind, hits[0].text.as_str()), (crate::search::HitKind::Plot, "g(x) = sin x"));
         // Drawn as ink for the export; gone with remove; survives a reload.
         assert!(s.plot_strokes().len() > 20);
         let b = Sheet::load(2, &s.snapshot().unwrap()).unwrap();

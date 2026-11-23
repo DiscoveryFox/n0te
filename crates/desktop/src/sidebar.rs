@@ -243,15 +243,21 @@ fn marked<'a>(line: String, words: &[String]) -> Element<'a, Message> {
     rich_text(spans).font(theme::SANS).size(12.5).width(Length::Fill).into()
 }
 
-/// The small mark of a hit's kind: handwriting, typed text, heading, PDF (the tablet's glyphs).
+/// The small mark of a hit's kind: handwriting, typed text, heading, PDF, a function in a
+/// coordinate system (the tablet's glyphs).
 fn kind_icon<'a>(kind: HitKind) -> Element<'a, Message> {
-    let glyph = match kind {
+    icon(glyph_of(kind), 14.0, if kind == HitKind::Heading { theme::p().accent } else { theme::p().muted })
+}
+
+/// The glyph (SVG) a hit of `kind` is listed with.
+pub fn glyph_of(kind: HitKind) -> &'static [u8] {
+    match kind {
         HitKind::Ink => PEN,
         HitKind::Text => TEXT,
         HitKind::Heading => HEADING,
         HitKind::Pdf => PDF,
-    };
-    icon(glyph, 14.0, if kind == HitKind::Heading { theme::p().accent } else { theme::p().muted })
+        HitKind::Plot => PLOT,
+    }
 }
 
 fn icon<'a>(glyph: &'static [u8], size: f32, color: Color) -> Element<'a, Message> {
@@ -263,6 +269,8 @@ const PEN: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 
 const TEXT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7 5 4.5 19 4.5 19 7M12 4.5 12 19.5M9 19.5 15 19.5"/></svg>"##;
 const HEADING: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4 6 16M15 4 15 16M6 10 15 10M4 20.5 20 20.5"/></svg>"##;
 const PDF: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3 14 3 19 8 19 21 6 21ZM14 3 14 8 19 8M9 14 16 14M9 17 14 17"/></svg>"##;
+/// An L-shaped pair of axes with a curve over them.
+pub const PLOT: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 3.5 4 20 20.5 20M6.5 5 9 12.5 12 16 15 12.5 17.5 5"/></svg>"##;
 const LOUPE: &[u8] = br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="10.5" r="6.5"/><path d="M15.3 15.3 20.5 20.5"/></svg>"##;
 
 /// The format of a plain page when it isn't upright A4 (the paper is visible on the page anyway).

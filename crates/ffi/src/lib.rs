@@ -158,11 +158,33 @@ pub struct FfiImage {
     pub plot: Option<FfiPlot>,
 }
 
-/// One function of a plot: what was typed and its ink (0xAARRGGBB).
+/// One function of a plot: what was typed and its ink (0xAARRGGBB), its line (0 solid,
+/// 1 dashed, 2 dotted) and an area hatched under it.
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct FfiPlotFn {
     pub expr: String,
     pub color: u32,
+    #[uniffi(default = 0)]
+    pub style: u8,
+    #[uniffi(default)]
+    pub area: Option<FfiPlotArea>,
+}
+
+/// An area hatched under a function over [from, to], down to the x axis (to_fn None) or to
+/// another of the plot's functions.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiPlotArea {
+    pub from: f64,
+    pub to: f64,
+    pub to_fn: Option<u32>,
+}
+
+/// A point marked by hand on a plot.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiPlotPoint {
+    pub name: String,
+    pub x: f64,
+    pub y: f64,
 }
 
 /// A coordinate system on a page (see the core's `Plot`): box in page points, ranges, look,
@@ -183,6 +205,32 @@ pub struct FfiPlot {
     pub color: u32,
     pub width: f32,
     pub fns: Vec<FfiPlotFn>,
+    /// Function names at the curves.
+    #[uniffi(default = false)]
+    pub names: bool,
+    /// The x axis in steps of π.
+    #[uniffi(default = false)]
+    pub pi: bool,
+    #[uniffi(default = "")]
+    pub x_name: String,
+    #[uniffi(default = "")]
+    pub y_name: String,
+    /// What it marks by itself: 1 zeros, 2 highs and lows, 4 crossings, 8 turning points.
+    #[uniffi(default = 0)]
+    pub marks: u8,
+    /// Coordinates at marked points, sizes of areas.
+    #[uniffi(default = false)]
+    pub coords: bool,
+    #[uniffi(default)]
+    pub points: Vec<FfiPlotPoint>,
+}
+
+fn style_code(s: n0te_core::plot::LineStyle) -> u8 {
+    match s {
+        n0te_core::plot::LineStyle::Solid => 0,
+        n0te_core::plot::LineStyle::Dashed => 1,
+        n0te_core::plot::LineStyle::Dotted => 2,
+    }
 }
 
 impl From<n0te_core::plot::Plot> for FfiPlot {
@@ -201,7 +249,18 @@ impl From<n0te_core::plot::Plot> for FfiPlot {
             clean: p.clean,
             color: p.color,
             width: p.width,
-            fns: p.fns.into_iter().map(|f| FfiPlotFn { expr: f.expr, color: f.color }).collect(),
+            fns: p
+                .fns
+                .into_iter()
+                .map(|f| FfiPlotFn { expr: f.expr, color: f.color, style: style_code(f.style), area: f.area.map(|a| FfiPlotArea { from: a.from, to: a.to, to_fn: a.to_fn.map(|j| j as u32) }) })
+                .collect(),
+            names: p.names,
+            pi: p.pi,
+            x_name: p.x_name,
+            y_name: p.y_name,
+            marks: p.marks,
+            coords: p.coords,
+            points: p.points.into_iter().map(|q| FfiPlotPoint { name: q.name, x: q.x, y: q.y }).collect(),
         }
     }
 }
@@ -222,7 +281,27 @@ impl From<FfiPlot> for n0te_core::plot::Plot {
             clean: p.clean,
             color: p.color,
             width: p.width,
-            fns: p.fns.into_iter().map(|f| n0te_core::plot::PlotFn { expr: f.expr, color: f.color }).collect(),
+            fns: p
+                .fns
+                .into_iter()
+                .map(|f| n0te_core::plot::PlotFn {
+                    expr: f.expr,
+                    color: f.color,
+                    style: match f.style {
+                        1 => n0te_core::plot::LineStyle::Dashed,
+                        2 => n0te_core::plot::LineStyle::Dotted,
+                        _ => n0te_core::plot::LineStyle::Solid,
+                    },
+                    area: f.area.map(|a| n0te_core::plot::Area { from: a.from, to: a.to, to_fn: a.to_fn.map(|j| j as usize) }),
+                })
+                .collect(),
+            names: p.names,
+            pi: p.pi,
+            x_name: p.x_name,
+            y_name: p.y_name,
+            marks: p.marks,
+            coords: p.coords,
+            points: p.points.into_iter().map(|q| n0te_core::plot::PlotPoint { name: q.name, x: q.x, y: q.y }).collect(),
         }
     }
 }
@@ -246,6 +325,45 @@ pub fn plot_check(expr: String) -> Option<String> {
 #[uniffi::export]
 pub fn plot_fit_y(plot: FfiPlot) -> Vec<f64> {
     n0te_core::plot::Plot::from(plot).fit_y().map(|(a, b)| vec![a, b]).unwrap_or_default()
+}
+
+/// What is wrong with each of the plot's functions (None: fine), references to the others
+/// resolved (g(x) = f'(x) + 1).
+#[uniffi::export]
+pub fn plot_errors(plot: FfiPlot) -> Vec<Option<String>> {
+    n0te_core::plot::Plot::from(plot).errors()
+}
+
+/// LaTeX from the handwriting recogniser as a function to type; Err: why it can't be drawn.
+#[uniffi::export]
+pub fn plot_from_latex(latex: String) -> R<String> {
+    n0te_core::plot::latex_to_expr(&latex).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// Points typed by hand ("A(1|2); B(-1|0,5)"); Err: what is wrong.
+#[uniffi::export]
+pub fn plot_parse_points(text: String) -> R<Vec<FfiPlotPoint>> {
+    n0te_core::plot::parse_points(&text).map(|v| v.into_iter().map(|q| FfiPlotPoint { name: q.name, x: q.x, y: q.y }).collect()).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// Points as they are typed.
+#[uniffi::export]
+pub fn plot_format_points(points: Vec<FfiPlotPoint>) -> String {
+    n0te_core::plot::format_points(&points.into_iter().map(|q| n0te_core::plot::PlotPoint { name: q.name, x: q.x, y: q.y }).collect::<Vec<_>>())
+}
+
+/// The plot without its function number `index`: later ones move up a name, references and
+/// areas follow.
+#[uniffi::export]
+pub fn plot_remove_fn(plot: FfiPlot, index: u32) -> FfiPlot {
+    n0te_core::plot::Plot::from(plot).remove_fn(index as usize).into()
+}
+
+/// The x range widened to whole π/2 (for an axis in steps of π): [min, max].
+#[uniffi::export]
+pub fn plot_pi_range(plot: FfiPlot) -> Vec<f64> {
+    let (a, b) = n0te_core::plot::Plot::from(plot).pi_range();
+    vec![a, b]
 }
 
 /// The y range for the same units as across: [min, max].
@@ -322,6 +440,7 @@ pub enum FfiHitKind {
     Text,
     Heading,
     Pdf,
+    Plot,
 }
 
 /// Something found in a notebook: on which sheet (node and sheet id), what kind, its text, where
@@ -731,6 +850,7 @@ impl NotebookHandle {
                 HitKind::Text => FfiHitKind::Text,
                 HitKind::Heading => FfiHitKind::Heading,
                 HitKind::Pdf => FfiHitKind::Pdf,
+                HitKind::Plot => FfiHitKind::Plot,
             };
             let mut hits: Vec<FfiSearchHit> = Vec::new();
             let width = if spec.width > 0.0 { spec.width } else { 595.0 };

@@ -97,6 +97,8 @@ pub enum HitKind {
     Heading,
     /// The PDF behind the page.
     Pdf,
+    /// A function in a coordinate system.
+    Plot,
 }
 
 #[cfg(test)]

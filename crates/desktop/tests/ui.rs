@@ -1046,7 +1046,7 @@ fn is_curve(p: &[u8]) -> bool {
 fn green_plot() -> n0te_core::plot::Plot {
     let mut p = n0te_core::plot::Plot::centered(100.0, 200.0, 240.0, 160.0, 20.0, n0te_desktop::plots::AXES, 4.0);
     p.clean = true;
-    p.fns = vec![n0te_core::plot::PlotFn { expr: "2".into(), color: CURVE }];
+    p.fns = vec![n0te_core::plot::PlotFn::new("2", CURVE)];
     p
 }
 
@@ -1182,7 +1182,7 @@ fn clicking_a_plot_opens_its_dialog_and_ok_stores_what_was_typed() {
     h.click(ok.center());
     assert!(h.app.plot_edit.is_none(), "OK closes the dialog");
     let p = &stored_plots(&root, &nb, &sheet)[0];
-    assert_eq!(p.fns, vec![n0te_core::plot::PlotFn { expr: "2x - 1".into(), color: CURVE }]);
+    assert_eq!(p.fns, vec![n0te_core::plot::PlotFn::new("2x - 1", CURVE)]);
     assert_eq!((p.x, p.y, p.w, p.h), (100.0, 200.0, 240.0, 160.0), "the box stays");
     assert_eq!(open(&h).pages.plots_of(&sheet)[0].fns[0].expr, "2x - 1", "the page shows the new curve");
 }
@@ -1251,7 +1251,7 @@ fn inserting_from_the_palette_puts_a_plot_on_the_squares() {
     h.type_text("sin x");
     h.press(iced::keyboard::key::Named::Enter);
     assert!(h.app.plot_edit.is_none());
-    assert_eq!(stored_plots(&root, &nb, &sheet)[0].fns, vec![n0te_core::plot::PlotFn { expr: "sin x".into(), color: n0te_desktop::plots::INKS[1] }]);
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0].fns, vec![n0te_core::plot::PlotFn::new("sin x", n0te_desktop::plots::INKS[1])]);
 }
 
 #[test]
@@ -1270,4 +1270,124 @@ fn the_pdf_export_has_the_plot_as_ink() {
     let band = (120..320).flat_map(|x| (236..245).map(move |y| (x, y))).filter(|&(x, y)| is_curve(px(x, y))).count();
     assert!(band > 400, "the curve is in the PDF: {band} green pixels");
     assert!(!is_curve(px(200, 300)) && !is_curve(px(450, 240)));
+}
+
+/// Stores `p` on the sheet as the tablet would and lets the app know.
+fn store_plot_from_tablet(h: &mut Harness, root: &std::path::Path, nb: &str, sheet: &str, p: &n0te_core::plot::Plot) {
+    let lib = Library::open(root).unwrap();
+    let s = lib.load_sheet(nb, sheet).unwrap();
+    s.set_plot(p).unwrap();
+    lib.save_sheet(nb, sheet, &s).unwrap();
+    h.message(Message::Live(n0te_desktop::live::LiveEvent::Changed { notebook: nb.to_string(), index: false, sheets: vec![sheet.to_string()] }));
+}
+
+#[test]
+fn ok_alone_keeps_everything_the_plot_has_and_a_mark_switched_on_is_stored() {
+    use n0te_core::plot::{Area, LineStyle, MARK_EXTREMA, MARK_ZEROS, PlotFn, PlotPoint};
+    let (mut h, root, nb, sheet) = plot_page("plotkeep", n0te_core::notebook::Background::Blank, true);
+    // From the tablet: marks with coordinates, an area between two functions, a dotted
+    // derivative, a point of its own, names, the x axis in π and named.
+    let mut p = stored_plots(&root, &nb, &sheet)[0].clone();
+    let pi = std::f64::consts::PI;
+    p.fns = vec![PlotFn::new("x^2 - 1", CURVE), PlotFn { style: LineStyle::Dotted, area: Some(Area { from: -0.5, to: 1.0 / 3.0, to_fn: Some(0) }), ..PlotFn::new("f'(x)", 0xFF1E_5BD8) }];
+    (p.x_min, p.x_max) = (-pi, 1.5 * pi);
+    p.marks = MARK_EXTREMA;
+    p.coords = true;
+    p.names = true;
+    p.pi = true;
+    p.x_name = "t".into();
+    p.points = vec![PlotPoint { name: "A".into(), x: 1.5, y: -0.25 }];
+    store_plot_from_tablet(&mut h, &root, &nb, &sheet, &p);
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p);
+    // Opened (every section drawn) and OK: the same plot.
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
+    h.frame();
+    // (Labels in the design's case: the mono designs shout.)
+    let cased = |s: &str| n0te_desktop::theme::cased(s);
+    assert!(h.find(cased("Eigene Punkte").as_str()).is_some() && h.find(cased("Namen").as_str()).is_some(), "the points and the axes are open");
+    let ok = h.find("OK").expect("the OK button");
+    h.click(ok.center());
+    assert!(h.app.plot_edit.is_none());
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], p, "nothing it doesn't show is lost");
+    // "Nullstellen" switched on and OK: stored, the rest stays.
+    h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
+    h.message(Message::Plot(n0te_desktop::plots::Msg::Mark(MARK_ZEROS, true)));
+    assert_eq!(h.app.plot_edit.as_ref().unwrap().plot.marks, MARK_EXTREMA | MARK_ZEROS);
+    let ok = h.find("OK").unwrap();
+    h.click(ok.center());
+    assert!(h.app.plot_edit.is_none());
+    assert_eq!(stored_plots(&root, &nb, &sheet)[0], n0te_core::plot::Plot { marks: MARK_EXTREMA | MARK_ZEROS, ..p });
+}
+
+#[test]
+fn an_area_and_a_derivative_from_the_dialog_are_stored() {
+    use n0te_core::plot::{Area, LineStyle, PlotFn};
+    use n0te_desktop::plots::Msg;
+    let (mut h, root, nb, sheet) = plot_page("plotarea", n0te_core::notebook::Background::Blank, true);
+    let before = stored_plots(&root, &nb, &sheet)[0].clone();
+    h.message(Message::EditPlot(sheet.clone(), before.id.clone()));
+    h.frame();
+    // "Fläche": over the middle half of the x range (y = 2 has no zeros), down to the x axis;
+    // its end typed.
+    h.message(Message::Plot(Msg::Area(0, true)));
+    assert_eq!(h.app.plot_edit.as_ref().unwrap().plot.fns[0].area, Some(Area { from: -3.0, to: 3.0, to_fn: None }));
+    h.message(Message::Plot(Msg::AreaRange(0, 1, "1,5".into())));
+    h.frame();
+    // "Ableitung": a new row f'(x), dashed in the same ink.
+    let derive = h.find(n0te_desktop::theme::cased("Ableitung").as_str()).expect("the derivative button");
+    h.click(derive.center());
+    let e = h.app.plot_edit.as_ref().unwrap();
+    assert_eq!(e.plot.fns.len(), 2);
+    assert_eq!(e.plot.fns[1], PlotFn { style: LineStyle::Dashed, ..PlotFn::new("f'(x)", CURVE) });
+    h.frame();
+    assert!(h.find("g(x) =").is_some(), "its row shows");
+    h.message(Message::Plot(Msg::Ok));
+    assert!(h.app.plot_edit.is_none());
+    let got = stored_plots(&root, &nb, &sheet)[0].clone();
+    assert_eq!(got.fns, vec![PlotFn { area: Some(Area { from: -3.0, to: 1.5, to_fn: None }), ..PlotFn::new("2", CURVE) }, PlotFn { style: LineStyle::Dashed, ..PlotFn::new("f'(x)", CURVE) }]);
+    assert_eq!(n0te_core::plot::Plot { fns: before.fns.clone(), ..got }, before, "nothing else changed");
+}
+
+#[test]
+fn a_function_of_a_plot_is_found_listed_with_the_plot_icon_and_shown() {
+    use n0te_core::search::HitKind;
+    use n0te_desktop::plots::Msg;
+    use n0te_desktop::sidebar;
+    let (mut h, root, nb, sheet) = plot_page("plotsearch", n0te_core::notebook::Background::Blank, true);
+    let id = stored_plots(&root, &nb, &sheet)[0].id.clone();
+    h.message(Message::EditPlot(sheet.clone(), id));
+    h.message(Message::Plot(Msg::Expr(0, "2sin x".into())));
+    h.message(Message::Plot(Msg::Ok));
+    // Zoomed in on the page's corner: showing the plot moves the view.
+    let c = open(&h).camera;
+    let page = open(&h).pages.pages[0].rect();
+    h.message(Message::Camera(n0te_desktop::pages::Camera { x: page.x0, y: page.y0 + 500.0, zoom: 3.0, ..c }));
+    h.message(Message::SearchQuery("sin".into()));
+    let hits: Vec<(HitKind, String, [f32; 4])> = h.app.search.hits().map(|(_, h)| (h.kind, h.text.clone(), [h.x0, h.y0, h.x1, h.y1])).collect();
+    assert_eq!(hits, vec![(HitKind::Plot, "f(x) = 2sin x".to_string(), [100.0, 200.0, 340.0, 360.0])], "the plot's box");
+    assert_eq!(sidebar::glyph_of(HitKind::Plot), sidebar::PLOT);
+    assert!([HitKind::Ink, HitKind::Text, HitKind::Heading, HitKind::Pdf].iter().all(|&k| sidebar::glyph_of(k) != sidebar::PLOT));
+    // Its row: the icon is the pair of axes (an L: down the left, along the bottom) with a curve.
+    let row = h.bounds_of(sidebar::hit_id(0)).expect("its row");
+    let (rgba, _) = h.frame_rgba();
+    let px = |x: f32, y: f32| {
+        let i = ((y as usize) * 1600 + x as usize) * 4;
+        [rgba[i] as i32, rgba[i + 1] as i32, rgba[i + 2] as i32]
+    };
+    let bg = px(row.x + 30.0, row.y + 4.0);
+    let (ix, iy) = (row.x + 38.0, row.y + 7.0);
+    let inked = |x: f32, y: f32| px(ix + x, iy + y).iter().zip(bg).map(|(a, b)| (a - b).abs()).sum::<i32>() > 60;
+    let left = (2..12).filter(|&y| (1..4).any(|x| inked(x as f32, y as f32))).count();
+    let bottom = (4..12).filter(|&x| (10..13).any(|y| inked(x as f32, y as f32))).count();
+    let corner = (8..13).flat_map(|x| (1..5).map(move |y| (x, y))).filter(|&(x, y)| inked(x as f32, y as f32)).count();
+    assert!(left >= 7 && bottom >= 6, "an L of axes: {left} {bottom}");
+    assert!(corner >= 2, "the curve up to the right: {corner}");
+    // A click shows the plot in the middle, lit up.
+    h.click(row.center());
+    let o = open(&h);
+    let flash = o.pages.flash.clone().expect("lit up");
+    assert_eq!((flash.sheet_id.as_str(), [flash.rect.x0, flash.rect.y0, flash.rect.x1, flash.rect.y1]), (sheet.as_str(), [100.0, 200.0, 340.0, 360.0]));
+    let c = o.camera;
+    let middle = (c.x + c.viewport.width / c.zoom / 2.0 - page.x0, c.y + c.viewport.height / c.zoom / 2.0 - page.y0);
+    assert!((middle.0 - 220.0).abs() < 0.5 && (middle.1 - 280.0).abs() < 0.5, "{middle:?}");
 }
