@@ -530,3 +530,48 @@ fn content_in_several_streams_splits_too() {
     check(&hex, "hex-encoded stream");
     assert_eq!(count_objects(&e, &hex, 0, PdfPageObjectType::XObjectForm), 0);
 }
+
+#[test]
+fn export_keeps_every_page_size_also_big_and_odd_ones() {
+    let e = engine();
+    let root = std::env::temp_dir().join(format!("n0te-pdf-sizes-{}", n0te_core::ids::new_id(9)));
+    let lib = Arc::new(Library::open(&root).unwrap());
+    let l = lib.clone();
+    let w = PdfWorker::start(e, move |key| Ok(l.blob(key)?), |_| {}, WorkerOptions::default());
+    let nb = lib.create_notebook("Größen").unwrap();
+    // A size of its own bigger than A3, A3 landscape, an A4 page made longer (space inserted),
+    // a board with ink far apart, an A4 PDF page with space inserted.
+    let big = SheetSpec { width: 1000.0, height: 1400.0, ..SheetSpec::a4(Background::Grid) };
+    nb.add_sheet(None, 0, &big).unwrap();
+    nb.add_sheet(None, 1, &SheetSpec { width: 1191.0, height: 842.0, ..SheetSpec::a4(Background::Blank) }).unwrap();
+    let (long, _) = nb.add_sheet(None, 2, &SheetSpec::a4(Background::Lines)).unwrap();
+    nb.reshape(&long, 842.0 + 600.0, &[]).unwrap();
+    let (_, board) = nb.add_sheet(None, 3, &SheetSpec::board()).unwrap();
+    let slides = make_pdf(&e, 1);
+    let imported = import_pdf(&lib, &nb, &w, slides, None, 4).unwrap();
+    let pdf_node = nb.outline(true).into_iter().find_map(|r| match r {
+        n0te_core::notebook::OutlineRow::Sheet { node, sheet_id, .. } if sheet_id == imported[0].sheet_id => Some(node),
+        _ => None,
+    }).unwrap();
+    nb.reshape(&pdf_node, imported[0].size.height + 300.0, &[(400.0, 300.0)]).unwrap();
+    let ink = |id: &str| -> n0te_pdf::Result<Vec<n0te_core::sheet::Stroke>> {
+        let line = |x: f32, y: f32| n0te_core::sheet::Stroke {
+            id: String::new(),
+            bounds: n0te_core::ink::Rect { x0: x, y0: y, x1: x + 50.0, y1: y + 2.0 },
+            brush: Brush { width: 2.0, thinning: 0.0, color: 0xFF11_1111, kind: 0 },
+            points: (0..=10).map(|i| InkPoint { x: x + i as f32 * 5.0, y, pressure: 0.5, t_ms: i * 8 }).collect(),
+        };
+        Ok(if id == board { vec![line(0.0, 0.0), line(2500.0, 1800.0)] } else { vec![] })
+    };
+    let pages = export_sheets(&nb, None, ink).unwrap();
+    let out = e.open(w.export(priority::INTERACTIVE, &pages).unwrap()).unwrap();
+    let sizes: Vec<(f32, f32)> = out.page_sizes().unwrap().iter().map(|s| (s.width.round(), s.height.round())).collect();
+    assert_eq!(sizes.len(), 5, "{sizes:?}");
+    assert_eq!(sizes[0], (1000.0, 1400.0), "a size of its own");
+    assert_eq!(sizes[1], (1191.0, 842.0), "A3 landscape");
+    assert_eq!(sizes[2], (595.0, 1442.0), "longer by the space inserted");
+    assert!(sizes[3].0 > 2500.0 && sizes[3].1 > 1800.0, "the board as big as its ink: {:?}", sizes[3]);
+    assert_eq!(sizes[4], (595.0, 1142.0), "the PDF page with its inserted space: {:?}", sizes[4]);
+    drop(w);
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -113,14 +113,14 @@ pub fn export_sheets_with_images(
     for id in ids {
         let spec = &specs[&id];
         let (strokes, boxes, imgs) = content(&id)?;
-        let images: Vec<crate::ink_writer::PdfImage> =
+        let mut images: Vec<crate::ink_writer::PdfImage> =
             imgs.into_iter().filter_map(|i| blob(&i.blob).map(|jpeg| crate::ink_writer::PdfImage { jpeg, x: i.x, y: i.y, w: i.w, h: i.h })).collect();
         let mut ink: Vec<(Vec<InkPoint>, Brush)> = strokes.into_iter().map(|s| (s.points, s.brush)).collect();
-        let texts: Vec<crate::text_layout::PdfText> = boxes.into_iter().filter(|t| !t.text.trim().is_empty()).map(|t| crate::text_layout::PdfText { x: t.x, y: t.y, w: t.w, size: t.size, text: t.text }).collect();
+        let mut texts: Vec<crate::text_layout::PdfText> = boxes.into_iter().filter(|t| !t.text.trim().is_empty()).map(|t| crate::text_layout::PdfText { x: t.x, y: t.y, w: t.w, size: t.size, text: t.text }).collect();
         let source = match &spec.pdf {
             Some((blob, page)) => SheetSource::Pdf { doc: blob.clone(), page: *page },
             None if !spec.is_board() => SheetSource::Blank { width: spec.width, height: spec.height },
-            None => match board_page(&mut ink) {
+            None => match board_page(&mut ink, &mut texts, &mut images) {
                 Some((width, height)) => SheetSource::Blank { width, height },
                 None => continue,
             },
@@ -133,21 +133,36 @@ pub fn export_sheets_with_images(
     Ok(out)
 }
 
-/// Moves a board's strokes onto a page around them and returns the page size (`None` if the
-/// board is empty).
-fn board_page(strokes: &mut [(Vec<InkPoint>, Brush)]) -> Option<(f32, f32)> {
-    let b = strokes.iter().map(|(p, br)| ink::bounds(p, br)).filter(|r| !r.is_empty()).fold(Rect::EMPTY, |u, r| u.include(r.x0, r.y0).include(r.x1, r.y1));
+/// Moves what is on a board (strokes, coordinate systems as ink, text boxes, pictures) onto a
+/// page around all of it and returns the page size (`None` if the board is empty).
+fn board_page(strokes: &mut [(Vec<InkPoint>, Brush)], texts: &mut [crate::text_layout::PdfText], images: &mut [crate::ink_writer::PdfImage]) -> Option<(f32, f32)> {
+    let mut b = strokes.iter().map(|(p, br)| ink::bounds(p, br)).filter(|r| !r.is_empty()).fold(Rect::EMPTY, |u, r| u.include(r.x0, r.y0).include(r.x1, r.y1));
+    for i in images.iter() {
+        b = b.include(i.x, i.y).include(i.x + i.w, i.y + i.h);
+    }
+    for t in texts.iter() {
+        // As tall as its lines are laid out (the last baseline plus a descender).
+        let bottom = crate::text_layout::layout(t).last().map_or(t.y + t.size * 1.4, |l| l.baseline + l.size * 0.35);
+        b = b.include(t.x, t.y).include(t.x + t.w, bottom);
+    }
     if b.is_empty() {
         return None;
     }
     let (w, h) = (b.x1 - b.x0 + 2.0 * BOARD_MARGIN, b.y1 - b.y0 + 2.0 * BOARD_MARGIN);
     let k = (MAX_PAGE / w.max(h)).min(1.0);
+    let (mx, my) = (|x: f32| (x - b.x0 + BOARD_MARGIN) * k, |y: f32| (y - b.y0 + BOARD_MARGIN) * k);
     for (pts, brush) in strokes.iter_mut() {
         for p in pts.iter_mut() {
-            p.x = (p.x - b.x0 + BOARD_MARGIN) * k;
-            p.y = (p.y - b.y0 + BOARD_MARGIN) * k;
+            p.x = mx(p.x);
+            p.y = my(p.y);
         }
         brush.width *= k;
+    }
+    for i in images.iter_mut() {
+        (i.x, i.y, i.w, i.h) = (mx(i.x), my(i.y), i.w * k, i.h * k);
+    }
+    for t in texts.iter_mut() {
+        (t.x, t.y, t.w, t.size) = (mx(t.x), my(t.y), t.w * k, t.size * k);
     }
     Some((w * k, h * k))
 }
@@ -161,6 +176,30 @@ mod tests {
         let points = vec![InkPoint { x, y, pressure: 0.5, t_ms: 0 }, InkPoint { x: x + 10.0, y, pressure: 0.5, t_ms: 8 }];
         let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
         sheet::Stroke { id: String::new(), bounds: ink::bounds(&points, &brush), brush, points }
+    }
+
+    #[test]
+    fn a_board_page_holds_its_pictures_and_text_too() {
+        let nb = Notebook::create(1, "x").unwrap();
+        let (_, board) = nb.add_sheet(None, 0, &SheetSpec::board()).unwrap();
+        // Ink near the origin, a picture far right and below, a text box above-left.
+        let content = |_: &str| -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>, Vec<sheet::ImageObj>)> {
+            Ok((
+                vec![stroke(0.0, 0.0)],
+                vec![sheet::TextBox { id: "t".into(), x: -300.0, y: -200.0, w: 200.0, size: 14.0, text: "Hallo\nzwei Zeilen".into() }],
+                vec![sheet::ImageObj { id: "i".into(), blob: "b".into(), x: 900.0, y: 700.0, w: 300.0, h: 200.0 }],
+            ))
+        };
+        let pages = export_sheets_with_images(&nb, Some(&[board]), content, |_| Some(vec![0xFF, 0xD8])).unwrap();
+        let SheetSource::Blank { width, height } = pages[0].source else { panic!() };
+        // From the text's left edge (-300) to the picture's right edge (1200), its top (-200) to the picture's bottom (900).
+        assert!((width - (1500.0 + 2.0 * BOARD_MARGIN)).abs() < 0.01, "{width}");
+        assert!((height - (1100.0 + 2.0 * BOARD_MARGIN)).abs() < 0.01, "{height}");
+        let (t, i) = (&pages[0].texts[0], &pages[0].images[0]);
+        assert_eq!((t.x, t.y), (BOARD_MARGIN, BOARD_MARGIN), "the text box moved with the page");
+        assert_eq!((i.x, i.y, i.w, i.h), (1200.0 + BOARD_MARGIN, 900.0 + BOARD_MARGIN, 300.0, 200.0));
+        let p = pages[0].strokes[0].0[0];
+        assert!((p.x - (300.0 + BOARD_MARGIN)).abs() < 0.01 && (p.y - (200.0 + BOARD_MARGIN)).abs() < 0.01, "{p:?}");
     }
 
     #[test]
