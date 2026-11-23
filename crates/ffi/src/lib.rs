@@ -384,6 +384,8 @@ pub struct FfiObjInfo {
     /// How it came about ("Schneide(f, c, 1)", "f'(x)"), for objects that depend on others;
     /// empty for free ones, where the value says it all.
     pub definition: String,
+    /// The row as LaTeX (set like GeoGebra's algebra list); empty for a mistake.
+    pub latex: String,
 }
 
 /// A plot as ink (page points), ready to draw like strokes.
@@ -448,6 +450,7 @@ pub fn plot_info(plot: FfiPlot) -> Vec<FfiObjInfo> {
                     _ => None,
                 },
                 definition: if o.style.slider.is_some() { String::new() } else { n0te_core::plot::definition(&o.def, &known).unwrap_or_default() },
+                latex: v.as_ref().map(|v| n0te_core::plot::latex_row(&o.name(), v)).unwrap_or_default(),
                 value,
                 error: v.err(),
                 shown,

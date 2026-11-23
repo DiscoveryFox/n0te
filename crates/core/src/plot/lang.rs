@@ -192,7 +192,7 @@ pub fn parse_expr(src: &str, known: &HashSet<String>) -> Result<Node, String> {
 
 fn is_ident(s: &str) -> bool {
     let mut c = s.chars();
-    c.next().is_some_and(|f| f.is_alphabetic()) && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '\'')
+    c.next().is_some_and(|f| f.is_alphabetic()) && s.chars().all(|c| c.is_alphabetic() || c.is_ascii_digit() || c == '_' || c == '\'')
 }
 
 /// "name:" at the start (outside brackets): the label and the rest.
@@ -346,7 +346,8 @@ fn lex(src: &str, known: &HashSet<String>) -> Result<Vec<Tok>, String> {
             }
             c if c.is_alphabetic() => {
                 let start = i;
-                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                // Letters, digits 0–9 and _ (not ² ³, which raise what comes before).
+                while i < chars.len() && (chars[i].is_alphabetic() || chars[i].is_ascii_digit() || chars[i] == '_') {
                     i += 1;
                 }
                 let word: String = chars[start..i].iter().collect();
@@ -426,7 +427,7 @@ pub fn rename_name(src: &str, old: &str, new: &str, known: &HashSet<String>) -> 
             continue;
         }
         let start = i;
-        while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        while i < chars.len() && (chars[i].is_alphabetic() || chars[i].is_ascii_digit() || chars[i] == '_') {
             i += 1;
         }
         let word: String = chars[start..i].iter().collect();
@@ -714,6 +715,14 @@ mod tests {
         let i = parse_input("Kreis((1,5), 3)", &known).unwrap();
         let Body::Expr(Node::Call(_, _, a)) = i.body else { panic!() };
         assert_eq!(a[0], Node::Point(Box::new(Node::Num(1.0)), Box::new(Node::Num(5.0))), "a comma in (a, b) separates");
+    }
+
+    #[test]
+    fn superscripts_raise_what_is_before_them() {
+        let known = k(&["f", "a"]);
+        for src in ["g(x) = x² + 1", "h(x) = a·x³ − 2", "p(x) = (x − 1)²", "q(x) = √(x) + π"] {
+            assert!(parse_input(src, &known).is_ok(), "{src}: {:?}", parse_input(src, &known));
+        }
     }
 
     #[test]

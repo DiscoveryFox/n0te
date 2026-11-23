@@ -1415,6 +1415,273 @@ fn fmt_line(a: f64, b: f64, c: f64) -> String {
     }
 }
 
+// --- the same as LaTeX (the algebra list sets it like GeoGebra) -----------------------------------
+
+/// A number in LaTeX: German decimal comma (without the space LaTeX puts after a comma).
+pub fn latex_num(v: f64) -> String {
+    fmt_num(v).replace('−', "-").replace(',', "{,}")
+}
+
+/// A name in LaTeX: one letter in italics (Greek ones too), longer ones as a word, S_1 with
+/// its index.
+pub fn latex_name(n: &str) -> String {
+    let (base, sub) = match n.split_once('_') {
+        Some((b, s)) => (b, Some(s)),
+        None => (n, None),
+    };
+    let greek = |c: char| -> Option<&'static str> {
+        Some(match c {
+            'α' => "\\alpha",
+            'β' => "\\beta",
+            'γ' => "\\gamma",
+            'δ' => "\\delta",
+            'ε' => "\\varepsilon",
+            'θ' => "\\theta",
+            'λ' => "\\lambda",
+            'μ' => "\\mu",
+            'π' => "\\pi",
+            'σ' => "\\sigma",
+            'φ' => "\\varphi",
+            'ω' => "\\omega",
+            _ => return None,
+        })
+    };
+    let mut cs = base.chars();
+    let b = match (cs.next(), cs.next()) {
+        (Some(c), None) => greek(c).map(String::from).unwrap_or_else(|| c.to_string()),
+        _ => format!("\\mathit{{{}}}", base.chars().map(|c| greek(c).map(|g| format!("{g} ")).unwrap_or_else(|| c.to_string())).collect::<String>()),
+    };
+    match sub {
+        Some(s) => format!("{b}_{{{s}}}"),
+        None => b,
+    }
+}
+
+fn latex_text(t: &str) -> String {
+    let mut out = String::from("\\text{");
+    for c in t.chars() {
+        match c {
+            '\\' => out.push_str("\\backslash "),
+            '{' | '}' | '$' | '%' | '#' | '&' | '_' => {
+                out.push('\\');
+                out.push(c);
+            }
+            '^' | '~' => out.push(' '),
+            _ => out.push(c),
+        }
+    }
+    out.push('}');
+    out
+}
+
+/// (inner): plain brackets, growing ones only around something tall (a fraction, a root).
+fn brackets(inner: &str) -> String {
+    if inner.contains("\\frac") || inner.contains("\\sqrt") || inner.contains("pmatrix") {
+        format!("\\left({inner}\\right)")
+    } else {
+        format!("({inner})")
+    }
+}
+
+/// An expression in LaTeX: fractions stacked, powers raised, roots drawn; `var` for x.
+pub fn latex_expr(e: &Expr, var: &str) -> String {
+    fn prec(e: &Expr) -> u8 {
+        match e {
+            Expr::Add(..) | Expr::Sub(..) => 1,
+            Expr::Mul(..) => 2,
+            Expr::Neg(_) => 3,
+            Expr::Div(..) | Expr::Pow(..) => 4,
+            Expr::Num(v) if *v < 0.0 => 3,
+            _ => 5,
+        }
+    }
+    fn go(e: &Expr, var: &str, out: &mut String) {
+        let wrap = |e: &Expr, min: u8, out: &mut String| {
+            if prec(e) < min {
+                let mut inner = String::new();
+                go(e, var, &mut inner);
+                out.push_str(&brackets(&inner));
+            } else {
+                go(e, var, out);
+            }
+        };
+        match e {
+            Expr::Num(v) => {
+                if (*v - std::f64::consts::PI).abs() < 1e-12 {
+                    out.push_str("\\pi ")
+                } else if (*v - std::f64::consts::E).abs() < 1e-12 {
+                    out.push('e')
+                } else {
+                    out.push_str(&latex_num(*v))
+                }
+            }
+            Expr::X => out.push_str(var),
+            Expr::Y => out.push('y'),
+            Expr::Neg(a) => {
+                out.push('-');
+                wrap(a, 3, out);
+            }
+            Expr::Add(a, b) => {
+                go(a, var, out);
+                match &**b {
+                    Expr::Neg(inner) => {
+                        out.push_str(" - ");
+                        wrap(inner, 2, out);
+                    }
+                    Expr::Num(v) if *v < 0.0 => {
+                        out.push_str(" - ");
+                        out.push_str(&latex_num(-v));
+                    }
+                    _ => {
+                        out.push_str(" + ");
+                        wrap(b, 1, out);
+                    }
+                }
+            }
+            Expr::Sub(a, b) => {
+                go(a, var, out);
+                out.push_str(" - ");
+                wrap(b, 2, out);
+            }
+            Expr::Mul(a, b) => {
+                if let Expr::Num(v) = **a
+                    && v == -1.0
+                {
+                    out.push('-');
+                    wrap(b, 3, out);
+                    return;
+                }
+                let implicit = matches!(**a, Expr::Num(_)) && !matches!(**b, Expr::Num(_));
+                wrap(a, 2, out);
+                out.push_str(if implicit { " " } else { " \\cdot " });
+                wrap(b, 3, out);
+            }
+            Expr::Div(a, b) => {
+                out.push_str("\\frac{");
+                go(a, var, out);
+                out.push_str("}{");
+                go(b, var, out);
+                out.push('}');
+            }
+            Expr::Pow(a, b) => {
+                wrap(a, 5, out);
+                out.push_str("^{");
+                go(b, var, out);
+                out.push('}');
+            }
+            Expr::Call(f, a) => {
+                let (open, close) = match f {
+                    Func::Sqrt => ("\\sqrt{", "}"),
+                    Func::Abs => ("\\left|", "\\right|"),
+                    Func::Exp => ("e^{", "}"),
+                    Func::Floor => ("\\left\\lfloor ", "\\right\\rfloor "),
+                    Func::Ceil => ("\\left\\lceil ", "\\right\\rceil "),
+                    _ => ("", ""),
+                };
+                if !open.is_empty() {
+                    out.push_str(open);
+                    go(a, var, out);
+                    out.push_str(close);
+                    return;
+                }
+                out.push_str(match f {
+                    Func::Sin => "\\sin",
+                    Func::Cos => "\\cos",
+                    Func::Tan => "\\tan",
+                    Func::Cot => "\\cot",
+                    Func::Asin => "\\arcsin",
+                    Func::Acos => "\\arccos",
+                    Func::Atan => "\\arctan",
+                    Func::Sinh => "\\sinh",
+                    Func::Cosh => "\\cosh",
+                    Func::Tanh => "\\tanh",
+                    Func::Ln => "\\ln",
+                    Func::Log => "\\lg",
+                    Func::Sgn => "\\mathrm{sgn}",
+                    _ => "\\mathrm{round}",
+                });
+                let mut inner = String::new();
+                go(a, var, &mut inner);
+                out.push_str(&brackets(&inner));
+            }
+            Expr::If(items, ops, a, b) => {
+                out.push_str("\\text{Wenn}\\left(");
+                for (i, it) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(match ops[i - 1] {
+                            Cmp::Lt => " < ",
+                            Cmp::Le => " \\le ",
+                            Cmp::Gt => " > ",
+                            Cmp::Ge => " \\ge ",
+                            Cmp::Eq => " = ",
+                        });
+                    }
+                    go(it, var, out);
+                }
+                out.push_str(", ");
+                go(a, var, out);
+                if !matches!(**b, Expr::Num(v) if v.is_nan()) {
+                    out.push_str(", ");
+                    go(b, var, out);
+                }
+                out.push_str("\\right)");
+            }
+            Expr::Ref(..) => out.push('?'),
+        }
+    }
+    let mut s = String::new();
+    go(e, var, &mut s);
+    s
+}
+
+fn latex_line(a: f64, b: f64, c: f64) -> String {
+    fmt_line(a, b, c).replace('−', "-").replace(',', "{,}")
+}
+
+/// A value in LaTeX (vectors as columns, angles with °, texts as text).
+pub fn latex_val(v: &Val) -> String {
+    let pt = |p: Pt| format!("({} \\mid {})", latex_num(p.0), latex_num(p.1));
+    match v {
+        Val::Num(x) => latex_num(*x),
+        Val::Bool(b) => latex_text(if *b { "wahr" } else { "falsch" }),
+        Val::Point(p) => pt(*p),
+        Val::Points(ps) if ps.is_empty() => latex_text("keine"),
+        Val::Points(ps) => ps.iter().map(|p| pt(*p)).collect::<Vec<_>>().join(",\\ "),
+        Val::Vector { d, .. } => format!("\\begin{{pmatrix}}{} \\\\ {}\\end{{pmatrix}}", latex_num(d.0), latex_num(d.1)),
+        Val::Func(e) => latex_expr(e, "x"),
+        Val::Line { a, b, c } => latex_line(*a, *b, *c),
+        Val::Lines(ls) => ls.iter().map(|l| latex_line(l.0, l.1, l.2)).collect::<Vec<_>>().join(",\\ "),
+        Val::Circle(c, r) => {
+            let part = |v: &str, k: f64| {
+                if k.abs() < 1e-12 {
+                    format!("{v}^{{2}}")
+                } else if k > 0.0 {
+                    format!("({v} - {})^{{2}}", latex_num(k))
+                } else {
+                    format!("({v} + {})^{{2}}", latex_num(-k))
+                }
+            };
+            format!("{} + {} = {}", part("x", c.0), part("y", c.1), latex_num(r * r))
+        }
+        Val::Curve(fx, fy, a, b) => format!("\\left({}, {}\\right),\\ {} \\le t \\le {}", latex_expr(fx, "t"), latex_expr(fy, "t"), latex_num(*a), latex_num(*b)),
+        Val::Implicit(f) => format!("{} = 0", latex_expr(f, "x")),
+        Val::Angle { sweep, .. } => format!("{}^{{\\circ}}", latex_num(sweep.to_degrees())),
+        Val::Text(t) => latex_text(t),
+        _ => format_val(v).replace('−', "-").replace(',', "{,}"),
+    }
+}
+
+/// An object's row in the algebra list, as LaTeX: f(x) = …, g: y = …, A = (1 | 2).
+pub fn latex_row(name: &str, v: &Val) -> String {
+    let n = latex_name(name);
+    match v {
+        Val::Func(_) => format!("{n}(x) = {}", latex_val(v)),
+        Val::Line { .. } | Val::Lines(_) | Val::Circle(..) | Val::Implicit(_) | Val::Curve(..) => format!("{n}{{:}}\\; {}", latex_val(v)),
+        Val::Text(_) => latex_val(v),
+        _ => format!("{n} = {}", latex_val(v)),
+    }
+}
+
 /// An expression as written: 0,5x² − 3, 2 sin(x), x^(1/3).
 pub fn fmt_expr(e: &Expr) -> String {
     fn prec(e: &Expr) -> u8 {
@@ -1785,6 +2052,25 @@ pub fn moved_on(def: &str, t: f64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rows_are_set_as_latex() {
+        let p = |defs: &[&str]| {
+            let objs: Vec<Obj> = defs.iter().enumerate().map(|(i, d)| Obj { id: i.to_string(), def: d.to_string(), style: Style::default(), order: i as f64 }).collect();
+            let vals = evaluate(&objs, ViewRange { x0: -5.0, x1: 5.0, y0: -5.0, y1: 5.0 });
+            objs.iter().zip(vals).map(|(o, v)| latex_row(&o.name(), &v.unwrap())).collect::<Vec<_>>()
+        };
+        let rows = p(&["f(x) = 0.25x^3 - 2x", "g(x) = 1/x + sqrt(x)", "A = (1, -2.5)", "u = Vektor((0,0), (3, 4))", "h: y = 0.5x - 1", "α = Winkel((1,0), (0,0), (0,1))", "S_1 = (2, 3)", "t = Text(\"a_b {x}\")", "vieleck1 = Vieleck((0,0), (1,0), (0,1))"]);
+        assert_eq!(rows[0], "f(x) = 0{,}25 x^{3} - 2 x");
+        assert_eq!(rows[1], "g(x) = \\frac{1}{x} + \\sqrt{x}");
+        assert_eq!(rows[2], "A = (1 \\mid -2{,}5)");
+        assert_eq!(rows[3], "u = \\begin{pmatrix}3 \\\\ 4\\end{pmatrix}");
+        assert_eq!(rows[4], "h{:}\\; y = 0{,}5x - 1");
+        assert_eq!(rows[5], "\\alpha = 90^{\\circ}");
+        assert_eq!(rows[6], "S_{1} = (2 \\mid 3)");
+        assert_eq!(rows[7], "\\text{a\\_b \\{x\\}}");
+        assert_eq!(rows[8], "\\mathit{vieleck1} = 0{,}5");
+    }
+
     #[test]
     fn definitions_show_how_dependent_objects_came_about() {
         let known: HashSet<String> = ["f", "g", "c", "A", "B", "k", "p", "h"].iter().map(|s| s.to_string()).collect();
