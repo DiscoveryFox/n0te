@@ -3783,7 +3783,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-core"
-version = "0.1.0"
+version = "0.32.0"
 dependencies = [
  "blake3",
  "loro",
@@ -3792,7 +3792,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-desktop"
-version = "0.1.0"
+version = "0.32.0"
 dependencies = [
  "iced",
  "iced_test",
@@ -3808,7 +3808,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-ffi"
-version = "0.1.0"
+version = "0.32.0"
 dependencies = [
  "jni-sys 0.3.1",
  "n0te-core",
@@ -3820,7 +3820,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-pdf"
-version = "0.1.0"
+version = "0.32.0"
 dependencies = [
  "flate2",
  "n0te-core",
@@ -3830,7 +3830,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-sync"
-version = "0.1.0"
+version = "0.32.0"
 dependencies = [
  "blake3",
  "bytes",
@@ -6830,7 +6830,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.1.0"
+version = "0.32.0"
 dependencies = [
  "uniffi",
 ]
