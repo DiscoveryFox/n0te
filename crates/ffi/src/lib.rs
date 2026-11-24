@@ -424,6 +424,12 @@ pub struct FfiObjInfo {
     pub definition: String,
     /// The row as LaTeX (set like GeoGebra's algebra list); empty for a mistake.
     pub latex: String,
+    /// The row's switch "als Kurve / als Schieberegler": Some(true) a curve of letters
+    /// (`a(b) = 3b`), Some(false) a number of one slider (`b = 4 + 3a`); None: no switch.
+    pub curve: Option<bool>,
+    /// A function's domain: from, to (None: open that way; both None for any function).
+    pub domain_from: Option<f64>,
+    pub domain_to: Option<f64>,
 }
 
 /// A plot as ink (page points), ready to draw like strokes.
@@ -472,13 +478,17 @@ pub fn plot_info(plot: FfiPlot) -> Vec<FfiObjInfo> {
             .to_string();
             let value = v.as_ref().map(format_val).unwrap_or_default();
             let shown = match &v {
-                Ok(Val::Func(_)) => format!("{name}(x) = {value}"),
-                Ok(Val::Line { .. } | Val::Lines(_) | Val::Circle(..) | Val::Implicit(_) | Val::Curve(..)) => format!("{name}: {value}"),
-                Ok(Val::Text(t)) => t.clone(),
-                Ok(_) => format!("{name} = {value}"),
+                Ok(val) => n0te_core::plot::row_text(o, val, &known, false),
                 Err(_) => o.def.clone(),
             };
+            let (domain_from, domain_to) = match &v {
+                Ok(Val::Func(e)) => n0te_core::plot::domain_parts(e).map_or((None, None), |(_, lo, hi)| (lo.map(|l| l.0), hi.map(|h| h.0))),
+                _ => (None, None),
+            };
             FfiObjInfo {
+                curve: p.curve_switch(&o.id),
+                domain_from,
+                domain_to,
                 id: o.id.clone(),
                 name,
                 kind,
@@ -488,7 +498,7 @@ pub fn plot_info(plot: FfiPlot) -> Vec<FfiObjInfo> {
                     _ => None,
                 },
                 definition: if o.style.slider.is_some() { String::new() } else { n0te_core::plot::definition(&o.def, &known).unwrap_or_default() },
-                latex: v.as_ref().map(|v| n0te_core::plot::latex_row(&o.name(), v)).unwrap_or_default(),
+                latex: v.as_ref().map(|v| n0te_core::plot::row_latex(o, v, &known)).unwrap_or_default(),
                 value,
                 error: v.err(),
                 shown,
@@ -608,6 +618,74 @@ pub fn plot_pi_range(plot: FfiPlot) -> Vec<f64> {
 pub fn plot_equal_units(plot: FfiPlot) -> Vec<f64> {
     let (a, b) = n0te_core::plot::Plot::from(plot).equal_units();
     vec![a, b]
+}
+
+/// Handwriting read as text on the tablet (`f(x)=x2+1`) as input for the plot (`x2` is x²).
+#[uniffi::export]
+pub fn plot_from_handwriting(text: String) -> String {
+    n0te_core::plot::handwritten_input(&text)
+}
+
+/// Function `id` defined only from `from` to `to` (None: open that way; both: everywhere).
+#[uniffi::export]
+pub fn plot_set_domain(plot: FfiPlot, id: String, from: Option<f64>, to: Option<f64>) -> R<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).set_domain(&id, from, to).map(Into::into).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// An end of a function's domain on the graph: the function and which end (0 from, 1 to).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct FfiDomainEnd {
+    pub id: String,
+    pub side: u8,
+}
+
+/// The end of a function's domain under page point (x, y), within `tol` page points.
+#[uniffi::export]
+pub fn plot_domain_end_at(plot: FfiPlot, x: f32, y: f32, tol: f32) -> Option<FfiDomainEnd> {
+    n0te_core::plot::Plot::from(plot).domain_end_at(x, y, tol).map(|(id, side)| FfiDomainEnd { id, side })
+}
+
+/// The plot with an end of function `id`'s domain dragged to x (plot units); None: not there.
+#[uniffi::export]
+pub fn plot_drag_domain_end(plot: FfiPlot, id: String, side: u8, x: f64) -> Option<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).drag_domain_end(&id, side, x).map(Into::into)
+}
+
+/// The axis under page point (x, y) within `tol`: 0 none, 1 the x axis, 2 the y axis.
+#[uniffi::export]
+pub fn plot_axis_at(plot: FfiPlot, x: f32, y: f32, tol: f32) -> u8 {
+    use n0te_core::plot::Axis;
+    match n0te_core::plot::Plot::from(plot).axis_at(x, y, tol) {
+        Some(Axis::X) => 1,
+        Some(Axis::Y) => 2,
+        None => 0,
+    }
+}
+
+/// The plot with axis `axis` (1 x, 2 y) grabbed at page position `from` and dragged to `to`
+/// (page x for the x axis, y for the y axis): only that axis stretches.
+#[uniffi::export]
+pub fn plot_axis_dragged(plot: FfiPlot, axis: u8, from: f32, to: f32) -> FfiPlot {
+    use n0te_core::plot::Axis;
+    let p = n0te_core::plot::Plot::from(plot);
+    match axis {
+        1 => p.axis_dragged(Axis::X, from, to),
+        2 => p.axis_dragged(Axis::Y, from, to),
+        _ => p,
+    }
+    .into()
+}
+
+/// `b = 4 + 3a` (a a slider) as the curve `b(a) = 4 + 3a` ("als Kurve").
+#[uniffi::export]
+pub fn plot_as_curve(plot: FfiPlot, id: String) -> R<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).as_curve(&id).map(Into::into).map_err(|msg| N0teError::Failed { msg })
+}
+
+/// `a(b) = 3b` as the number `a = 3b` with a slider b ("als Schieberegler").
+#[uniffi::export]
+pub fn plot_as_sliders(plot: FfiPlot, id: String) -> R<FfiPlot> {
+    n0te_core::plot::Plot::from(plot).as_sliders(&id).map(Into::into).map_err(|msg| N0teError::Failed { msg })
 }
 
 /// A stroke's brush and samples (packed LE f32 x, y, pressure, t_ms), for copy/paste.
