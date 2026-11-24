@@ -32,14 +32,27 @@ version number.
   graphs with an algebra view and input line, search, two notebooks side by side, command
   palette, six themes.
 - Shows the tablet's ink; drawing ink stays on the tablet.
-- Linux: sync, pairing, live sessions, guests and version history through the n0te-sync
-  service. Windows: first builds (x64 and ARM64); sync on Windows is still being ported.
+- Sync, pairing, live sessions, guests and version history through the n0te-sync service, on
+  Linux and on Windows (a background helper that starts at sign-in). Pairing works by showing a
+  code / QR code or by pasting another device's code.
+- German and English: on Windows the language follows the system; a "Sprache / Language"
+  setting overrides it.
 
 ### n0te Tablet (Windows, preview)
 
-- A separate program for pen and touch devices, with its own icon and Start menu entry. For
-  now it shows the n0te Laptop interface; pen input and the tablet tools follow in the next
-  versions.
+- A separate program for pen and touch devices, with its own icon and Start menu entry: the
+  n0te Laptop interface plus the tablet's tools.
+- The Windows pen: pressure, tilt, eraser end, side button, hover ring; Windows' press-and-hold
+  right click is off on the page; a resting palm is ignored. Optional: write with a finger.
+- The tablet's pens and palettes (fountain pen with its speed, nib and taper; ballpoint,
+  pencil, brush, marker), eraser (whole strokes or area), lasso (move, scale, recolour, copy,
+  cut, paste), text tool, laser pointer, undo and redo across pages.
+- Shapes and arrowheads snap when the pen rests, with the same recognizers as the Android app.
+- Handwriting search: Windows' own recognizer reads new lines (needs a language's handwriting
+  feature); the touch keyboard comes up when typing starts.
+- Invite links (`n0te://…`) open the join dialog.
+- Not yet: ruler, insert space, the writing magnifier, scribble to delete. This is the first
+  build: it has not been tried on many real pen devices yet, please report what you find.
 
 ### Windows packages
 
