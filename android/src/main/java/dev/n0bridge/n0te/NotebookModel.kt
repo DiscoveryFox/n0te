@@ -22,15 +22,16 @@ import java.nio.ByteOrder
 /**
  * A stroke as drawn on a page. [ends]: where it starts and ends with the way it runs there (see
  * FfiStroke.ends: x0, y0, dx0, dy0, x1, y1, dx1, dy1, length), for attaching arrowheads.
+ * [width]: the brush's width (points).
  */
-class InkStroke(val id: String, val outline: FloatArray, val color: Int, val bounds: RectF, val kind: Int = 0, layers: List<FloatArray> = emptyList(), val ends: FloatArray = FloatArray(0)) {
+class InkStroke(val id: String, val outline: FloatArray, val color: Int, val bounds: RectF, val kind: Int = 0, layers: List<FloatArray> = emptyList(), val ends: FloatArray = FloatArray(0), val width: Float = 0f) {
     val path: Path = pathOf(outline)
     val layerPaths: List<Path> = layers.map { pathOf(it) }
 
     companion object {
         fun of(s: FfiStroke): InkStroke {
             val f = floatsOf(s.outline)
-            return InkStroke(s.id, f, s.brush.color.toInt(), RectF(s.bounds[0], s.bounds[1], s.bounds[2], s.bounds[3]), s.brush.kind.toInt(), s.layers.map { floatsOf(it) }, s.ends.toFloatArray())
+            return InkStroke(s.id, f, s.brush.color.toInt(), RectF(s.bounds[0], s.bounds[1], s.bounds[2], s.bounds[3]), s.brush.kind.toInt(), s.layers.map { floatsOf(it) }, s.ends.toFloatArray(), s.brush.width)
         }
 
         fun pathOf(f: FloatArray): Path {
@@ -274,7 +275,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun addStroke(sheetId: String, brush: FfiBrush, samples: ByteArray, preview: FloatArray, previewLayers: List<FloatArray> = emptyList()) {
         val st = state(sheetId)
         val tmpId = "tmp-${SystemClock.uptimeMillis()}-${st.strokes.size}"
-        st.strokes += InkStroke(tmpId, preview, brush.color.toInt(), boundsOf(preview), brush.kind.toInt(), previewLayers)
+        st.strokes += InkStroke(tmpId, preview, brush.color.toInt(), boundsOf(preview), brush.kind.toInt(), previewLayers, width = brush.width)
         st.invalidateNode()
         onChanged()
         withHandle(st) { h ->

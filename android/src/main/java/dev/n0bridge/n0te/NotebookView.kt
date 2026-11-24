@@ -1403,13 +1403,37 @@ class NotebookView(context: Context) : View(context) {
         for (part in sel.parts) model?.recolor(part.sheetId, part.ids, color)
     }
 
-    /** The selection rendered as a PNG (white background), for the laptop clipboard. */
+    /**
+     * The selection rendered as a PNG (white background), for the laptop clipboard: all of it,
+     * scaled down to fit when it is big ([SelectionPicture]).
+     */
     fun selectionPng(): ByteArray? {
         val sel = selection ?: return null
         val m = model ?: return null
-        val b = selUnion(sel).apply { inset(-8f, -8f) }
-        val k = 3f
-        val bmp = android.graphics.Bitmap.createBitmap((b.width() * k).toInt().coerceIn(16, 4096), (b.height() * k).toInt().coerceIn(16, 4096), android.graphics.Bitmap.Config.ARGB_8888)
+        // What is there now (the selection's box can lag behind a move or resize), in world points.
+        val b = RectF()
+        var widest = 0f
+        for (part in sel.parts) {
+            val p = placedFor(part.sheetId) ?: continue
+            val st = m.sheets[part.sheetId] ?: continue
+            val r = RectF()
+            for (s in st.strokes) if (s.id in part.ids) { if (r.isEmpty) r.set(s.bounds) else r.union(s.bounds); widest = max(widest, s.width) }
+            for (im in st.images) if (im.id in part.ids) { if (r.isEmpty) r.set(im.x, im.y, im.x + im.w, im.y + im.h) else r.union(im.x, im.y, im.x + im.w, im.y + im.h) }
+            if (r.isEmpty) r.set(part.bounds)
+            r.offset(p.rect.left, p.rect.top)
+            if (b.isEmpty) b.set(r) else b.union(r)
+        }
+        if (b.isEmpty) b.set(selUnion(sel))
+        val pad = SelectionPicture.margin(widest)
+        b.inset(-pad, -pad)
+        var size = SelectionPicture.size(b.width(), b.height())
+        val bmp = try {
+            android.graphics.Bitmap.createBitmap(size.width, size.height, android.graphics.Bitmap.Config.ARGB_8888)
+        } catch (_: OutOfMemoryError) {
+            size = SelectionPicture.size(b.width(), b.height(), maxPixels = SelectionPicture.MAX_PIXELS / 4)
+            android.graphics.Bitmap.createBitmap(size.width, size.height, android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        val k = size.scale
         val c = Canvas(bmp)
         c.drawColor(Color.WHITE) // the laptop gets a white background whatever the theme
         c.scale(k, k)
