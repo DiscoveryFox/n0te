@@ -16,6 +16,7 @@ pub mod plot;
 pub mod search;
 pub mod shapes;
 pub mod sheet;
+pub mod snap;
 pub mod store;
 
 pub use error::{Error, Result};
