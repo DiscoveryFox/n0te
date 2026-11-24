@@ -99,6 +99,16 @@ impl SheetHandle {
     pub fn shift_below(&self, y: f32, dy: f32) -> R<u32> {
         Ok(lock(&self.sheet).shift_below(y, dy)? as u32)
     }
+    /// Left and right edge of what lies right of the line at `x` (what [`SheetHandle::shift_right_of`] moves).
+    pub fn right_of(&self, x: f32) -> crate::FfiBelow {
+        let b = lock(&self.sheet).beyond(n0te_core::notebook::Axis::Right, x);
+        crate::FfiBelow { top: b.top, bottom: b.bottom }
+    }
+    /// Moves everything right of the line at `x` right by `dx` (left if negative), one undo
+    /// step; returns how many objects moved.
+    pub fn shift_right_of(&self, x: f32, dx: f32) -> R<u32> {
+        Ok(lock(&self.sheet).shift_beyond(n0te_core::notebook::Axis::Right, x, dx)? as u32)
+    }
     /// Places a stored blob as an image; returns its object id.
     pub fn add_image(&self, blob: String, x: f32, y: f32, w: f32, h: f32) -> R<String> {
         Ok(lock(&self.sheet).add_image(&blob, x, y, w, h)?)

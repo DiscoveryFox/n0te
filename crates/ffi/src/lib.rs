@@ -815,6 +815,21 @@ pub struct FfiSpacePlan {
     pub gaps: Vec<f32>,
 }
 
+/// Space inserted sideways: how far what lies right of the line moves, the page's width after.
+#[derive(Debug, Clone, Copy, uniffi::Record)]
+pub struct FfiSpacePlanX {
+    pub dx: f32,
+    pub width: f32,
+}
+
+/// Space inserted at `x` (`dx` > 0) or taken out (`dx` < 0) sideways (see the core's
+/// `plan_space_x`): what is pushed past the right edge (or nothing at all) makes the page wider.
+#[uniffi::export]
+pub fn plan_space_x(spec: FfiSheetSpec, x: f32, dx: f32, right: FfiBelow) -> FfiSpacePlanX {
+    let p = n0te_core::notebook::plan_space_x(&spec.into(), x, dx, n0te_core::notebook::Below { top: right.top, bottom: right.bottom });
+    FfiSpacePlanX { dx: p.dx, width: p.width }
+}
+
 /// Space inserted at `y` (`dy` > 0) or taken out (`dy` < 0) on a page (see the core's `plan_space`):
 /// nothing leaves the page, a PDF page splits at the line.
 #[uniffi::export]

@@ -64,11 +64,28 @@ impl SheetSpec {
     }
 }
 
-/// What lies below a line on a page (its top and bottom; none if nothing does).
+/// What lies below a line on a page (its top and bottom; none if nothing does). Also what
+/// lies right of a line from top to bottom: then `top` is its left and `bottom` its right edge.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Below {
     pub top: Option<f32>,
     pub bottom: Option<f32>,
+}
+
+/// Which way space goes into a page: down (a line across it, what lies below moves) or to the
+/// right (a line from top to bottom, what lies right of it moves).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Axis {
+    Down,
+    Right,
+}
+
+/// Space inserted into or taken out of a page sideways: how far what lies right of the line
+/// moves, and the page's width after.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpacePlanX {
+    pub dx: f32,
+    pub width: f32,
 }
 
 /// Space inserted into or taken out of a page: how far what lies below the line moves, and
@@ -144,9 +161,17 @@ pub fn plan_space(spec: &SheetSpec, y: f32, dy: f32, below: Below) -> SpacePlan 
             plan.height = spec.height + d;
         } else {
             let mut d = dy;
-            if let Some(bottom) = below.bottom {
-                d = d.min(max - SPACE_MARGIN - bottom).max(0.0);
-                plan.height = spec.height.max(bottom + d + SPACE_MARGIN).min(max);
+            match below.bottom {
+                Some(bottom) => {
+                    d = d.min(max - SPACE_MARGIN - bottom).max(0.0);
+                    plan.height = spec.height.max(bottom + d + SPACE_MARGIN).min(max);
+                }
+                // Nothing below to push: the page itself gets longer by the space (room to go on
+                // writing under the last line).
+                None => {
+                    d = d.min(max - spec.height).max(0.0);
+                    plan.height = spec.height + d;
+                }
             }
             plan.dy = d;
         }
@@ -169,6 +194,42 @@ pub fn plan_space(spec: &SheetSpec, y: f32, dy: f32, below: Below) -> SpacePlan 
             d = 0.0; // nothing below to pull up
         }
         plan.dy = -d;
+    }
+    plan
+}
+
+/// Space inserted at `x` (`dx` > 0) or taken out (`dx` < 0) sideways, with `right` what lies
+/// right of the line (its left and right edge). Like [`plan_space`] downwards: what is pushed
+/// past the right edge makes the page wider, with nothing to push the page gets wider by the
+/// space, and taking space out stops before what lies right reaches the line. A PDF page keeps
+/// its width (nothing moves), and so does a board's infinite paper (there is room anyway).
+pub fn plan_space_x(spec: &SheetSpec, x: f32, dx: f32, right: Below) -> SpacePlanX {
+    let mut plan = SpacePlanX { dx: 0.0, width: spec.width };
+    if !dx.is_finite() || dx == 0.0 || spec.pdf.is_some() {
+        return plan;
+    }
+    if spec.is_board() {
+        plan.dx = if dx > 0.0 { dx } else { -(-dx).min(right.top.map_or(0.0, |t| (t - x).max(0.0))) };
+        return plan;
+    }
+    let max = crate::format::MAX_PT;
+    if dx > 0.0 {
+        let mut d = dx;
+        match right.bottom {
+            Some(edge) => {
+                d = d.min(max - SPACE_MARGIN - edge).max(0.0);
+                plan.width = spec.width.max(edge + d + SPACE_MARGIN).min(max);
+            }
+            None => {
+                d = d.min(max - spec.width).max(0.0);
+                plan.width = spec.width + d;
+            }
+        }
+        plan.dx = d;
+    } else {
+        // Nothing right of the line: nothing to pull over.
+        let d = right.top.map_or(0.0, |t| (-dx).min((t - x).max(0.0)));
+        plan.dx = -d;
     }
     plan
 }
@@ -866,6 +927,10 @@ mod tests {
         let p = plan_space(&a4, 300.0, -300.0, Below { top: Some(500.0), bottom: Some(600.0) });
         assert_eq!((p.dy, p.height), (-200.0, 842.0));
         assert_eq!(plan_space(&a4, 300.0, -50.0, Below::default()).dy, 0.0, "nothing below: nothing to pull up");
+        // Nothing below to push: the page gets longer by the space all the same.
+        let p = plan_space(&a4, 800.0, 60.0, Below::default());
+        assert_eq!((p.dy, p.height), (60.0, 902.0));
+        assert_eq!(plan_space(&SheetSpec { height: 3990.0, ..a4.clone() }, 3900.0, 60.0, Below::default()).height, 4000.0, "not past the largest page");
 
         // A PDF page splits where the space goes in and grows by it.
         let pdf = pdf_spec();
@@ -885,6 +950,24 @@ mod tests {
         let p = plan_space(&one, 300.0, -100.0, Below::default());
         assert_eq!((p.dy, p.height, p.gaps.is_empty()), (-100.0, 842.0, true), "all of it: the PDF is whole again");
         assert_eq!(plan_space(&one, 200.0, -50.0, Below::default()).dy, 0.0, "the printed sheet never shrinks");
+    }
+
+    #[test]
+    fn space_goes_in_sideways_too() {
+        let a4 = SheetSpec::a4(Background::Grid);
+        // Room at the right: what lies right of the line moves into it, the page keeps its width.
+        let p = plan_space_x(&a4, 200.0, 100.0, Below { top: Some(220.0), bottom: Some(400.0) });
+        assert_eq!((p.dx, p.width), (100.0, 595.0));
+        // Pushed past the right edge: the page gets just wide enough.
+        let p = plan_space_x(&a4, 200.0, 100.0, Below { top: Some(220.0), bottom: Some(560.0) });
+        assert_eq!((p.dx, p.width), (100.0, 672.0));
+        // Nothing to push: wider by the space.
+        assert_eq!(plan_space_x(&a4, 500.0, 80.0, Below::default()), SpacePlanX { dx: 80.0, width: 675.0 });
+        // Out again: not past what lies right of the line; with nothing there, nothing.
+        assert_eq!(plan_space_x(&a4, 200.0, -300.0, Below { top: Some(260.0), bottom: Some(400.0) }).dx, -60.0);
+        assert_eq!(plan_space_x(&a4, 200.0, -50.0, Below::default()).dx, 0.0);
+        // A PDF page keeps its width.
+        assert_eq!(plan_space_x(&pdf_spec(), 200.0, 50.0, Below::default()), SpacePlanX { dx: 0.0, width: 595.0 });
     }
 
     #[test]

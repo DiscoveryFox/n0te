@@ -577,44 +577,66 @@ impl Sheet {
     /// Top and bottom of everything that lies below the line at `y` (its middle under it):
     /// strokes, images and text boxes, what [`Sheet::shift_below`] moves.
     pub fn below(&self, y: f32) -> crate::notebook::Below {
-        let mut b = crate::notebook::Below::default();
-        let mut take = |y0: f32, y1: f32| {
-            if (y0 + y1) / 2.0 >= y {
-                b.top = Some(b.top.map_or(y0, |t: f32| t.min(y0)));
-                b.bottom = Some(b.bottom.map_or(y1, |t: f32| t.max(y1)));
-            }
-        };
-        self.objects.for_each(|_, v| {
-            if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
-                && let Some(r) = stroke_bounds(&bytes)
-            {
-                take(r.y0, r.y1);
-            }
-        });
-        for i in self.images() {
-            take(i.y, i.y + i.h);
-        }
-        for p in self.plots() {
-            take(p.y, p.y + p.h);
-        }
-        for t in self.text_boxes() {
-            take(t.y, t.y + text_box_height(&t));
-        }
-        b
+        self.beyond(crate::notebook::Axis::Down, y)
     }
 
     /// Moves everything below the line at `y` (its middle under it) down by `dy` (up when
     /// negative), in one step to undo: space inserted into or taken out of the page. Returns
     /// how many objects moved.
     pub fn shift_below(&self, y: f32, dy: f32) -> Result<usize> {
-        if !dy.is_finite() {
+        self.shift_beyond(crate::notebook::Axis::Down, y, dy)
+    }
+
+    /// The near and far edge of everything past the line at `at` (its middle past it): below a
+    /// line across the page ([`Axis::Down`](crate::notebook::Axis), `top`/`bottom`), or right of
+    /// a line from top to bottom ([`Axis::Right`](crate::notebook::Axis), left and right edge).
+    /// Strokes, images, graphs and text boxes: what [`Sheet::shift_beyond`] moves.
+    pub fn beyond(&self, axis: crate::notebook::Axis, at: f32) -> crate::notebook::Below {
+        let mut b = crate::notebook::Below::default();
+        let mut take = |r: Rect| {
+            let (a0, a1) = along(axis, &r);
+            if (a0 + a1) / 2.0 >= at {
+                b.top = Some(b.top.map_or(a0, |t: f32| t.min(a0)));
+                b.bottom = Some(b.bottom.map_or(a1, |t: f32| t.max(a1)));
+            }
+        };
+        self.objects.for_each(|_, v| {
+            if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
+                && let Some(r) = stroke_bounds(&bytes)
+            {
+                take(r);
+            }
+        });
+        for i in self.images() {
+            take(Rect { x0: i.x, y0: i.y, x1: i.x + i.w, y1: i.y + i.h });
+        }
+        for p in self.plots() {
+            take(Rect { x0: p.x, y0: p.y, x1: p.x + p.w, y1: p.y + p.h });
+        }
+        for t in self.text_boxes() {
+            take(Rect { x0: t.x, y0: t.y, x1: t.x + t.w, y1: t.y + text_box_height(&t) });
+        }
+        b
+    }
+
+    /// Moves everything past the line at `at` (see [`Sheet::beyond`]) by `d` along `axis` (back
+    /// when negative), in one step to undo: space inserted into or taken out of the page.
+    /// Returns how many objects moved.
+    pub fn shift_beyond(&self, axis: crate::notebook::Axis, at: f32, d: f32) -> Result<usize> {
+        if !d.is_finite() {
             return Err(Error::Invalid("bad shift".into()));
         }
+        let past = |r: Rect| {
+            let (a0, a1) = along(axis, &r);
+            (a0 + a1) / 2.0 >= at
+        };
+        let down = axis == crate::notebook::Axis::Down;
+        let key = if down { "y" } else { "x" };
         let mut strokes = Vec::new();
         self.objects.for_each(|k, v| {
             if let ValueOrContainer::Value(LoroValue::Binary(bytes)) = v
                 && let Some(r) = stroke_bounds(&bytes)
-                && (r.y0 + r.y1) / 2.0 >= y
+                && past(r)
             {
                 strokes.push(k.to_string());
             }
@@ -623,33 +645,33 @@ impl Sheet {
         for id in &strokes {
             if let Some(mut s) = self.stroke(id)? {
                 for p in &mut s.points {
-                    p.y += dy;
+                    if down { p.y += d } else { p.x += d }
                 }
                 self.objects.insert(id, LoroValue::Binary(encode_stroke(&s.brush, &s.points).into()))?;
                 n += 1;
             }
         }
         for i in self.images() {
-            if i.y + i.h / 2.0 >= y
+            if past(Rect { x0: i.x, y0: i.y, x1: i.x + i.w, y1: i.y + i.h })
                 && let Some(m) = self.image_map(&i.id)
             {
-                m.insert("y", (i.y + dy) as f64)?;
+                m.insert(key, (if down { i.y } else { i.x } + d) as f64)?;
                 n += 1;
             }
         }
         for p in self.plots() {
-            if p.y + p.h / 2.0 >= y
+            if past(Rect { x0: p.x, y0: p.y, x1: p.x + p.w, y1: p.y + p.h })
                 && let Some(m) = self.plot_map(&p.id)
             {
-                m.insert("y", (p.y + dy) as f64)?;
+                m.insert(key, (if down { p.y } else { p.x } + d) as f64)?;
                 n += 1;
             }
         }
         for t in self.text_boxes() {
-            if t.y + text_box_height(&t) / 2.0 >= y
+            if past(Rect { x0: t.x, y0: t.y, x1: t.x + t.w, y1: t.y + text_box_height(&t) })
                 && let Some(m) = self.text_map(&t.id)
             {
-                m.insert("y", (t.y + dy) as f64)?;
+                m.insert(key, (if down { t.y } else { t.x } + d) as f64)?;
                 n += 1;
             }
         }
@@ -1331,6 +1353,14 @@ pub struct Heading {
 }
 
 /// A text box's height follows its text: estimated from its lines and their length.
+/// A box's start and end along `axis` (top and bottom, or left and right).
+fn along(axis: crate::notebook::Axis, r: &Rect) -> (f32, f32) {
+    match axis {
+        crate::notebook::Axis::Down => (r.y0, r.y1),
+        crate::notebook::Axis::Right => (r.x0, r.x1),
+    }
+}
+
 fn text_box_height(t: &TextBox) -> f32 {
     let per_line = (t.w / (t.size * 0.5)).max(1.0);
     let lines: f32 = t.text.lines().map(|l| (l.chars().count() as f32 / per_line).ceil().max(1.0)).sum::<f32>().max(1.0);
@@ -1533,6 +1563,31 @@ mod tests {
         // One undo puts it all back.
         assert!(s.undo().unwrap());
         assert_eq!((y0(&under), s.images()[0].y, s.text_boxes()[0].y), (400.0, 500.0, 600.0));
+    }
+
+    #[test]
+    fn space_right_of_a_line_moves_everything_there_in_one_step() {
+        use crate::notebook::Axis;
+        let s = Sheet::create(1).unwrap();
+        let p = |x: f32, y: f32| InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
+        let left = s.add_stroke(brush, &[p(50.0, 100.0), p(120.0, 300.0)]).unwrap();
+        let right = s.add_stroke(brush, &[p(300.0, 100.0), p(360.0, 120.0)]).unwrap();
+        let img = s.add_image("b", 400.0, 500.0, 100.0, 80.0).unwrap();
+        s.add_text_box(250.0, 600.0, 120.0, 12.0, "Rechts").unwrap();
+        let b = s.beyond(Axis::Right, 200.0);
+        assert_eq!(b.top, Some(250.0), "the text box is the leftmost thing right of the line");
+        assert_eq!(b.bottom, Some(500.0));
+        assert_eq!(s.shift_beyond(Axis::Right, 200.0, 40.0).unwrap(), 3);
+        assert_eq!(s.stroke(&right).unwrap().unwrap().points[0].x, 340.0);
+        assert_eq!(s.stroke(&right).unwrap().unwrap().points[0].y, 100.0, "only sideways");
+        assert_eq!(s.stroke(&left).unwrap().unwrap().points[0].x, 50.0);
+        assert_eq!(s.images().into_iter().find(|i| i.id == img).unwrap().x, 440.0);
+        assert_eq!(s.text_boxes()[0].x, 290.0);
+        // One step: undone in one go.
+        assert!(s.undo().unwrap());
+        assert_eq!(s.stroke(&right).unwrap().unwrap().points[0].x, 300.0);
+        assert_eq!(s.images().into_iter().find(|i| i.id == img).unwrap().x, 400.0);
     }
 
     fn pts(x: f32, n: usize) -> Vec<InkPoint> {
