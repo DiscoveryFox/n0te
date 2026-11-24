@@ -22,6 +22,7 @@ use iced::{Point, Rectangle, Task};
 use n0te_core::ink::{Brush, InkPoint};
 use n0te_core::pens::{self, Fountain, FountainOptions, PenType};
 use n0te_core::sheet::Sheet;
+use n0te_core::snap;
 
 use crate::app::{App, Message, Screen};
 use crate::pages::{Camera, LiveInk};
@@ -73,6 +74,8 @@ pub enum Msg {
     Cut,
     /// Paste what was copied in the middle of the view.
     Paste,
+    /// A frame while drawing (hold timers for shapes and arrows).
+    Frame,
     /// Handwriting of a sheet was read (notebook, sheet, lines, keys to drop).
     Indexed(String, String, Vec<n0te_core::sheet::IndexLine>, Vec<String>),
 }
@@ -93,6 +96,19 @@ struct Drawing {
     /// Samples already sent live, and how many live messages went out.
     sent: usize,
     seq: u32,
+    /// Where the pen last settled (shapes snap when it rests there long enough).
+    rest: snap::Rest,
+    /// The hold checks that already ran since the pen settled: (shape, arrow).
+    fired: (bool, bool),
+    /// The stroke snapped to a shape and follows the pen while it stays down.
+    held: Option<snap::Held>,
+    snapped: bool,
+    /// When the pen went down (for the hold timers), in the stroke's own milliseconds.
+    started: std::time::Instant,
+    /// The page's strokes as possible lines for arrowheads (ids alongside), read on first need.
+    lines: Option<(Vec<String>, Vec<n0te_core::arrows::LineStroke>)>,
+    /// Strokes the snap replaces (the first barb of a two-barb head).
+    replaces: Vec<String>,
 }
 
 /// The eraser under way.
@@ -426,6 +442,7 @@ impl App {
                 self.say(crate::i18n::trf("{} Striche kopiert", &[&self.tablet.clip.len()]));
             }
             Msg::Paste => self.paste_strokes(),
+            Msg::Frame => self.tablet_frame(),
             Msg::Indexed(nb, sheet, put, drop) => {
                 self.tablet.indexing = false;
                 if (!put.is_empty() || !drop.is_empty())
@@ -529,7 +546,26 @@ impl App {
                 let brush = t.brush();
                 let fountain = (tool == Tool::Pen && t.pen == PenType::Fountain).then(|| Fountain::new(t.fountain));
                 t.next_live += 1;
-                t.drawing = Some(Drawing { pane: key, notebook, sheet: placed.sheet_id.clone(), origin, brush, points: Vec::new(), fountain, t0: s.t_ms, live_id: t.next_live, sent: 0, seq: 0 });
+                t.drawing = Some(Drawing {
+                    pane: key,
+                    notebook,
+                    sheet: placed.sheet_id.clone(),
+                    origin,
+                    brush,
+                    points: Vec::new(),
+                    fountain,
+                    t0: s.t_ms,
+                    live_id: t.next_live,
+                    sent: 0,
+                    seq: 0,
+                    rest: snap::Rest::new(local.0, local.1, 0),
+                    fired: (false, false),
+                    held: None,
+                    snapped: false,
+                    started: std::time::Instant::now(),
+                    lines: None,
+                    replaces: Vec::new(),
+                });
                 self.pen_move(s);
             }
             Tool::Eraser => {
@@ -606,8 +642,24 @@ impl App {
             let at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
             let (x, y) = (at.x - d.origin.0, at.y - d.origin.1);
             let t = s.t_ms.wrapping_sub(d.t0);
-            // Skip samples that don't move (a resting pen floods them).
-            if d.points.last().is_some_and(|p| (p.x - x).hypot(p.y - y) < 0.05 && p.t_ms + 4 > t) {
+            // Snapped: the shape follows the pen (a line's end, a box's corner).
+            if let Some(h) = &mut d.held {
+                let u = h.pen_at(x, y, t, cam.zoom, 1.0);
+                if let Some(pts) = u.points {
+                    d.points = pts;
+                    self.show_drawing();
+                }
+                if let Some(free) = u.freed {
+                    self.say(crate::i18n::tr(if free { "Linie frei: rastet nicht mehr ein" } else { "Linie rastet wieder ein" }));
+                }
+                return;
+            }
+            // Moving on from where it rested: the hold checks start over.
+            if d.rest.moved(x, y, t, cam.zoom) {
+                d.fired = (false, false);
+            }
+            // Skip samples that hardly move (a resting pen floods them).
+            if d.points.last().is_some_and(|p| (p.x - x).hypot(p.y - y) < snap::MIN_STEP_PX / cam.zoom) {
                 return;
             }
             let pressure = match &mut d.fountain {
@@ -615,12 +667,7 @@ impl App {
                 None => s.pressure,
             };
             d.points.push(InkPoint { x, y, pressure, t_ms: t });
-            let (sheet, brush, points, id) = (d.sheet.clone(), d.brush, d.points.clone(), d.live_id);
-            if let Screen::Notebook(split) = &mut self.screen
-                && let Some(o) = split.pane_mut(d.pane)
-            {
-                o.pages.live.borrow_mut().insert((LOCAL.to_string(), id), LiveInk { sheet_id: sheet, brush, points, done: None });
-            }
+            self.show_drawing();
             return;
         }
         if let Some(er) = &mut self.tablet.erasing {
@@ -688,7 +735,26 @@ impl App {
             }
         }
         if let Some(mut d) = self.tablet.drawing.take() {
-            if let Some(f) = &d.fountain {
+            // Rested long enough before lifting: a shape or an arrowhead after all.
+            let mut changed = d.snapped;
+            if !d.snapped && d.points.len() > 4 {
+                let zoom = pane_camera(&self.screen, d.pane).map(|c| c.zoom).unwrap_or(1.0);
+                let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
+                let lines = self.drawing_lines(&mut d);
+                if let Some(sn) = snap::on_lift(&d.points, zoom, held, &lines.1, self.tablet.snap_options()) {
+                    if let Some(i) = sn.delete
+                        && let Some(id) = lines.0.get(i)
+                    {
+                        d.replaces.push(id.clone());
+                    }
+                    d.points = sn.shape.points;
+                    changed = true;
+                }
+            }
+            // The fountain pen lifts off thin, unless the stroke became a shape.
+            if let Some(f) = &d.fountain
+                && !changed
+            {
                 f.taper_end(&mut d.points);
             }
             // A dot: a tap leaves a point, as on paper.
@@ -705,10 +771,16 @@ impl App {
                 l.points = points.clone();
                 l.done = Some(std::time::Instant::now());
             }
+            let replaces = d.replaces.clone();
             self.tablet.drawing = Some(d);
             self.send_live(true);
             self.tablet.drawing = None;
-            self.edit_tracked(&nb, &sheet, |s| s.add_stroke(brush, &points).map(|_| ()));
+            self.edit_tracked(&nb, &sheet, |s| {
+                if !replaces.is_empty() {
+                    s.remove(&replaces)?;
+                }
+                s.add_stroke(brush, &points).map(|_| ())
+            });
             return Task::none();
         }
         if let Some(er) = self.tablet.erasing.take() {
@@ -897,6 +969,82 @@ impl App {
             Err(e) => self.say(crate::i18n::trf("Rückgängig ging nicht: {}", &[&e])),
         }
         self.tablet.selection = None;
+    }
+}
+
+impl Tablet {
+    /// Shape recognition and arrowheads (both on, like the tablet's defaults); heads only with
+    /// the pen tool.
+    pub fn snap_options(&self) -> snap::Options {
+        snap::Options { shapes: true, arrows: true, pen: self.tool == Tool::Pen }
+    }
+}
+
+impl App {
+    /// Shows the stroke being drawn as it is now (live ink in its pane).
+    fn show_drawing(&mut self) {
+        let Some(d) = &self.tablet.drawing else { return };
+        let (sheet, brush, points, id, pane) = (d.sheet.clone(), d.brush, d.points.clone(), d.live_id, d.pane);
+        if let Screen::Notebook(split) = &mut self.screen
+            && let Some(o) = split.pane_mut(pane)
+        {
+            o.pages.live.borrow_mut().insert((LOCAL.to_string(), id), LiveInk { sheet_id: sheet, brush, points, done: None });
+        }
+    }
+
+    /// The strokes on the drawing's page as lines for arrowheads (read once per stroke).
+    fn drawing_lines(&mut self, d: &mut Drawing) -> (Vec<String>, Vec<n0te_core::arrows::LineStroke>) {
+        if d.lines.is_none() {
+            let strokes = self.tablet_sheet(&d.notebook, &d.sheet).map(|s| s.strokes()).unwrap_or_default();
+            d.lines = Some(strokes.iter().map(|s| (s.id.clone(), n0te_core::arrows::LineStroke::of(s))).unzip());
+        }
+        d.lines.clone().unwrap_or_default()
+    }
+
+    /// Every frame while the pen draws: the hold timers (a shape after 0.5 s at rest, an arrow
+    /// after 0.9 s), as on the tablet.
+    pub(crate) fn tablet_frame(&mut self) {
+        let Some(mut d) = self.tablet.drawing.take() else { return };
+        if !d.snapped && d.points.len() >= 5 {
+            let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
+            let o = self.tablet.snap_options();
+            let due = if !d.fired.0 && held >= snap::SHAPE_HOLD_MS {
+                d.fired.0 = true;
+                Some(snap::Hold::Shape)
+            } else if o.arrows && !d.fired.1 && held >= snap::ARROW_HOLD_MS {
+                d.fired.1 = true;
+                Some(snap::Hold::Arrow)
+            } else {
+                None
+            };
+            if let Some(hold) = due {
+                let zoom = pane_camera(&self.screen, d.pane).map(|c| c.zoom).unwrap_or(1.0);
+                let lines = self.drawing_lines(&mut d);
+                if let Some(sn) = snap::on_hold(hold, &d.points, zoom, &lines.1, o) {
+                    if let Some(i) = sn.delete
+                        && let Some(id) = lines.0.get(i)
+                    {
+                        d.replaces.push(id.clone());
+                        if let Screen::Notebook(split) = &mut self.screen
+                            && let Some(p) = split.pane_mut(d.pane)
+                        {
+                            p.pages.live_erase(&d.sheet, std::slice::from_ref(id), &[]);
+                        }
+                    }
+                    let pen = d.points.last().map(|p| (p.x, p.y)).unwrap_or_default();
+                    d.held = snap::Held::new(&sn.shape, pen.0, pen.1);
+                    d.points = sn.shape.points;
+                    d.snapped = true;
+                }
+            }
+        }
+        self.tablet.drawing = Some(d);
+        self.show_drawing();
+    }
+
+    /// Whether the hold timers need frames now.
+    pub fn tablet_wants_frames(&self) -> bool {
+        self.tablet.drawing.as_ref().is_some_and(|d| !d.snapped)
     }
 }
 

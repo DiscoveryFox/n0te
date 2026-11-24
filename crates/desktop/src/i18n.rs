@@ -129,6 +129,8 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("Seite nicht lesbar", "Page can't be read"),
     ("Nicht geändert: {}", "Not changed: {}"),
     ("Rückgängig ging nicht: {}", "Undo failed: {}"),
+    ("Linie frei: rastet nicht mehr ein", "Line free: no more snapping"),
+    ("Linie rastet wieder ein", "Line snaps again"),
     // Palettes
     ("Standard", "Standard"),
     ("Pastell", "Pastel"),

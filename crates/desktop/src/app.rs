@@ -596,6 +596,8 @@ impl App {
             iced::window::open_events().map(Message::WindowOpened),
             crate::gestures::subscription().map(Message::Gesture),
             if crate::mode() == crate::Mode::Tablet { crate::tablet::pen::subscription().map(Message::Pen) } else { Subscription::none() },
+            // n0te Tablet: frames while a stroke is drawn (shapes snap when the pen rests).
+            if crate::mode() == crate::Mode::Tablet && self.tablet_wants_frames() { iced::window::frames().map(|_| Message::Tablet(crate::tablet::Msg::Frame)) } else { Subscription::none() },
             // The frame clock: a gliding page, a found spot fading.
             if self.glide.is_some() || matches!(&self.screen, Screen::Notebook(s) if s.panes.iter().any(|o| o.pages.flash.as_ref().is_some_and(|f| !f.done()))) {
                 iced::window::frames().map(Message::Glide)

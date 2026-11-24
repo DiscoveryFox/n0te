@@ -191,3 +191,24 @@ fn the_text_tool_makes_a_text_box_where_tapped() {
     h.events(&[]);
     assert!(h.app.editing.is_some(), "a text box is being edited");
 }
+
+#[test]
+fn holding_the_pen_still_makes_a_wobbly_line_straight() {
+    let mut h = opened("shape");
+    let (nb, sheet, a) = first_page(&h, 0.2, 0.7);
+    let old: Vec<String> = strokes(&h, &nb, &sheet).into_iter().map(|s| s.id).collect();
+    h.press_at(a);
+    for i in 1..=30 {
+        let wobble = if i % 2 == 0 { 2.5 } else { -2.5 };
+        h.move_to(Point::new(a.x + i as f32 * 8.0, a.y + wobble));
+    }
+    // Rest: after 0.5 s the hold check runs (frames while drawing) and the line snaps.
+    std::thread::sleep(std::time::Duration::from_millis(650));
+    h.message(Message::Tablet(Msg::Frame));
+    h.release();
+    let s = strokes(&h, &nb, &sheet).into_iter().find(|s| !old.contains(&s.id)).expect("stored");
+    let (y0, y1) = s.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.y), hi.max(p.y)));
+    assert!(y1 - y0 < 1.0, "straight: y spread {} over {} points", y1 - y0, s.points.len());
+    let (x0, x1) = s.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
+    assert!(x1 - x0 > 150.0 / open(&h).camera.zoom, "as long as drawn");
+}
