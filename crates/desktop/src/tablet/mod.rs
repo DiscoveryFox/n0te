@@ -10,6 +10,7 @@
 //! Pen events come from [`pen`] (Windows: the real pen; elsewhere the page view turns a mouse
 //! drag into the same events) in window coordinates; each goes to the pane under it.
 
+pub mod keyboard;
 pub mod overlay;
 pub mod pen;
 pub mod recognize;
