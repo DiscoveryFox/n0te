@@ -83,6 +83,15 @@ pub struct SpacePlan {
 /// Room kept under the lowest thing on a page that grew to keep it.
 const SPACE_MARGIN: f32 = 12.0;
 
+/// Separates a notebook's tags in its meta.
+const TAG_SEP: char = '\u{1f}';
+
+/// A folder path as stored: its parts trimmed, empty ones left out, joined by "/"
+/// (" Uni / WS26/ " → "Uni/WS26").
+pub fn folder_path(folder: &str) -> String {
+    folder.split('/').map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("/")
+}
+
 /// Space inserted at `y` (`dy` > 0) or taken out (`dy` < 0) on a page, with `below` what lies
 /// under the line. Nothing ever leaves its page: what is pushed past the bottom makes the page
 /// longer; a PDF page splits at the line (the PDF below moves down with the ink, so notes stay
@@ -244,6 +253,7 @@ const K_TITLE: &str = "title";
 const K_SHEET: &str = "sheet";
 const K_SIDE: &str = "side";
 const K_COLLAPSED: &str = "collapsed";
+const K_MARK: &str = "mark";
 const K_W: &str = "w";
 const K_H: &str = "h";
 const K_BG: &str = "bg";
@@ -314,12 +324,40 @@ impl Notebook {
         Ok(())
     }
 
-    /// The library folder this notebook is filed under ("" = top level), e.g. "WS26".
+    /// The library folder this notebook is filed under ("" = top level), e.g. "WS26"; folders
+    /// nest with "/" ("Uni/WS26/Analysis").
     pub fn folder(&self) -> String {
         self.meta_str("folder")
     }
     pub fn set_folder(&self, folder: &str) -> Result<()> {
-        self.meta.insert("folder", folder.trim())?;
+        self.meta.insert("folder", folder_path(folder))?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// The notebook's tags ("Prüfung", "Mathe"), in the order given.
+    pub fn tags(&self) -> Vec<String> {
+        self.meta_str("tags").split(TAG_SEP).map(str::to_string).filter(|t| !t.is_empty()).collect()
+    }
+    /// Sets the tags: trimmed, empty ones and repeats (ignoring case) left out.
+    pub fn set_tags(&self, tags: &[String]) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        let clean: Vec<String> = tags
+            .iter()
+            .map(|t| t.replace(TAG_SEP, " ").trim().to_string())
+            .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
+            .collect();
+        self.meta.insert("tags", clean.join(&TAG_SEP.to_string()))?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// Pinned: shown first in the library.
+    pub fn pinned(&self) -> bool {
+        matches!(self.meta.get("pinned"), Some(ValueOrContainer::Value(LoroValue::Bool(true))))
+    }
+    pub fn set_pinned(&self, pinned: bool) -> Result<()> {
+        self.meta.insert("pinned", pinned)?;
         self.doc.commit();
         Ok(())
     }
@@ -455,6 +493,33 @@ impl Notebook {
             return Err(Error::Invalid("only groups collapse".into()));
         }
         self.tree.get_meta(id)?.insert(K_COLLAPSED, collapsed)?;
+        self.doc.commit();
+        Ok(())
+    }
+
+    /// The pages marked to find again (bookmarks), main and side pages, in outline order.
+    pub fn marked(&self) -> Vec<NodeId> {
+        let mut out = Vec::new();
+        for row in self.outline(true) {
+            if let OutlineRow::Sheet { node, left, right, .. } = row {
+                for n in std::iter::once(node).chain(left.into_iter().map(|s| s.node)).chain(right.into_iter().map(|s| s.node)) {
+                    let on = TreeID::try_from(n.as_str()).ok().and_then(|id| self.tree.get_meta(id).ok()).is_some_and(|m| matches!(m.get(K_MARK), Some(ValueOrContainer::Value(LoroValue::Bool(true)))));
+                    if on {
+                        out.push(n);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Marks a page to find again (or not).
+    pub fn set_marked(&self, node: &str, on: bool) -> Result<()> {
+        let id = self.node(node)?;
+        if self.kind(id) != "sheet" {
+            return Err(Error::Invalid("only pages are marked".into()));
+        }
+        self.tree.get_meta(id)?.insert(K_MARK, on)?;
         self.doc.commit();
         Ok(())
     }
@@ -739,6 +804,38 @@ fn value_str(v: Option<ValueOrContainer>) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pages_can_be_marked_to_find_again() {
+        let nb = Notebook::create(1, "x").unwrap();
+        let (a, _) = nb.add_sheet(None, 0, &SheetSpec::a4(Background::Grid)).unwrap();
+        let (b, _) = nb.add_sheet(None, 1, &SheetSpec::a4(Background::Grid)).unwrap();
+        assert!(nb.marked().is_empty());
+        nb.set_marked(&b, true).unwrap();
+        nb.set_marked(&a, true).unwrap();
+        assert_eq!(nb.marked(), vec![a.clone(), b.clone()], "in outline order");
+        nb.set_marked(&a, false).unwrap();
+        assert_eq!(nb.marked(), vec![b.clone()]);
+        let g = nb.add_group(None, 2, "G").unwrap();
+        assert!(nb.set_marked(&g, true).is_err(), "groups aren't pages");
+    }
+
+    #[test]
+    fn notebooks_carry_their_folder_tags_and_pin() {
+        let nb = Notebook::create(1, "Analysis").unwrap();
+        nb.set_folder(" Uni / WS26/ ").unwrap();
+        assert_eq!(nb.folder(), "Uni/WS26");
+        assert_eq!(folder_path("/"), "");
+        assert!(nb.tags().is_empty() && !nb.pinned());
+        nb.set_tags(&["Mathe".into(), " Prüfung ".into(), "mathe".into(), "".into()]).unwrap();
+        assert_eq!(nb.tags(), vec!["Mathe", "Prüfung"]);
+        nb.set_pinned(true).unwrap();
+        // They travel with the notebook (another device loads the same document).
+        let copy = Notebook::load(2, &nb.snapshot().unwrap()).unwrap();
+        assert_eq!((copy.folder(), copy.tags(), copy.pinned()), ("Uni/WS26".to_string(), vec!["Mathe".to_string(), "Prüfung".to_string()], true));
+        nb.set_tags(&[]).unwrap();
+        assert!(nb.tags().is_empty());
+    }
+
     use super::*;
 
     fn titles(nb: &Notebook, all: bool) -> Vec<String> {

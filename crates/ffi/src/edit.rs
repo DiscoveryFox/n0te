@@ -255,6 +255,35 @@ impl NotebookHandle {
     pub fn set_folder(&self, folder: String) -> R<()> {
         Ok(lock(&self.nb).set_folder(&folder)?)
     }
+
+    /// The pages marked to find again (bookmarks), as outline nodes in outline order.
+    pub fn marked(&self) -> Vec<String> {
+        lock(&self.nb).marked()
+    }
+
+    /// Marks a page (outline node) to find again, or not. Save the notebook after.
+    pub fn set_marked(&self, node: String, on: bool) -> R<()> {
+        Ok(lock(&self.nb).set_marked(&node, on)?)
+    }
+
+    /// The notebook's tags, in their order.
+    pub fn tags(&self) -> Vec<String> {
+        lock(&self.nb).tags()
+    }
+
+    /// Sets the tags (trimmed, repeats left out). Save the notebook after.
+    pub fn set_tags(&self, tags: Vec<String>) -> R<()> {
+        Ok(lock(&self.nb).set_tags(&tags)?)
+    }
+
+    /// Pinned: first in the library.
+    pub fn pinned(&self) -> bool {
+        lock(&self.nb).pinned()
+    }
+
+    pub fn set_pinned(&self, pinned: bool) -> R<()> {
+        Ok(lock(&self.nb).set_pinned(pinned)?)
+    }
     pub fn sheet_count(&self) -> u32 {
         lock(&self.nb).sheet_count() as u32
     }

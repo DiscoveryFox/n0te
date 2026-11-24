@@ -77,10 +77,12 @@ pub struct FfiStroke {
     pub ends: Vec<f32>,
 }
 
-/// A stroke's ends and the way it runs there (see [`FfiStroke::ends`]): the tangent at each
-/// end, read from 1.5 to 8 pt in (a curving end still points the way it ends, not the way it
-/// went a while before). A little flick as the pen lifted (its last few points turning off
-/// sharply) is left out: the end is where it began, the way is the stroke's own.
+/// A stroke's ends and the way it runs there (see [`FfiStroke::ends`]), for arrowheads: where
+/// the rest of the stroke points, not how its last millimetres wobbled as the pen landed or
+/// rested. A straight stroke (every point near the chord) runs the chord's way; a curved one
+/// the way of a line fitted through its last fifth (8–30 pt in from the end: a curving end
+/// still points the way it ends). A little flick as the pen lifted (its last few points
+/// turning off sharply) is left out: the end is where it began, the way is the stroke's own.
 fn stroke_ends(pts: &[ink::InkPoint]) -> Vec<f32> {
     let n = pts.len();
     if n < 2 {
@@ -110,22 +112,58 @@ fn stroke_ends(pts: &[ink::InkPoint]) -> Vec<f32> {
         let l = x.hypot(y).max(1e-6);
         (x / l, y / l)
     };
+    // Straight: every point within 4 % of the length (1.5 pt at least) of the chord.
+    let (a, b) = (pts[0], pts[n - 1]);
+    let chord = (b.x - a.x).hypot(b.y - a.y);
+    let straight = chord > len * 0.9 && {
+        let (ux, uy) = unit(b.x - a.x, b.y - a.y);
+        let tol = (len * 0.04).max(1.5);
+        pts.iter().all(|p| ((p.x - a.x) * uy - (p.y - a.y) * ux).abs() <= tol)
+    };
+    // The way a curved end runs: the main axis of the points from 1.5 pt to a fifth in.
+    let fitted = |from_end: bool| -> (f32, f32) {
+        let (near, far) = (1.5f32.min(len / 8.0), (len * 0.2).clamp(8.0, 30.0).min(len / 2.0));
+        let mut q: Vec<(f32, f32)> = vec![along(from_end, near), along(from_end, far)];
+        let mut acc = 0.0;
+        for k in 0..seg.len() {
+            let i = if from_end { seg.len() - 1 - k } else { k };
+            acc += seg[i];
+            if acc > far {
+                break;
+            }
+            if acc > near {
+                let p = if from_end { pts[i] } else { pts[i + 1] };
+                q.push((p.x, p.y));
+            }
+        }
+        let (mx, my) = (q.iter().map(|p| p.0).sum::<f32>() / q.len() as f32, q.iter().map(|p| p.1).sum::<f32>() / q.len() as f32);
+        let (mut cxx, mut cxy, mut cyy) = (0.0f32, 0.0f32, 0.0f32);
+        for (x, y) in &q {
+            cxx += (x - mx) * (x - mx);
+            cxy += (x - mx) * (y - my);
+            cyy += (y - my) * (y - my);
+        }
+        let t = 0.5 * (2.0 * cxy).atan2(cxx - cyy);
+        let (dx, dy) = (t.cos(), t.sin());
+        // Pointing back into the stroke.
+        let (fx, fy) = (q[1].0 - q[0].0, q[1].1 - q[0].1);
+        if dx * fx + dy * fy < 0.0 { (-dx, -dy) } else { (dx, dy) }
+    };
     let end = |from_end: bool| -> [f32; 4] {
         let tip = if from_end { pts[n - 1] } else { pts[0] };
-        let (near, far) = (1.5f32.min(len / 8.0), 8f32.min(len / 3.0));
-        let (ax, ay) = along(from_end, near);
-        let (bx, by) = along(from_end, far);
-        let (dx, dy) = unit(bx - ax, by - ay);
         // A flick: the last 4 pt run off at a sharp angle to the 4–12 pt before them.
         let (h0, h1) = (4f32.min(len / 6.0), 12f32.min(len / 2.0));
         let (px, py) = along(from_end, h0);
         let (qx, qy) = along(from_end, h1);
         let (fx, fy) = unit(px - tip.x, py - tip.y);
         let (gx, gy) = unit(qx - px, qy - py);
-        if len > 20.0 && fx * gx + fy * gy < 0.5 {
-            return [px, py, gx, gy];
-        }
-        [tip.x, tip.y, dx, dy]
+        let flick = len > 20.0 && fx * gx + fy * gy < 0.5;
+        let (dx, dy) = if straight && !flick {
+            if from_end { unit(a.x - b.x, a.y - b.y) } else { unit(b.x - a.x, b.y - a.y) }
+        } else {
+            fitted(from_end)
+        };
+        if flick { [px, py, dx, dy] } else { [tip.x, tip.y, dx, dy] }
     };
     let a = end(false);
     let b = end(true);
@@ -1211,6 +1249,32 @@ pub fn run_core_bench(root: String) -> R<BenchResult> {
 
 #[cfg(test)]
 mod tests {
+
+    fn pt(x: f32, y: f32) -> n0te_core::ink::InkPoint {
+        n0te_core::ink::InkPoint { x, y, pressure: 0.5, t_ms: 0 }
+    }
+
+    fn angle_between(a: (f32, f32), b: (f32, f32)) -> f32 {
+        ((a.0 * b.0 + a.1 * b.1) / (a.0.hypot(a.1) * b.0.hypot(b.1))).clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    #[test]
+    fn line_ends_point_where_the_line_runs_not_where_it_wobbled() {
+        // A straight line to the right whose last 5 pt wobble 30° down (the pen landing to rest).
+        let mut pts: Vec<_> = (0..=95).map(|i| pt(i as f32, 0.0)).collect();
+        for k in 1..=5 {
+            pts.push(pt(95.0 + k as f32 * 0.87, k as f32 * 0.5));
+        }
+        let e = stroke_ends(&pts);
+        assert!(angle_between((e[6], e[7]), (-1.0, 0.0)) < 4.0, "back into the line: {:?}", (e[6], e[7]));
+        assert!(angle_between((e[2], e[3]), (1.0, 0.0)) < 4.0);
+        // A quarter circle (radius 60) from (60, 0) to (0, 60): at its end it runs straight left.
+        let arc: Vec<_> = (0..=90).map(|d| { let t = (d as f32).to_radians(); pt(60.0 * t.cos(), 60.0 * t.sin()) }).collect();
+        let e = stroke_ends(&arc);
+        // Back into the stroke at the end is down-right; the fitted way lies within a few degrees of the tangent.
+        assert!(angle_between((e[6], e[7]), (1.0, -0.15)) < 12.0, "{:?}", (e[6], e[7]));
+    }
+
     use super::*;
 
     #[test]
