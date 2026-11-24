@@ -35,6 +35,7 @@ use n0te_core::plot::Plot;
 use n0te_core::sheet::{Stroke, TextBox};
 
 use crate::pdf::{self, Pdf};
+use crate::i18n::tr;
 use crate::theme;
 
 pub const MIN_ZOOM: f32 = 0.08;
@@ -569,7 +570,7 @@ impl Pages {
             let c = p.content(&self.load);
             if p.placed.spec.background == Background::Text {
                 // The text page's body, inside the page margins (an empty page shows a hint).
-                let text = if c.body.trim().is_empty() { "*Leere Textseite — anklicken zum Schreiben*".to_string() } else { c.body.clone() };
+                let text = if c.body.trim().is_empty() { tr("*Leere Textseite — anklicken zum Schreiben*").to_string() } else { c.body.clone() };
                 let w = (p.placed.rect.width() - 112.0).max(100.0);
                 out.push((p.placed.sheet_id.clone(), p.placed.rect, TextBox { id: n0te_core::sheet::BODY_ID.into(), x: 56.0, y: 64.0, w, size: 12.0, text }));
             }
@@ -1312,7 +1313,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let size = (15.0 * cam.zoom).clamp(9.0, 22.0);
                 let y = at.y + (hh - size * 1.3) / 2.0;
                 label(r, if h.collapsed { "▸".into() } else { "▾".into() }, Point::new(at.x, y), 20.0, theme::p().accent, size, theme::SANS_BOLD, text::Alignment::Left);
-                let title = if h.title.trim().is_empty() { "Gruppe".to_string() } else { h.title.clone() };
+                let title = if h.title.trim().is_empty() { tr("Gruppe").to_string() } else { h.title.clone() };
                 label(r, format!("{title}   {}", h.count), Point::new(at.x + size * 1.4, y), w - size * 1.4, theme::p().text, size, theme::SANS_BOLD, text::Alignment::Left);
                 r.fill_quad(renderer::Quad { bounds: Rectangle::new(Point::new(at.x, at.y + hh - 1.0), Size::new(w, 1.0)), ..Default::default() }, theme::p().border);
             }
