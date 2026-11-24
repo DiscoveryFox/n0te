@@ -139,6 +139,7 @@ pub fn glyph(c: char) -> Option<(f32, Lines)> {
         'δ' => (0.48, vec![join(&[bez((0.38, 0.05), (0.08, 0.0), (0.18, 0.28)), bez((0.18, 0.28), (0.25, 0.42), (0.36, 0.55)), arc(0.24, 0.75, 0.18, 0.25, 50.0, 410.0)])]),
         'ε' => (0.42, vec![join(&[arc(0.24, 0.6, 0.17, 0.14, 60.0, 270.0), arc(0.25, 0.86, 0.19, 0.14, 90.0, -70.0)])]),
         'θ' => (0.5, vec![arc(0.25, 0.5, 0.2, 0.5, 90.0, 450.0), l(&[(0.06, 0.5), (0.44, 0.5)])]),
+        'φ' => (0.54, vec![arc(0.27, 0.72, 0.22, 0.27, 90.0, 450.0), l(&[(0.27, 0.3), (0.27, 1.3)])]),
         '∞' => (0.66, vec![join(&[arc(0.17, 0.66, 0.15, 0.17, 0.0, 360.0), arc(0.49, 0.66, 0.15, 0.17, 180.0, -180.0)])]),
         'ä' | 'ö' | 'ü' => {
             let (w, mut lines) = glyph(match c {
@@ -157,13 +158,154 @@ pub fn glyph(c: char) -> Option<(f32, Lines)> {
 /// Letter spacing (of the cap height).
 pub const GAP: f32 = 0.16;
 
-/// How text is laid out: each character with its size (of the cap height) and how far it is
-/// lifted (+ down, − up). `_` makes what follows (letters, digits) low and small, `^` and
-/// `²`, `³` high and small.
-pub fn runs(text: &str) -> Vec<(char, f32, f32)> {
-    let mut out = Vec::new();
+/// A fraction written stacked: `FRAC_OPEN` numerator `FRAC_BAR` denominator `FRAC_CLOSE`
+/// (they nest). Numbers written as `¹⁄₃` (small digits around a fraction slash, as the app
+/// writes them) are stacked too.
+pub const FRAC_OPEN: char = '\u{E000}';
+pub const FRAC_BAR: char = '\u{E001}';
+pub const FRAC_CLOSE: char = '\u{E002}';
+
+/// A glyph where [`layout`] puts it: `x` from the start and `lift` (its box's top, + down) in
+/// cap heights, its size (of the cap height).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placed {
+    pub c: char,
+    pub x: f32,
+    pub lift: f32,
+    pub size: f32,
+}
+
+/// A fraction's bar, from `x0` to `x1` at height `y` (cap heights, + down from the line's top),
+/// in a fraction of `size`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bar {
+    pub x0: f32,
+    pub x1: f32,
+    pub y: f32,
+    pub size: f32,
+}
+
+/// A text laid out for the hand: its glyphs and fraction bars, how wide it is, how far its ink
+/// reaches up (`top`, < 0: above the line's top) and down (`bottom`), in cap heights.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Laid {
+    pub glyphs: Vec<Placed>,
+    pub bars: Vec<Bar>,
+    pub width: f32,
+    pub top: f32,
+    pub bottom: f32,
+}
+
+impl Laid {
+    fn grow(&mut self, top: f32, bottom: f32) {
+        if self.glyphs.is_empty() && self.bars.is_empty() {
+            (self.top, self.bottom) = (top, bottom);
+        } else {
+            self.top = self.top.min(top);
+            self.bottom = self.bottom.max(bottom);
+        }
+    }
+}
+
+const SUPS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+const SUBS: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+
+/// How far a glyph's ink reaches up and down in its box (0: the top, 1: the line).
+fn reach(c: char) -> (f32, f32) {
+    match glyph(c) {
+        Some((_, lines)) if lines.iter().any(|l| !l.is_empty()) => lines.iter().flatten().fold((f32::MAX, f32::MIN), |(a, b), p| (a.min(p.1), b.max(p.1))),
+        _ => (0.45, 1.0),
+    }
+}
+
+/// `¹⁄₃` at `i`: the numerator's and the denominator's digits, and where it ends.
+fn small_fraction(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    let digits = |j: &mut usize, of: &[char; 10]| {
+        let mut s = String::new();
+        while let Some(d) = chars.get(*j).and_then(|c| of.iter().position(|s| s == c)) {
+            s.push(char::from(b'0' + d as u8));
+            *j += 1;
+        }
+        s
+    };
+    let mut j = i;
+    let num = digits(&mut j, &SUPS);
+    if num.is_empty() || chars.get(j) != Some(&'⁄') {
+        return None;
+    }
+    j += 1;
+    let den = digits(&mut j, &SUBS);
+    (!den.is_empty()).then_some((num, den, j))
+}
+
+/// Lays out `text` for the hand: `_1` low and small, `²`, `^2` high and small, fractions
+/// stacked (see [`FRAC_OPEN`]). Characters the font lacks take no room.
+pub fn layout(text: &str) -> Laid {
+    layout_at(text, 1.0)
+}
+
+fn layout_at(text: &str, size: f32) -> Laid {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Laid::default();
+    let mut i = 0;
+    out.width = lay(&chars, &mut i, size, &mut out, None);
+    out
+}
+
+/// Lays out from `i` up to `stop` (or the end) at `size`, the line's top at lift 0, into `out`.
+/// The width it takes.
+fn lay(chars: &[char], i: &mut usize, size: f32, out: &mut Laid, stop: Option<char>) -> f32 {
+    let mut x = 0.0f32;
+    let mut last_gap = 0.0;
     let mut mode = 0u8;
-    for c in text.chars() {
+    let put = |out: &mut Laid, x: &mut f32, last_gap: &mut f32, c: char, s: f32, lift: f32| {
+        if let Some((w, _)) = glyph(c) {
+            let (t, b) = reach(c);
+            out.grow(lift + t * s, lift + b * s);
+            out.glyphs.push(Placed { c, x: *x, lift, size: s });
+            *x += w * s + GAP * s;
+            *last_gap = GAP * s;
+        }
+    };
+    while *i < chars.len() {
+        let c = chars[*i];
+        if Some(c) == stop {
+            *i += 1;
+            break;
+        }
+        // A fraction: the numerator over the denominator, both smaller, the bar at the minus
+        // sign's height.
+        let ns = size * 0.74;
+        let parts = if c == FRAC_OPEN {
+            *i += 1;
+            let (mut num, mut den) = (Laid::default(), Laid::default());
+            num.width = lay(chars, i, ns, &mut num, Some(FRAC_BAR));
+            den.width = lay(chars, i, ns, &mut den, Some(FRAC_CLOSE));
+            Some((num, den))
+        } else if let Some((n, d, next)) = small_fraction(chars, *i) {
+            *i = next;
+            Some((layout_at(&n, ns), layout_at(&d, ns)))
+        } else {
+            None
+        };
+        if let Some((num, den)) = parts {
+            let w = num.width.max(den.width) + 0.14 * size;
+            let bar = 0.56 * size;
+            let gap = 0.13 * size;
+            for (part, dy) in [(&num, bar - gap - num.bottom), (&den, bar + gap - den.top)] {
+                let dx = x + (w - part.width) / 2.0;
+                out.grow(part.top + dy, part.bottom + dy);
+                out.glyphs.extend(part.glyphs.iter().map(|g| Placed { x: g.x + dx, lift: g.lift + dy, ..*g }));
+                out.bars.extend(part.bars.iter().map(|b| Bar { x0: b.x0 + dx, x1: b.x1 + dx, y: b.y + dy, ..*b }));
+            }
+            out.grow(bar, bar);
+            out.bars.push(Bar { x0: x, x1: x + w, y: bar, size });
+            x += w + GAP * size;
+            last_gap = GAP * size;
+            mode = 0;
+            continue;
+        }
+        *i += 1;
         match c {
             '_' => {
                 mode = 1;
@@ -174,7 +316,7 @@ pub fn runs(text: &str) -> Vec<(char, f32, f32)> {
                 continue;
             }
             '²' | '³' => {
-                out.push((if c == '²' { '2' } else { '3' }, 0.62, -0.2));
+                put(out, &mut x, &mut last_gap, if c == '²' { '2' } else { '3' }, size * 0.62, -0.2 * size);
                 continue;
             }
             _ => {}
@@ -183,25 +325,17 @@ pub fn runs(text: &str) -> Vec<(char, f32, f32)> {
             mode = 0;
         }
         match mode {
-            1 => out.push((c, 0.62, 0.55)),
-            2 => out.push((c, 0.62, -0.2)),
-            _ => out.push((c, 1.0, 0.0)),
+            1 => put(out, &mut x, &mut last_gap, c, size * 0.62, 0.55 * size),
+            2 => put(out, &mut x, &mut last_gap, c, size * 0.62, -0.2 * size),
+            _ => put(out, &mut x, &mut last_gap, c, size, 0.0),
         }
     }
-    out
+    (x - last_gap).max(0.0)
 }
 
 /// How wide `text` is at cap height `cap` (characters the font lacks take no room).
 pub fn text_width(text: &str, cap: f32) -> f32 {
-    let mut w = 0.0;
-    let mut last_gap = 0.0;
-    for (c, size, _) in runs(text) {
-        if let Some((gw, _)) = glyph(c) {
-            w += gw * cap * size + GAP * cap * size;
-            last_gap = GAP * cap * size;
-        }
-    }
-    (w - last_gap).max(0.0)
+    layout(text).width * cap
 }
 
 #[cfg(test)]
@@ -210,7 +344,7 @@ mod tests {
 
     #[test]
     fn every_glyph_stays_in_its_box() {
-        let all = "0123456789-,. ()|'/=+·≈πabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZäöü°:;!?√<>≤≥{}αβγδεθ∞";
+        let all = "0123456789-,. ()|'/=+·≈πabcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZäöü°:;!?√<>≤≥{}αβγδεθφ∞";
         for c in all.chars() {
             let (w, lines) = glyph(c).unwrap_or_else(|| panic!("no glyph for {c}"));
             assert!(w > 0.1, "{c}");
@@ -224,5 +358,30 @@ mod tests {
         assert!(glyph('€').is_none());
         assert!(text_width("-12,5", 10.0) > text_width("12", 10.0));
         assert_eq!(text_width("", 10.0), 0.0);
+    }
+
+    #[test]
+    fn fractions_are_stacked() {
+        // x/3 as a fraction: x above the bar, 3 under it, both smaller, the bar across both.
+        let l = layout(&format!("{FRAC_OPEN}x{FRAC_BAR}3{FRAC_CLOSE}"));
+        assert_eq!(l.bars.len(), 1);
+        let (x, three, bar) = (l.glyphs[0], l.glyphs[1], l.bars[0]);
+        assert!(x.lift + x.size <= bar.y && three.lift >= bar.y, "{l:?}");
+        assert!(x.size < 1.0 && bar.x1 - bar.x0 >= text_width("3", three.size));
+        // Taller than a line, narrower than written in a row.
+        let third = layout(&format!("{FRAC_OPEN}1{FRAC_BAR}3{FRAC_CLOSE}"));
+        assert!(third.top < 0.0 && third.bottom > 1.0 && l.bottom > 1.0, "{third:?}");
+        assert!(l.width < layout("x/3").width);
+        // ¹⁄₃ (how the app writes a third) is stacked the same way; ² stays a power.
+        let t = layout("y = ¹⁄₃x²");
+        assert_eq!(t.bars.len(), 1);
+        assert!(t.glyphs.iter().any(|g| g.c == '1' && g.lift < 0.0) && t.glyphs.iter().any(|g| g.c == '3' && g.lift > 0.5), "{t:?}");
+        assert!(t.glyphs.iter().any(|g| g.c == '2' && g.size < 1.0 && g.lift < 0.0));
+        // Nested: (1/2)/x.
+        let n = layout(&format!("{FRAC_OPEN}{FRAC_OPEN}1{FRAC_BAR}2{FRAC_CLOSE}{FRAC_BAR}x{FRAC_CLOSE}"));
+        assert_eq!(n.bars.len(), 2);
+        // Plain text as before.
+        assert_eq!(layout("A_1").glyphs.len(), 2);
+        assert!((text_width("12", 10.0) - (glyph('1').unwrap().0 + GAP + glyph('2').unwrap().0) * 10.0).abs() < 1e-4);
     }
 }

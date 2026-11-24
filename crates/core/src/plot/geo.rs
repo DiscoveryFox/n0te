@@ -200,6 +200,10 @@ pub fn name_of(def: &str) -> Option<String> {
     let head = d[..cut].trim();
     let head = head.split('(').next().unwrap_or("").trim();
     let ok = head.chars().next().is_some_and(|c| c.is_alphabetic()) && head.chars().all(|c| c.is_alphanumeric() || c == '_');
+    // r = 1 + cos θ names nothing: r is the polar curve's radius.
+    if head == "r" && Some(cut) == eq && lang::shape(d).polar {
+        return None;
+    }
     (ok && !matches!(head, "x" | "y")).then(|| head.to_string())
 }
 
@@ -305,9 +309,12 @@ fn refs_of(input: &Input, out: &mut Vec<String>) {
             node_refs(r, out);
         }
     }
+    if let Some(d) = &input.domain {
+        node_refs(d, out);
+    }
 }
 
-fn node_refs(n: &Node, out: &mut Vec<String>) {
+pub(crate) fn node_refs(n: &Node, out: &mut Vec<String>) {
     match n {
         Node::Name(s) => out.push(s.clone()),
         Node::Call(s, _, args) => {
@@ -532,14 +539,54 @@ impl Env {
     /// What a line of input defines.
     fn define(&mut self, input: &Input, style: &Style) -> Result<Val, String> {
         let _ = style;
-        if input.param.is_some() {
+        let v = if input.polar {
+            // r(θ): the curve (r cos θ, r sin θ), θ from 0 to 2π.
+            let Body::Expr(n) = &input.body else { return Err("r = … braucht rechts einen Ausdruck in θ".into()) };
+            let r = self.fexpr(n)?.simplified();
+            let x = Expr::Mul(bx(r.clone()), bx(Expr::Call(Func::Cos, bx(Expr::X)))).simplified();
+            let y = Expr::Mul(bx(r), bx(Expr::Call(Func::Sin, bx(Expr::X)))).simplified();
+            Val::Curve(x, y, 0.0, 2.0 * PI)
+        } else if input.param.is_some() {
             let Body::Expr(n) = &input.body else { return Err("Eine Funktion braucht rechts einen Ausdruck".into()) };
-            return Ok(Val::Func(self.fexpr(n)?.simplified()));
+            Val::Func(self.fexpr(n)?.simplified())
+        } else {
+            match &input.body {
+                Body::Expr(n) => self.eval(n)?,
+                Body::Equation(l, r) => self.equation(l, r)?,
+            }
+        };
+        match &input.domain {
+            Some(d) => self.restrict(v, d),
+            None => Ok(v),
         }
-        match &input.body {
-            Body::Expr(n) => self.eval(n),
-            Body::Equation(l, r) => self.equation(l, r),
-        }
+    }
+
+    /// `v` only where the comparison `d` holds: a function undefined elsewhere, a curve's t
+    /// (θ) in that range, a line or circle only there.
+    fn restrict(&mut self, v: Val, d: &Node) -> Result<Val, String> {
+        let (items, ops) = self.condition(d)?;
+        let undefined = || bx(Expr::Num(f64::NAN));
+        let only = |e: Expr| Expr::If(items.clone(), ops.clone(), bx(e), undefined());
+        Ok(match v {
+            Val::Func(e) => Val::Func(only(e)),
+            Val::Curve(fx, fy, a, b) => {
+                let (lo, hi) = bounds_of(&items, &ops);
+                let (a, b) = (lo.map_or(a, |l| l.0), hi.map_or(b, |h| h.0));
+                if !(b > a) {
+                    return Err("Der Bereich ist leer".into());
+                }
+                Val::Curve(fx, fy, a, b)
+            }
+            Val::Implicit(f) => Val::Implicit(only(f)),
+            Val::Line { a, b, c } if b.abs() > 1e-12 => Val::Func(only(Expr::Add(bx(Expr::Mul(bx(Expr::Num(-a / b)), bx(Expr::X))), bx(Expr::Num(c / b))).simplified())),
+            Val::Line { a, b, c } => Val::Implicit(only(Expr::Sub(bx(Expr::Add(bx(Expr::Mul(bx(Expr::Num(a)), bx(Expr::X))), bx(Expr::Mul(bx(Expr::Num(b)), bx(Expr::Y))))), bx(Expr::Num(c))))),
+            Val::Circle(m, r) => {
+                let sq = |e: Expr| Expr::Pow(bx(e), bx(Expr::Num(2.0)));
+                let f = Expr::Sub(bx(Expr::Add(bx(sq(Expr::Sub(bx(Expr::X), bx(Expr::Num(m.0))))), bx(sq(Expr::Sub(bx(Expr::Y), bx(Expr::Num(m.1))))))), bx(Expr::Num(r * r)));
+                Val::Implicit(only(f))
+            }
+            _ => return Err("Ein Bereich passt nur zu Funktionen und Kurven".into()),
+        })
     }
 
     /// An equation in x and y: a line, y = f(x), x = c, or any curve.
@@ -663,6 +710,15 @@ impl Env {
         if free(n) {
             if matches!(n, Node::Chain(..)) {
                 return Err("Ein Vergleich gehört in Wenn(…)".into());
+            }
+            // (cos t, sin t): a curve in parameter form.
+            if let Node::Point(a, c) = n {
+                let (fx, fy) = (self.fexpr(a)?.simplified(), self.fexpr(c)?.simplified());
+                if fx.has_y() || fy.has_y() {
+                    return Err("In (x(t), y(t)) gehört t, nicht y".into());
+                }
+                let (lo, hi) = default_range(&fx, &fy);
+                return Ok(Val::Curve(fx, fy, lo, hi));
             }
             return Ok(Val::Func(self.fexpr(n)?.simplified()));
         }
@@ -1118,11 +1174,12 @@ impl Env {
                 }
             }
             "curve" => {
-                if n != 5 {
+                // Kurve(x(t), y(t), t, a, b), also without the t.
+                if n != 5 && n != 4 {
                     return wrong("Kurve(cos(t), sin(t), t, 0, 2π)");
                 }
                 let (fx, fy) = (self.fexpr(&args[0])?, self.fexpr(&args[1])?);
-                let (a, b) = (num(&self.eval(&args[3])?)?, num(&self.eval(&args[4])?)?);
+                let (a, b) = (num(&self.eval(&args[n - 2])?)?, num(&self.eval(&args[n - 1])?)?);
                 Ok(Val::Curve(fx.simplified(), fy.simplified(), a, b))
             }
             "text" => {
@@ -1195,6 +1252,97 @@ impl Env {
             other => Err(format!("{other}: kommt noch")),
         }
     }
+}
+
+/// One end of a domain: the number and whether it belongs to it (≤, not <).
+pub type End = Option<(f64, bool)>;
+
+/// Where a comparison like `0 ≤ x < 2` (x: the variable) bounds the variable: from, to.
+pub fn bounds_of(items: &[Expr], ops: &[Cmp]) -> (End, End) {
+    let (mut lo, mut hi) = (None, None);
+    let constant = |e: &Expr| !e.has_x() && !e.has_y() && e.eval(0.0).is_finite();
+    for (i, op) in ops.iter().enumerate() {
+        let (l, r) = (&items[i], &items[i + 1]);
+        let closed = matches!(op, Cmp::Le | Cmp::Ge | Cmp::Eq);
+        if matches!(r, Expr::X) && constant(l) {
+            // c < x, c > x
+            let c = l.eval(0.0);
+            match op {
+                Cmp::Lt | Cmp::Le => lo = Some((c, closed)),
+                Cmp::Gt | Cmp::Ge => hi = Some((c, closed)),
+                Cmp::Eq => (lo, hi) = (Some((c, true)), Some((c, true))),
+            }
+        } else if matches!(l, Expr::X) && constant(r) {
+            // x < c, x > c
+            let c = r.eval(0.0);
+            match op {
+                Cmp::Lt | Cmp::Le => hi = Some((c, closed)),
+                Cmp::Gt | Cmp::Ge => lo = Some((c, closed)),
+                Cmp::Eq => (lo, hi) = (Some((c, true)), Some((c, true))),
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// A function's domain when it has one (an expression defined only where its comparison
+/// holds, as `x², 0 ≤ x ≤ 2` and `Funktion(…)` make it): the function itself, from, to.
+pub fn domain_parts(e: &Expr) -> Option<(&Expr, End, End)> {
+    match e {
+        Expr::If(items, ops, f, other) if matches!(**other, Expr::Num(v) if v.is_nan()) => {
+            let (lo, hi) = bounds_of(items, ops);
+            (lo.is_some() || hi.is_some()).then_some((&**f, lo, hi))
+        }
+        _ => None,
+    }
+}
+
+/// The ends of a function's domain as the graph marks them: (x, y, whether it belongs: a
+/// filled dot, else a ring), from first. Only where the function is defined there.
+pub fn domain_ends(e: &Expr) -> Vec<(f64, f64, bool)> {
+    let Some((f, lo, hi)) = domain_parts(e) else { return Vec::new() };
+    [lo, hi]
+        .into_iter()
+        .flatten()
+        .filter_map(|(x, closed)| {
+            let y = f.eval(x);
+            y.is_finite().then_some((x, y, closed))
+        })
+        .collect()
+}
+
+/// A function's definition with its domain from `lo` to `hi` written after it as in school
+/// (`f(x) = x², 0 ≤ x < 2`; both None: none). One given by `Funktion(f, a, b)` is written the
+/// school way too.
+pub fn with_domain(def: &str, lo: End, hi: End, known: &HashSet<String>) -> Result<String, String> {
+    let (body, _) = lang::split_domain(def);
+    let input = lang::parse_input(body, known)?;
+    let var = input.param.unwrap_or('x');
+    let body = match (&input.name, &input.body) {
+        (Some(n), Body::Expr(Node::Call(c, _, args))) if lang::command(c) == Some("function") && args.len() == 3 => format!("{n}({var}) = {}", pretty(&args[0], 0)),
+        _ => body.trim().to_string(),
+    };
+    let lt = |closed: bool| if closed { "≤" } else { "<" };
+    let gt = |closed: bool| if closed { "≥" } else { ">" };
+    Ok(match (lo, hi) {
+        (None, None) => body,
+        (Some((a, ca)), Some((b, cb))) => format!("{body}, {} {} {var} {} {}", fmt_plain(a), lt(ca), lt(cb), fmt_plain(b)),
+        (Some((a, ca)), None) => format!("{body}, {var} {} {}", gt(ca), fmt_plain(a)),
+        (None, Some((b, cb))) => format!("{body}, {var} {} {}", lt(cb), fmt_plain(b)),
+    })
+}
+
+/// The range of t for a curve typed as (x(t), y(t)): a full turn when both repeat after 2π
+/// ((cos t, sin t)), else −10 … 10.
+fn default_range(fx: &Expr, fy: &Expr) -> (f64, f64) {
+    let turns = [0.3, 1.1, 2.9, -1.7].iter().all(|&t| {
+        let same = |f: &Expr| {
+            let (a, b) = (f.eval(t), f.eval(t + 2.0 * PI));
+            a.is_finite() && (a - b).abs() < 1e-9 * (1.0 + a.abs())
+        };
+        same(fx) && same(fy)
+    });
+    if turns { (0.0, 2.0 * PI) } else { (-10.0, 10.0) }
 }
 
 /// A circle's centre and radius if F(x, y) = a(x² + y²) + d·x + e·y + k with a ≠ 0.
@@ -1348,19 +1496,80 @@ fn arith(op: Op, a: Val, b: Val) -> Result<Val, String> {
 
 // --- writing values out -------------------------------------------------------------------------
 
-/// A number as shown: German decimal comma, up to 2 places (like GeoGebra), no trailing zeros.
-pub fn fmt_num(v: f64) -> String {
-    if !v.is_finite() {
-        return "undefiniert".into();
+/// The fraction n/d (d up to 100) that `v` is exactly, for a number that two decimal places
+/// would only round (1/3, 2/7, 1/8, −5/6); None for one they write as it is (0,5, 2,25) and
+/// for one that is no such fraction (√2).
+pub fn exact_fraction(v: f64) -> Option<(i64, i64)> {
+    if !v.is_finite() || v.abs() > 1e6 || v == v.round() {
+        return None;
     }
+    if ((v * 100.0).round() / 100.0 - v).abs() <= 1e-9 * v.abs().max(1.0) {
+        return None;
+    }
+    (2..=100i64).find_map(|d| {
+        let n = v * d as f64;
+        ((n - n.round()).abs() < 1e-7).then(|| (n.round() as i64, d))
+    })
+}
+
+const SUP_DIGITS: [char; 10] = ['⁰', '¹', '²', '³', '⁴', '⁵', '⁶', '⁷', '⁸', '⁹'];
+const SUB_DIGITS: [char; 10] = ['₀', '₁', '₂', '₃', '₄', '₅', '₆', '₇', '₈', '₉'];
+
+/// A number with two places at most, as the decimal comma writes it: "0,33", "−2,5".
+fn decimal(v: f64) -> String {
     let v = if v.abs() < 5e-3 { 0.0 } else { v };
     let s = format!("{v:.2}");
     let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
     s.replace('.', ",").replace('-', "−")
 }
 
+/// A number as shown: German decimal comma, up to 2 places (like GeoGebra), no trailing zeros;
+/// a fraction the places would only round as one, with small digits ("¹⁄₃", "−⁵⁄₆": the
+/// plot's hand writes it stacked).
+pub fn fmt_num(v: f64) -> String {
+    if !v.is_finite() {
+        return "undefiniert".into();
+    }
+    match exact_fraction(v) {
+        Some((n, d)) => {
+            let digits = |k: i64, of: &[char; 10]| k.to_string().chars().map(|c| of[c as usize - '0' as usize]).collect::<String>();
+            format!("{}{}⁄{}", if n < 0 { "−" } else { "" }, digits(n.abs(), &SUP_DIGITS), digits(d, &SUB_DIGITS))
+        }
+        None => decimal(v),
+    }
+}
+
 fn fmt_pt(p: Pt) -> String {
     format!("({} | {})", fmt_num(p.0), fmt_num(p.1))
+}
+
+/// A curve's range of t, π-wise where it is ("0 ≤ t ≤ 2π").
+fn fmt_range(var: &str, a: f64, b: f64) -> String {
+    format!("{} ≤ {var} ≤ {}", fmt_pi_num(a), fmt_pi_num(b))
+}
+
+/// A number, as a multiple of π when it is one (π, 2π, π/2, 3π/2).
+fn fmt_pi_num(v: f64) -> String {
+    match pi_fraction(v) {
+        Some((n, d)) => {
+            let k = if n.abs() == 1 { String::new() } else { n.abs().to_string() };
+            let sign = if n < 0 { "−" } else { "" };
+            if d == 1 { format!("{sign}{k}π") } else { format!("{sign}{k}π/{d}") }
+        }
+        None => fmt_num(v),
+    }
+}
+
+/// v = n·π/d with d ≤ 12 (v ≠ 0).
+fn pi_fraction(v: f64) -> Option<(i64, i64)> {
+    if v == 0.0 || !v.is_finite() {
+        return None;
+    }
+    let k = v / PI;
+    (1..=12i64).find_map(|d| {
+        let n = k * d as f64;
+        ((n - n.round()).abs() < 1e-9 && n.round() != 0.0).then(|| (n.round() as i64, d))
+    })
 }
 
 /// A value as the algebra view shows it.
@@ -1384,17 +1593,28 @@ pub fn format_val(v: &Val) -> String {
             let s: f64 = ps.iter().zip(ps.iter().cycle().skip(1)).map(|(a, b)| a.0 * b.1 - b.0 * a.1).sum();
             fmt_num(s.abs() / 2.0)
         }
-        Val::Curve(fx, fy, a, b) => format!("({}, {}), {} ≤ t ≤ {}", fmt_expr(fx).replace('x', "t"), fmt_expr(fy).replace('x', "t"), fmt_num(*a), fmt_num(*b)),
+        Val::Curve(fx, fy, a, b) => format!("({}, {}), {}", fmt_expr_in(fx, "t", false), fmt_expr_in(fy, "t", false), fmt_range("t", *a, *b)),
         Val::Implicit(f) => format!("{} = 0", fmt_expr(f)),
-        Val::Angle { sweep, .. } => format!("{}°", fmt_num(sweep.to_degrees())),
+        Val::Angle { sweep, .. } => format!("{}°", decimal(sweep.to_degrees())),
         Val::Area { value, .. } => fmt_num(*value),
         Val::Text(t) => t.clone(),
     }
 }
 
-fn fmt_line(a: f64, b: f64, c: f64) -> String {
+/// A value as the plot's hand writes it in a label: like [`format_val`], with divisions stacked.
+pub(crate) fn hand_val(v: &Val) -> String {
+    match v {
+        Val::Func(e) => fmt_expr_in(e, "x", true),
+        Val::Implicit(f) => format!("{} = 0", fmt_expr_in(f, "x", true)),
+        Val::Curve(fx, fy, a, b) => format!("({}, {}), {}", fmt_expr_in(fx, "t", true), fmt_expr_in(fy, "t", true), fmt_range("t", *a, *b)),
+        other => format_val(other),
+    }
+}
+
+/// A line written y = m x + n (x = c when it is vertical), its numbers by `num`.
+fn line_with(a: f64, b: f64, c: f64, num: &dyn Fn(f64) -> String, minus: &str) -> String {
     if b.abs() < 1e-12 {
-        return format!("x = {}", fmt_num(c / a));
+        return format!("x = {}", num(c / a));
     }
     // y = m x + n
     let (m, n) = (-a / b, c / b);
@@ -1403,23 +1623,48 @@ fn fmt_line(a: f64, b: f64, c: f64) -> String {
     } else if (m - 1.0).abs() < 1e-12 {
         "x".into()
     } else if (m + 1.0).abs() < 1e-12 {
-        "−x".into()
+        format!("{minus}x")
     } else {
-        format!("{}x", fmt_num(m))
+        format!("{}x", num(m))
     };
     match (mx.is_empty(), n.abs() < 1e-12) {
-        (true, _) => format!("y = {}", fmt_num(n)),
+        (true, _) => format!("y = {}", num(n)),
         (false, true) => format!("y = {mx}"),
-        (false, false) if n > 0.0 => format!("y = {mx} + {}", fmt_num(n)),
-        (false, false) => format!("y = {mx} − {}", fmt_num(-n)),
+        (false, false) if n > 0.0 => format!("y = {mx} + {}", num(n)),
+        (false, false) => format!("y = {mx} {minus} {}", num(-n)),
     }
+}
+
+fn fmt_line(a: f64, b: f64, c: f64) -> String {
+    line_with(a, b, c, &fmt_num, "−")
 }
 
 // --- the same as LaTeX (the algebra list sets it like GeoGebra) -----------------------------------
 
-/// A number in LaTeX: German decimal comma (without the space LaTeX puts after a comma).
+/// A number in LaTeX: German decimal comma (without the space LaTeX puts after a comma); a
+/// fraction the places would only round as one (\frac{1}{3}).
 pub fn latex_num(v: f64) -> String {
-    fmt_num(v).replace('−', "-").replace(',', "{,}")
+    if v.is_finite()
+        && let Some((n, d)) = exact_fraction(v)
+    {
+        return format!("{}\\frac{{{}}}{{{d}}}", if n < 0 { "-" } else { "" }, n.abs());
+    }
+    if !v.is_finite() {
+        return latex_text("undefiniert");
+    }
+    decimal(v).replace('−', "-").replace(',', "{,}")
+}
+
+/// A number in LaTeX, as a multiple of π when it is one (2\pi, \frac{\pi}{2}).
+fn latex_pi_num(v: f64) -> String {
+    match pi_fraction(v) {
+        Some((n, d)) => {
+            let k = if n.abs() == 1 { String::new() } else { n.abs().to_string() };
+            let sign = if n < 0 { "-" } else { "" };
+            if d == 1 { format!("{sign}{k}\\pi ") } else { format!("{sign}\\frac{{{k}\\pi}}{{{d}}}") }
+        }
+        None => latex_num(v),
+    }
 }
 
 /// A name in LaTeX: one letter in italics (Greek ones too), longer ones as a word, S_1 with
@@ -1487,6 +1732,7 @@ fn brackets(inner: &str) -> String {
 pub fn latex_expr(e: &Expr, var: &str) -> String {
     fn prec(e: &Expr) -> u8 {
         match e {
+            Expr::If(.., b) if matches!(**b, Expr::Num(v) if v.is_nan()) => 0,
             Expr::Add(..) | Expr::Sub(..) => 1,
             Expr::Mul(..) => 2,
             Expr::Neg(_) => 3,
@@ -1507,12 +1753,10 @@ pub fn latex_expr(e: &Expr, var: &str) -> String {
         };
         match e {
             Expr::Num(v) => {
-                if (*v - std::f64::consts::PI).abs() < 1e-12 {
-                    out.push_str("\\pi ")
-                } else if (*v - std::f64::consts::E).abs() < 1e-12 {
+                if (*v - std::f64::consts::E).abs() < 1e-12 {
                     out.push('e')
                 } else {
-                    out.push_str(&latex_num(*v))
+                    out.push_str(&latex_pi_num(*v))
                 }
             }
             Expr::X => out.push_str(var),
@@ -1605,25 +1849,33 @@ pub fn latex_expr(e: &Expr, var: &str) -> String {
                 out.push_str(&brackets(&inner));
             }
             Expr::If(items, ops, a, b) => {
-                out.push_str("\\text{Wenn}\\left(");
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(match ops[i - 1] {
-                            Cmp::Lt => " < ",
-                            Cmp::Le => " \\le ",
-                            Cmp::Gt => " > ",
-                            Cmp::Ge => " \\ge ",
-                            Cmp::Eq => " = ",
-                        });
+                let chain = |out: &mut String| {
+                    for (i, it) in items.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(match ops[i - 1] {
+                                Cmp::Lt => " < ",
+                                Cmp::Le => " \\le ",
+                                Cmp::Gt => " > ",
+                                Cmp::Ge => " \\ge ",
+                                Cmp::Eq => " = ",
+                            });
+                        }
+                        go(it, var, out);
                     }
-                    go(it, var, out);
+                };
+                // Undefined elsewhere: the function with its domain, as in school (x², 0 ≤ x ≤ 2).
+                if matches!(**b, Expr::Num(v) if v.is_nan()) {
+                    go(a, var, out);
+                    out.push_str(",\\; ");
+                    chain(out);
+                    return;
                 }
+                out.push_str("\\text{Wenn}\\left(");
+                chain(out);
                 out.push_str(", ");
                 go(a, var, out);
-                if !matches!(**b, Expr::Num(v) if v.is_nan()) {
-                    out.push_str(", ");
-                    go(b, var, out);
-                }
+                out.push_str(", ");
+                go(b, var, out);
                 out.push_str("\\right)");
             }
             Expr::Ref(..) => out.push('?'),
@@ -1635,7 +1887,7 @@ pub fn latex_expr(e: &Expr, var: &str) -> String {
 }
 
 fn latex_line(a: f64, b: f64, c: f64) -> String {
-    fmt_line(a, b, c).replace('−', "-").replace(',', "{,}")
+    line_with(a, b, c, &latex_num, "-")
 }
 
 /// A value in LaTeX (vectors as columns, angles with °, texts as text).
@@ -1663,11 +1915,13 @@ pub fn latex_val(v: &Val) -> String {
             };
             format!("{} + {} = {}", part("x", c.0), part("y", c.1), latex_num(r * r))
         }
-        Val::Curve(fx, fy, a, b) => format!("\\left({}, {}\\right),\\ {} \\le t \\le {}", latex_expr(fx, "t"), latex_expr(fy, "t"), latex_num(*a), latex_num(*b)),
+        Val::Curve(fx, fy, a, b) => format!("\\left({}, {}\\right),\\; {} \\le t \\le {}", latex_expr(fx, "t"), latex_expr(fy, "t"), latex_pi_num(*a), latex_pi_num(*b)),
         Val::Implicit(f) => format!("{} = 0", latex_expr(f, "x")),
-        Val::Angle { sweep, .. } => format!("{}^{{\\circ}}", latex_num(sweep.to_degrees())),
+        Val::Angle { sweep, .. } => format!("{}^{{\\circ}}", decimal(sweep.to_degrees()).replace('−', "-").replace(',', "{,}")),
         Val::Text(t) => latex_text(t),
-        _ => format_val(v).replace('−', "-").replace(',', "{,}"),
+        Val::Segment(p, q) | Val::Ray(p, q) => latex_num((p.0 - q.0).hypot(p.1 - q.1)),
+        Val::Polygon(ps) => latex_num(ps.iter().zip(ps.iter().cycle().skip(1)).map(|(a, b)| a.0 * b.1 - b.0 * a.1).sum::<f64>().abs() / 2.0),
+        Val::Area { value, .. } => latex_num(*value),
     }
 }
 
@@ -1682,11 +1936,64 @@ pub fn latex_row(name: &str, v: &Val) -> String {
     }
 }
 
+/// An object's row in the algebra list as LaTeX, as it is defined: `a(b) = 3b` with its own
+/// variable, a polar curve as `c: r = 1 + cos θ`, the rest as [`latex_row`]. `known`: the
+/// construction's names.
+pub fn row_latex(o: &Obj, v: &Val, known: &HashSet<String>) -> String {
+    let s = lang::shape(&o.def);
+    let n = latex_name(&o.name());
+    match (v, s.param) {
+        (Val::Curve(..), Some(_)) if s.polar => match lang::parse_input(&o.def, known) {
+            Ok(Input { body: Body::Expr(b), domain, .. }) => {
+                let d = domain.map(|d| format!(",\\; {}", tex(&d, 0))).unwrap_or_default();
+                format!("{n}{{:}}\\; r = {}{d}", tex(&b, 0))
+            }
+            _ => latex_row(&o.name(), v),
+        },
+        (Val::Func(e), Some(p)) if !matches!(p, 'x' | 't') => format!("{n}({}) = {}", latex_var(p), latex_expr(e, &latex_var(p))),
+        _ => latex_row(&o.name(), v),
+    }
+}
+
+/// An object's row as text: "f(x) = 0,5x² − 3", "A = (1 | 2)", "g: y = 2x + 1", "a(b) = 3b",
+/// "c: r = 1 + cos(θ)"; with `hand` as the plot's hand writes a label (fractions stacked).
+pub fn row_text(o: &Obj, v: &Val, known: &HashSet<String>, hand: bool) -> String {
+    let s = lang::shape(&o.def);
+    let name = o.name();
+    let value = if hand { hand_val(v) } else { format_val(v) };
+    match v {
+        Val::Curve(..) if s.polar => match lang::parse_input(&o.def, known) {
+            Ok(Input { body: Body::Expr(b), domain, .. }) => {
+                let d = domain.map(|d| format!(", {}", pretty(&d, 0))).unwrap_or_default();
+                format!("{name}: r = {}{d}", pretty(&b, 0))
+            }
+            _ => format!("{name}: {value}"),
+        },
+        Val::Func(e) => match s.param {
+            Some(p) if !matches!(p, 'x') => format!("{name}({p}) = {}", fmt_expr_in(e, &p.to_string(), hand)),
+            _ if s.labelled => format!("{name}: y = {value}"),
+            _ => format!("{name}(x) = {value}"),
+        },
+        Val::Line { .. } | Val::Lines(_) | Val::Circle(..) | Val::Implicit(_) | Val::Curve(..) => format!("{name}: {value}"),
+        Val::Points(_) => format!("{name} = {{{value}}}"),
+        Val::Text(t) => t.clone(),
+        _ => format!("{name} = {value}"),
+    }
+}
+
 /// An expression as written: 0,5x² − 3, 2 sin(x), x^(1/3).
 pub fn fmt_expr(e: &Expr) -> String {
-    fn prec(e: &Expr) -> u8 {
+    fmt_expr_in(e, "x", false)
+}
+
+/// An expression as written, `var` for x; with `hand`, divisions are stacked for the plot's
+/// hand (see [`super::font::FRAC_OPEN`]).
+pub fn fmt_expr_in(e: &Expr, var: &str, hand: bool) -> String {
+    fn prec(e: &Expr, hand: bool) -> u8 {
         match e {
+            Expr::If(.., b) if matches!(**b, Expr::Num(v) if v.is_nan()) => 0,
             Expr::Add(..) | Expr::Sub(..) => 1,
+            Expr::Div(..) if hand => 4,
             Expr::Mul(..) | Expr::Div(..) => 2,
             Expr::Neg(_) => 3,
             Expr::Pow(..) => 4,
@@ -1701,34 +2008,32 @@ pub fn fmt_expr(e: &Expr) -> String {
             _ => None,
         }
     }
-    fn go(e: &Expr, out: &mut String) {
+    fn go(e: &Expr, var: &str, hand: bool, out: &mut String) {
         let wrap = |e: &Expr, min: u8, out: &mut String| {
-            if prec(e) < min {
+            if prec(e, hand) < min {
                 out.push('(');
-                go(e, out);
+                go(e, var, hand, out);
                 out.push(')');
             } else {
-                go(e, out);
+                go(e, var, hand, out);
             }
         };
         match e {
             Expr::Num(v) => {
-                if (*v - std::f64::consts::PI).abs() < 1e-12 {
-                    out.push('π')
-                } else if (*v - std::f64::consts::E).abs() < 1e-12 {
+                if (*v - std::f64::consts::E).abs() < 1e-12 {
                     out.push('e')
                 } else {
-                    out.push_str(&fmt_num(*v))
+                    out.push_str(&fmt_pi_num(*v))
                 }
             }
-            Expr::X => out.push('x'),
+            Expr::X => out.push_str(var),
             Expr::Y => out.push('y'),
             Expr::Neg(a) => {
                 out.push('−');
                 wrap(a, 3, out);
             }
             Expr::Add(a, b) => {
-                go(a, out);
+                go(a, var, hand, out);
                 match &**b {
                     Expr::Neg(inner) => {
                         out.push_str(" − ");
@@ -1736,7 +2041,7 @@ pub fn fmt_expr(e: &Expr) -> String {
                     }
                     Expr::Num(v) if *v < 0.0 => {
                         out.push_str(" − ");
-                        out.push_str(&fmt_num(-v));
+                        out.push_str(&fmt_pi_num(-v));
                     }
                     _ => {
                         out.push_str(" + ");
@@ -1745,7 +2050,7 @@ pub fn fmt_expr(e: &Expr) -> String {
                 }
             }
             Expr::Sub(a, b) => {
-                go(a, out);
+                go(a, var, hand, out);
                 out.push_str(" − ");
                 wrap(b, 2, out);
             }
@@ -1765,6 +2070,13 @@ pub fn fmt_expr(e: &Expr) -> String {
                     out.push(' ');
                 }
                 wrap(b, 3, out);
+            }
+            Expr::Div(a, b) if hand => {
+                out.push(super::font::FRAC_OPEN);
+                go(a, var, hand, out);
+                out.push(super::font::FRAC_BAR);
+                go(b, var, hand, out);
+                out.push(super::font::FRAC_CLOSE);
             }
             Expr::Div(a, b) => {
                 wrap(a, 2, out);
@@ -1805,42 +2117,50 @@ pub fn fmt_expr(e: &Expr) -> String {
                 };
                 if *f == Func::Abs {
                     out.push('|');
-                    go(a, out);
+                    go(a, var, hand, out);
                     out.push('|');
                     return;
                 }
                 out.push_str(name);
                 out.push('(');
-                go(a, out);
+                go(a, var, hand, out);
                 out.push(')');
             }
             Expr::If(items, ops, a, b) => {
-                out.push_str("Wenn(");
-                for (i, it) in items.iter().enumerate() {
-                    if i > 0 {
-                        out.push_str(match ops[i - 1] {
-                            Cmp::Lt => " < ",
-                            Cmp::Le => " ≤ ",
-                            Cmp::Gt => " > ",
-                            Cmp::Ge => " ≥ ",
-                            Cmp::Eq => " = ",
-                        });
+                let chain = |out: &mut String| {
+                    for (i, it) in items.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(match ops[i - 1] {
+                                Cmp::Lt => " < ",
+                                Cmp::Le => " ≤ ",
+                                Cmp::Gt => " > ",
+                                Cmp::Ge => " ≥ ",
+                                Cmp::Eq => " = ",
+                            });
+                        }
+                        go(it, var, hand, out);
                     }
-                    go(it, out);
-                }
-                out.push_str(", ");
-                go(a, out);
-                if !matches!(**b, Expr::Num(v) if v.is_nan()) {
+                };
+                // Undefined elsewhere: with its domain (x², 0 ≤ x ≤ 2).
+                if matches!(**b, Expr::Num(v) if v.is_nan()) {
+                    go(a, var, hand, out);
                     out.push_str(", ");
-                    go(b, out);
+                    chain(out);
+                    return;
                 }
+                out.push_str("Wenn(");
+                chain(out);
+                out.push_str(", ");
+                go(a, var, hand, out);
+                out.push_str(", ");
+                go(b, var, hand, out);
                 out.push(')');
             }
             Expr::Ref(..) => out.push('?'),
         }
     }
     let mut s = String::new();
-    go(e, &mut s);
+    go(e, var, hand, &mut s);
     s
 }
 
@@ -1895,7 +2215,7 @@ pub fn new_object(input: &str, objs: &[Obj], view: ViewRange) -> Result<(String,
         None => format!("{probe_name} = {}", input.trim()),
     };
     // A plain equation without a name gets a label instead of "= …".
-    let def = if given.is_none() && matches!(parsed.body, Body::Equation(..)) { format!("{probe_name}: {}", input.trim()) } else { def };
+    let def = if given.is_none() && (matches!(parsed.body, Body::Equation(..)) || parsed.polar) { format!("{probe_name}: {}", input.trim()) } else { def };
     let mut all = objs.to_vec();
     all.push(Obj { id: String::new(), def: def.clone(), style: Style::default(), order: f64::MAX });
     taken.insert(probe_name.clone());
@@ -1969,9 +2289,13 @@ pub fn definition(def: &str, known: &HashSet<String>) -> Option<String> {
     if command.is_none() && !refs.iter().any(|r| *r != own && known.contains(r)) {
         return None;
     }
-    Some(match &input.body {
+    let body = match &input.body {
         Body::Expr(n) => pretty(n, 0),
         Body::Equation(l, r) => format!("{} = {}", pretty(l, 0), pretty(r, 0)),
+    };
+    Some(match &input.domain {
+        Some(d) => format!("{body}, {}", pretty(d, 0)),
+        None => body,
     })
 }
 
@@ -2045,12 +2369,20 @@ pub fn latex_input(src: &str, known: &HashSet<String>) -> Option<String> {
     let mut known = known.clone();
     known.extend(lang::unknown_letters(src, &known));
     let input = lang::parse_input(src, &known).ok()?;
-    let body = match &input.body {
+    let mut body = match &input.body {
         Body::Expr(n) => tex(n, 0),
         Body::Equation(l, r) => format!("{}={}", tex(l, 0), tex(r, 0)),
     };
+    if input.polar {
+        body = format!("r={body}");
+    }
+    // The domain after it, as in school: x², 0 ≤ x ≤ 2.
+    if let Some(d) = &input.domain {
+        body = format!("{body},\\;{}", tex(d, 0));
+    }
     Some(match (&input.name, input.param) {
-        (Some(n), Some(p)) => format!("{}({p})={body}", latex_name(n)),
+        (Some(n), _) if input.polar => format!("{}{{:}}\\;{body}", latex_name(n)),
+        (Some(n), Some(p)) => format!("{}({})={body}", latex_name(n), latex_var(p)),
         // Like GeoGebra: b = 4 + 3a, but c: x² + y² = 9.
         (Some(n), None) if matches!(input.body, Body::Expr(_)) => format!("{}={body}", latex_name(n)),
         (Some(n), None) => format!("{}{{:}}\\;{body}", latex_name(n)),
@@ -2058,11 +2390,21 @@ pub fn latex_input(src: &str, known: &HashSet<String>) -> Option<String> {
     })
 }
 
+/// A variable in LaTeX (θ as \theta).
+fn latex_var(c: char) -> String {
+    match c {
+        'θ' => "\\theta ".into(),
+        'φ' => "\\varphi ".into(),
+        c => c.to_string(),
+    }
+}
+
 /// A parsed input as LaTeX (see [`latex_input`]); `ctx`: the binding around it (brackets when weaker).
 fn tex(n: &Node, ctx: u8) -> String {
     let (s, prec) = match n {
-        Node::Num(v) => (latex_num(*v), if *v < 0.0 { 3 } else { 5 }),
-        Node::Var(c) => (c.to_string(), 5),
+        // As typed (0,125 stays 0,125).
+        Node::Num(v) => (fmt_plain(*v).replace('-', "-").replace('.', "{,}"), if *v < 0.0 { 3 } else { 5 }),
+        Node::Var(c) => (latex_var(*c), 5),
         Node::Name(s) => (match s.as_str() {
             "pi" => "\\pi".into(),
             "e" => "e".into(),

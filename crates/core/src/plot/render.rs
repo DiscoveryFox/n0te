@@ -1,11 +1,13 @@
 //! A plot as ink: grid, hatched areas, axes with heads, ticks and numbers, curves in their
 //! line style, marked points, names at the curves. In page points, drawn like strokes.
 
+use std::collections::HashSet;
+
 use super::expr::Expr;
 use super::font::{self, glyph, text_width};
-use super::geo::{LabelMode, Obj, PointStyle, Val, fmt_expr, fmt_num, format_val};
+use super::geo::{LabelMode, Obj, PointStyle, Val, domain_ends, fmt_num, format_val, hand_val, row_text};
 use super::points::{self, PointKind, SpecialPoint};
-use super::{LineStyle, MARK_CROSSINGS, MARK_EXTREMA, MARK_TURNS, MARK_ZEROS, Plot, format_num};
+use super::{LineStyle, MARK_CROSSINGS, MARK_EXTREMA, MARK_TURNS, MARK_ZEROS, Plot};
 use crate::ink::{Brush, InkPoint, KIND_PEN};
 
 /// The graph of `e` in page points, clipped to the plot's box: pieces wherever it is defined
@@ -284,21 +286,24 @@ impl Hand {
         self.stroke(&path, wobble)
     }
 
-    /// `text` with its top-left at (x, y), each glyph a little different (slant and size wander);
-    /// `_1` written low and small, `²` and `^2` high and small.
+    /// `text` with its line's top-left at (x, y), each glyph a little different (slant and size
+    /// wander); `_1` written low and small, `²` and `^2` high and small, fractions stacked.
     fn write(&mut self, text: &str, x: f32, y: f32, cap: f32) -> Vec<Vec<InkPoint>> {
         let mut out = Vec::new();
-        let mut ox = x;
-        for (c, size, lift) in font::runs(text) {
-            let Some((w, lines)) = glyph(c) else { continue };
-            let cs = cap * size;
+        let laid = font::layout(text);
+        for g in &laid.glyphs {
+            let Some((_, lines)) = glyph(g.c) else { continue };
+            let cs = cap * g.size;
             let (slant, k, dy) = if self.clean { (0.08, 1.0, 0.0) } else { (0.08 + self.rng.next() * 0.05, 1.0 + self.rng.next() * 0.04, self.rng.next() * 0.03) };
-            let top = y + lift * cap;
+            let (ox, top) = (x + g.x * cap, y + g.lift * cap);
             for l in lines {
                 let path: Vec<(f32, f32)> = dense(&l, 0.06).iter().map(|&(gx, gy)| (ox + (gx + (1.0 - gy) * slant) * cs * k, top + (gy + dy) * cs * k)).collect();
                 out.push(self.stroke(&path, 0.0));
             }
-            ox += w * cs + font::GAP * cs;
+        }
+        for b in &laid.bars {
+            let wob = if self.clean { 0.0 } else { self.rng.next() * 0.04 * cap };
+            out.push(self.line((x + b.x0 * cap, y + b.y * cap), (x + b.x1 * cap, y + b.y * cap + wob), 0.0));
         }
         out
     }
@@ -693,17 +698,13 @@ pub fn hit(p: &Plot, x: f32, y: f32, tol: f32) -> Option<usize> {
     best.map(|b| b.2)
 }
 
-/// What an object's label says (None: no label).
-fn label_text(o: &Obj, v: &Val) -> Option<String> {
+/// What an object's label says (None: no label); divisions stacked like written by hand.
+fn label_text(o: &Obj, v: &Val, known: &HashSet<String>) -> Option<String> {
     let name = o.name();
-    let value = match v {
-        Val::Func(e) => fmt_expr(e),
-        other => format_val(other),
-    };
     Some(match o.style.label {
         LabelMode::Off => return None,
         LabelMode::Name => name,
-        LabelMode::Value => value,
+        LabelMode::Value => hand_val(v),
         LabelMode::Caption => {
             if o.style.caption.trim().is_empty() {
                 name
@@ -711,13 +712,7 @@ fn label_text(o: &Obj, v: &Val) -> Option<String> {
                 o.style.caption.clone()
             }
         }
-        LabelMode::NameValue => match v {
-            Val::Func(_) => format!("{name}(x) = {value}"),
-            Val::Line { .. } | Val::Lines(_) | Val::Circle(..) | Val::Implicit(_) | Val::Curve(..) => format!("{name}: {value}"),
-            Val::Points(_) => format!("{name} = {{{value}}}"),
-            Val::Text(t) => t.clone(),
-            _ => format!("{name} = {value}"),
-        },
+        LabelMode::NameValue => row_text(o, v, known, true),
     })
 }
 
@@ -777,6 +772,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
         }
     }
     let vals = p.values();
+    let known: HashSet<String> = p.objs.iter().map(|o| o.name()).collect();
     let shown = |i: usize| p.objs[i].style.visible;
     let pen = |o: &Obj, k: f32| Brush { width: if o.style.width > 0.0 { o.style.width } else { w * k }, thinning: thin, color: o.style.color, kind: KIND_PEN };
     let hatch_pen = |o: &Obj| Brush { width: (w * 0.42).clamp(0.3, 1.0), thinning: 0.0, color: (o.style.color & 0x00FF_FFFF) | 0xB000_0000, kind: KIND_PEN };
@@ -811,7 +807,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                     }
                     let m = (lo + hi) / 2.0;
                     let ym = (f.eval(m) + g.as_ref().map_or(0.0, |g| g.eval(m))) / 2.0;
-                    if let Some(t) = label_text(o, &Val::Num(*value))
+                    if let Some(t) = label_text(o, &Val::Num(*value), &known)
                         && ym.is_finite()
                     {
                         labels.push(Label { x: px(m), y: py(ym.clamp(p.y_min, p.y_max)), off: 0.0, text: t, color: o.style.color });
@@ -940,16 +936,42 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
         let big = ((p.x_max - p.x_min).abs() + (p.y_max - p.y_min).abs()) * 4.0;
         match v {
             Val::Func(e) => {
-                let pieces = curve(e, p);
+                let mut pieces = curve(e, p);
+                // The ends of its domain (x², 0 ≤ x < 2): a dot where it belongs, a ring where not
+                // (the curve stops at the ring).
+                let rr = (cap * 0.42).max(2.2) * 0.62;
+                let ends: Vec<((f32, f32), bool)> = domain_ends(e)
+                    .into_iter()
+                    .filter(|&(x, y, _)| x >= p.x_min && x <= p.x_max && y >= p.y_min && y <= p.y_max)
+                    .map(|(x, y, closed)| (p.to_page(x, y), closed))
+                    .collect();
+                for (q, closed) in &ends {
+                    if !closed {
+                        pieces = trim_near(pieces, *q, rr);
+                    }
+                }
                 if let Some(longest) = pieces.iter().max_by(|a, b| span(a).total_cmp(&span(b)))
                     && longest.len() >= 2
-                    && let Some(t) = label_text(o, v)
+                    && let Some(t) = label_text(o, v, &known)
                 {
                     let k = ((longest.len() - 1) as f32 * 0.86) as usize;
                     labels.push(Label { x: longest[k].0, y: longest[k].1, off: cap * 0.35, text: t, color: o.style.color });
                 }
                 for piece in pieces {
                     draw!(piece, 0.0);
+                }
+                for ((x, y), closed) in ends {
+                    if closed {
+                        let d = Brush { width: rr * 2.1, thinning: 0.0, color: o.style.color, kind: KIND_PEN };
+                        out.push((d, hand.stroke(&[(x - 0.02, y), (x + 0.02, y)], 0.0)));
+                    } else {
+                        let ring: Vec<(f32, f32)> = (0..=24).map(|j| {
+                            let a = j as f32 / 24.0 * std::f32::consts::TAU;
+                            (x + a.cos() * rr, y + a.sin() * rr)
+                        }).collect();
+                        out.push((pen(o, 0.7), hand.stroke(&ring, 0.0)));
+                    }
+                    ink.push((x, y));
                 }
                 graphs.push((i, e.clone()));
             }
@@ -965,7 +987,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                     let d = (-bb, a);
                     let l = d.0.hypot(d.1);
                     if let Some((s, e)) = clip_line(p, o0, (d.0 / l, d.1 / l), -big - o0.0.abs() - o0.1.abs(), big + o0.0.abs() + o0.1.abs()) {
-                        if let Some(t) = label_text(o, v) {
+                        if let Some(t) = label_text(o, v, &known) {
                             labels.push(Label { x: s.0 + (e.0 - s.0) * 0.78, y: s.1 + (e.1 - s.1) * 0.78, off: cap * 0.35, text: t.clone(), color: o.style.color });
                         }
                         draw!(line_path(s, e), wob);
@@ -976,7 +998,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                 let d = (c.0 - a.0, c.1 - a.1);
                 let t1 = if matches!(v, Val::Ray(..)) { big / d.0.hypot(d.1).max(1e-12) } else { 1.0 };
                 if let Some((s, e)) = clip_line(p, *a, d, 0.0, t1) {
-                    if let Some(t) = label_text(o, v) {
+                    if let Some(t) = label_text(o, v, &known) {
                         labels.push(Label { x: (s.0 + e.0) / 2.0, y: (s.1 + e.1) / 2.0, off: cap * 0.35, text: t, color: o.style.color });
                     }
                     draw!(line_path(s, e), wob);
@@ -999,7 +1021,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                             out.push((b, hand.line(e, (e.0 + back.0 * hl, e.1 + back.1 * hl), 0.0)));
                         }
                     }
-                    if let Some(t) = label_text(o, v) {
+                    if let Some(t) = label_text(o, v, &known) {
                         labels.push(Label { x: (s.0 + e.0) / 2.0, y: (s.1 + e.1) / 2.0, off: cap * 0.35, text: t, color: o.style.color });
                     }
                 }
@@ -1012,7 +1034,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                 for piece in clip_path(&path, bx) {
                     draw!(piece, 0.0);
                 }
-                if let Some(t) = label_text(o, v) {
+                if let Some(t) = label_text(o, v, &known) {
                     let q = p.to_page(c.0 + r * std::f64::consts::FRAC_1_SQRT_2, c.1 + r * std::f64::consts::FRAC_1_SQRT_2);
                     labels.push(Label { x: q.0, y: q.1, off: cap * 0.35, text: t, color: o.style.color });
                 }
@@ -1024,7 +1046,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                 for piece in clip_path(&dense_path, bx) {
                     draw!(piece, wob * 0.5);
                 }
-                if let Some(t) = label_text(o, v) {
+                if let Some(t) = label_text(o, v, &known) {
                     let (cx, cy) = ps.iter().fold((0.0, 0.0), |a, q| (a.0 + q.0, a.1 + q.1));
                     let c = p.to_page(cx / ps.len() as f64, cy / ps.len() as f64);
                     labels.push(Label { x: c.0, y: c.1, off: 0.0, text: t, color: o.style.color });
@@ -1036,15 +1058,27 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                     let t = a + (c - a) * k as f64 / n as f64;
                     p.to_page(fx.eval(t), fy.eval(t))
                 }).collect();
-                for piece in clip_path(&path, bx) {
+                let pieces = clip_path(&path, bx);
+                if let Some(longest) = pieces.iter().max_by_key(|q| q.len())
+                    && let Some(t) = label_text(o, v, &known)
+                {
+                    let k = ((longest.len() - 1) as f32 * 0.86) as usize;
+                    labels.push(Label { x: longest[k].0, y: longest[k].1, off: cap * 0.35, text: t, color: o.style.color });
+                }
+                for piece in pieces {
                     draw!(piece, 0.0);
                 }
             }
             Val::Implicit(f) => {
-                for path in implicit_paths(p, f) {
-                    for piece in clip_path(&path, bx) {
-                        draw!(piece, 0.0);
-                    }
+                let pieces: Vec<Vec<(f32, f32)>> = implicit_paths(p, f).iter().flat_map(|path| clip_path(path, bx)).collect();
+                if let Some(longest) = pieces.iter().max_by_key(|q| q.len())
+                    && let Some(t) = label_text(o, v, &known)
+                {
+                    let k = ((longest.len() - 1) as f32 * 0.86) as usize;
+                    labels.push(Label { x: longest[k].0, y: longest[k].1, off: cap * 0.35, text: t, color: o.style.color });
+                }
+                for piece in pieces {
+                    draw!(piece, 0.0);
                 }
             }
             Val::Angle { at, from, sweep } => {
@@ -1095,7 +1129,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                     let q = (c.0 + (d0.0 + d1.0) * rr * 0.35, c.1 + (d0.1 + d1.1) * rr * 0.35);
                     out.push((pen(o, 1.2), hand.stroke(&[q, (q.0 + 0.05, q.1)], 0.0)));
                 }
-                if let Some(t) = label_text(o, v) {
+                if let Some(t) = label_text(o, v, &known) {
                     let mid = a0 - span / 2.0;
                     labels.push(Label { x: c.0 + mid.cos() * rr * 1.7, y: c.1 + mid.sin() * rr * 1.7, off: 0.0, text: t, color: o.style.color });
                 }
@@ -1184,7 +1218,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                 PointKind::Zero => "N",
                 PointKind::Cross => "S",
             };
-            pt_labels.push(Label { x, y, off: r, text: format!("{tag}({}|{})", format_num(s.x, 2), format_num(s.y, 2)), color: *color });
+            pt_labels.push(Label { x, y, off: r, text: format!("{tag}({}|{})", fmt_num(s.x), fmt_num(s.y)), color: *color });
         }
     }
     // Sliders and texts.
@@ -1222,11 +1256,14 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
     let mut placed = reserved;
     let words = placed.len();
     for (l, pc) in pt_labels.iter().map(|l| (l, cap * 0.85)).chain(labels.iter().map(|l| (l, cap))) {
-        let tw = text_width(&l.text, pc);
+        // A stacked fraction makes a label taller: its box reaches as far as its ink.
+        let laid = font::layout(&l.text);
+        let (tw, up) = (laid.width * pc, -laid.top.min(0.0) * pc);
+        let h = pc * 1.3 + up + (laid.bottom - 1.15).max(0.0) * pc;
         let lb = Brush { width: label.width * 0.95, color: l.color, ..label };
-        if let Some((lx, ly)) = spot(l.x, l.y, tw, pc, l.off.max(cap * 0.2), bx, &placed, words, &ink) {
-            placed.push((lx, ly, lx + tw, ly + pc * 1.3));
-            for s in hand.write(&l.text, lx, ly, pc) {
+        if let Some((lx, ly)) = spot(l.x, l.y, tw, h, pc, l.off.max(cap * 0.2), bx, &placed, words, &ink) {
+            placed.push((lx, ly, lx + tw, ly + h));
+            for s in hand.write(&l.text, lx, ly + up, pc) {
                 out.push((lb, s));
             }
         }
@@ -1249,20 +1286,69 @@ fn stroke_path(hand: &mut Hand, out: &mut Vec<(Brush, Vec<InkPoint>)>, ink: &mut
     }
 }
 
+/// The pieces of a curve without what lies within `r` of `q` (inside an open end's ring).
+fn trim_near(pieces: Vec<Vec<(f32, f32)>>, q: (f32, f32), r: f32) -> Vec<Vec<(f32, f32)>> {
+    let mut out = Vec::new();
+    for piece in pieces {
+        let mut cur: Vec<(f32, f32)> = Vec::new();
+        for w in piece.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let (ina, inb) = ((a.0 - q.0).hypot(a.1 - q.1) < r, (b.0 - q.0).hypot(b.1 - q.1) < r);
+            // Where the segment a → b crosses the ring.
+            let cross = || {
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                let (fx, fy) = (a.0 - q.0, a.1 - q.1);
+                let (qa, qb, qc) = (dx * dx + dy * dy, 2.0 * (fx * dx + fy * dy), fx * fx + fy * fy - r * r);
+                let disc = (qb * qb - 4.0 * qa * qc).max(0.0).sqrt();
+                let t = if ina { (-qb + disc) / (2.0 * qa) } else { (-qb - disc) / (2.0 * qa) };
+                let t = t.clamp(0.0, 1.0);
+                (a.0 + dx * t, a.1 + dy * t)
+            };
+            match (ina, inb) {
+                (false, false) => {
+                    if cur.is_empty() {
+                        cur.push(a);
+                    }
+                    cur.push(b);
+                }
+                (false, true) => {
+                    if cur.is_empty() {
+                        cur.push(a);
+                    }
+                    cur.push(cross());
+                    if cur.len() >= 2 {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                    cur.clear();
+                }
+                (true, false) => {
+                    cur.clear();
+                    cur.push(cross());
+                    cur.push(b);
+                }
+                (true, true) => cur.clear(),
+            }
+        }
+        if cur.len() >= 2 {
+            out.push(cur);
+        }
+    }
+    out
+}
+
 /// How wide a piece of a curve runs across.
 fn span(piece: &[(f32, f32)]) -> f32 {
     let (lo, hi) = piece.iter().fold((f32::MAX, f32::MIN), |(lo, hi), q| (lo.min(q.0), hi.max(q.0)));
     hi - lo
 }
 
-/// Where to write a label of width `tw` at a point: up-right of it, else up-left, down-right,
-/// down-left (then the same a line further out) — the first spot inside the box that covers
-/// no words already written and no ink (`ink`: points of the curves and axes); failing that,
-/// the one that touches the least ink. The first `words` of `placed` are axis numbers and
-/// such, not labels.
+/// Where to write a label of width `tw` and height `h` at a point: up-right of it, else
+/// up-left, down-right, down-left (then the same a line further out) — the first spot inside
+/// the box that covers no words already written and no ink (`ink`: points of the curves and
+/// axes); failing that, the one that touches the least ink. The first `words` of `placed` are
+/// axis numbers and such, not labels.
 #[allow(clippy::too_many_arguments)]
-fn spot(x: f32, y: f32, tw: f32, cap: f32, off: f32, bx: (f32, f32, f32, f32), placed: &[(f32, f32, f32, f32)], words: usize, ink: &[(f32, f32)]) -> Option<(f32, f32)> {
-    let h = cap * 1.3;
+fn spot(x: f32, y: f32, tw: f32, h: f32, cap: f32, off: f32, bx: (f32, f32, f32, f32), placed: &[(f32, f32, f32, f32)], words: usize, ink: &[(f32, f32)]) -> Option<(f32, f32)> {
     let far = off + h * 0.9;
     let cands = [
         (x + off, y - off - h), (x - off - tw, y - off - h), (x + off, y + off), (x - off - tw, y + off),

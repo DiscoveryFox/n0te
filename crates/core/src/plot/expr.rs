@@ -755,6 +755,38 @@ impl Parser {
     }
 }
 
+/// Handwriting read as plain text (the tablet's own recogniser: `f(x)=x2+1`, `y=2x–1`) as a
+/// line for a plot: a number right after a lone x, y, t or a closing bracket is its power
+/// (2x is written for 2·x, so x2 is x²), dashes are minus signs, × and ÷ multiply and divide,
+/// a capital X alone is x.
+pub fn handwritten_input(text: &str) -> String {
+    let small_x = text.contains('x');
+    let chars: Vec<char> = text
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '–' | '—' | '−' => '-',
+            '×' => '*',
+            '÷' => '/',
+            _ => c,
+        })
+        .collect();
+    let lone = |i: usize| i == 0 || !chars[i - 1].is_alphabetic();
+    let mut out = String::with_capacity(text.len() + 4);
+    for (i, &c) in chars.iter().enumerate() {
+        let c = if c == 'X' && !small_x && lone(i) && chars.get(i + 1).is_none_or(|n| !n.is_alphabetic()) { 'x' } else { c };
+        if c.is_ascii_digit() && i > 0 {
+            let p = chars[i - 1];
+            let var = matches!(p, 'x' | 'X' | 'y' | 't') && lone(i - 1);
+            if var || p == ')' {
+                out.push('^');
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// LaTeX from the handwriting recogniser as a function to type (`\frac{1}{2}x^{2}` →
 /// `(1)/(2)x^(2)`); `f(x) =` / `y =` in front are kept for [`parse_line`] to drop.
 pub fn latex_to_expr(latex: &str) -> Result<String, String> {
@@ -1002,5 +1034,15 @@ mod tests {
         assert!(close(v("\\left| x \\right| - 1", -2.0), 1.0));
         assert!(close(v("x = 3", 0.0), 3.0));
         assert!(latex_to_expr("\\int x dx").is_err());
+    }
+
+    #[test]
+    fn handwriting_read_as_text_becomes_a_line() {
+        assert_eq!(handwritten_input("f(x)=x2+1"), "f(x)=x^2+1");
+        assert_eq!(handwritten_input(" y = 2x – 1 "), "y = 2x - 1");
+        assert_eq!(handwritten_input("(x+1)2"), "(x+1)^2");
+        assert_eq!(handwritten_input("y=X3"), "y=x^3");
+        assert_eq!(handwritten_input("exp2"), "exp2", "not in a word");
+        assert_eq!(handwritten_input("3×x÷2"), "3*x/2");
     }
 }

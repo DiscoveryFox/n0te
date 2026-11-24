@@ -43,10 +43,25 @@ pub enum Node {
 pub struct Input {
     /// The name it gives (None: the construction names it).
     pub name: Option<String>,
-    /// `f(x) = …`: the function's variable.
+    /// `f(x) = …`: the function's variable (also `a(b) = 3b`: b; polar: θ).
     pub param: Option<char>,
     pub body: Body,
+    /// Where it is defined, a comparison: `f(x) = x², 0 ≤ x ≤ 2`, `x² für 0 < x < 2`,
+    /// `x² (x > 0)`; for a curve the range of t (θ).
+    pub domain: Option<Node>,
+    /// `r = 1 + cos θ`: a curve in polar coordinates, the body r of the angle θ (`param`).
+    pub polar: bool,
 }
+
+/// Variables besides x, y and t: a function's own (`a(b) = 3b`), θ and φ (also written
+/// theta, phi) in polar curves. As typed, and the variable it stands for.
+type Vars = Vec<(String, char)>;
+
+/// The words that bring in a domain (`x² für 0 < x < 2`).
+const DOMAIN_WORDS: [&str; 3] = ["für", "fuer", "for"];
+
+/// The angle's names in polar curves.
+const ANGLES: [(&str, char); 4] = [("θ", 'θ'), ("theta", 'θ'), ("φ", 'φ'), ("phi", 'φ')];
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Body {
@@ -140,44 +155,197 @@ pub fn parse_input(src: &str, known: &HashSet<String>) -> Result<Input, String> 
     }
     // name: …  (a label in front; not inside brackets).
     let (label, rest) = split_label(src);
+    // …, 0 ≤ x ≤ 2: the domain after it.
+    let (rest, domain) = split_domain(rest);
+    if rest.is_empty() {
+        return Err("Vor dem Bereich fehlt noch etwas".into());
+    }
     // The first top-level "=" (not part of <=, >=).
     let eq = top_level_eq(rest);
     let mut known = known.clone();
     if let Some(l) = &label {
         known.insert(l.clone());
     }
-    match eq {
-        None => Ok(Input { name: label, param: None, body: Body::Expr(parse_expr(rest, &known)?) }),
+    let (mut input, vars) = match eq {
+        None => (Input { name: label, param: None, body: Body::Expr(parse_expr(rest, &known)?), domain: None, polar: false }, Vars::new()),
         Some(at) => {
             let (lhs, rhs) = (rest[..at].trim(), rest[at + 1..].trim());
             if rhs.is_empty() {
                 return Err("Rechts vom = fehlt noch etwas".into());
             }
-            // f(x) = …, f(t) = …: a function (also over a label's name).
-            if let Some((name, var)) = fn_head(lhs) {
+            let head = fn_head(lhs);
+            // r = 1 + cos θ: a curve in polar coordinates.
+            if let Some(angle) = polar_angle(lhs, head.as_ref(), rhs) {
+                let vars: Vars = ANGLES.iter().filter(|a| a.1 == angle).map(|(n, c)| (n.to_string(), *c)).collect();
+                let body = Body::Expr(parse_with(rhs, &known, &vars)?);
+                (Input { name: label, param: Some(angle), body, domain: None, polar: true }, vars)
+            } else if let Some((name, var)) = head {
+                // f(x) = …, f(t) = …, a(b) = 3b: a function (also over a label's name).
                 known.insert(name.clone());
-                return Ok(Input { name: Some(name), param: Some(var), body: Body::Expr(parse_expr(rhs, &known)?) });
-            }
-            // a = …: a definition, unless the left side is x or y (then: an equation).
-            if is_ident(lhs) && !matches!(lhs, "x" | "y") {
+                let vars: Vars = if matches!(var, 'x' | 't') { Vars::new() } else { vec![(var.to_string(), var)] };
+                (Input { name: Some(name), param: Some(var), body: Body::Expr(parse_with(rhs, &known, &vars)?), domain: None, polar: false }, vars)
+            } else if is_ident(lhs) && !matches!(lhs, "x" | "y") {
+                // a = …: a definition, unless the left side is x or y (then: an equation).
                 if label.is_some() {
                     return Err("Zwei Namen für ein Objekt".into());
                 }
                 known.insert(lhs.to_string());
-                return Ok(Input { name: Some(lhs.to_string()), param: None, body: Body::Expr(parse_expr(rhs, &known)?) });
+                (Input { name: Some(lhs.to_string()), param: None, body: Body::Expr(parse_expr(rhs, &known)?), domain: None, polar: false }, Vars::new())
+            } else {
+                (Input { name: label, param: None, body: Body::Equation(parse_expr(lhs, &known)?, parse_expr(rhs, &known)?), domain: None, polar: false }, Vars::new())
             }
-            Ok(Input { name: label, param: None, body: Body::Equation(parse_expr(lhs, &known)?, parse_expr(rhs, &known)?) })
+        }
+    };
+    if let Some(d) = domain {
+        let n = parse_with(d, &known, &vars)?;
+        if !matches!(n, Node::Chain(..)) {
+            return Err("Der Bereich braucht einen Vergleich, z. B. 0 ≤ x ≤ 2".into());
+        }
+        input.domain = Some(n);
+    }
+    Ok(input)
+}
+
+/// How a definition is written, read without the construction: a function's variable
+/// (`f(x) = …`: x, `a(b) = 3b`: b), a polar curve (`r = 1 + cos θ`), a label in front
+/// (`g: y = 2x`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Shape {
+    pub param: Option<char>,
+    pub polar: bool,
+    pub labelled: bool,
+}
+
+/// See [`Shape`].
+pub fn shape(src: &str) -> Shape {
+    let (label, rest) = split_label(src.trim());
+    let (rest, _) = split_domain(rest);
+    let mut s = Shape { labelled: label.is_some(), ..Shape::default() };
+    if let Some(at) = top_level_eq(rest) {
+        let lhs = rest[..at].trim();
+        let head = fn_head(lhs);
+        if let Some(angle) = polar_angle(lhs, head.as_ref(), &rest[at + 1..]) {
+            (s.param, s.polar) = (Some(angle), true);
+        } else if let Some((_, var)) = head {
+            s.param = Some(var);
         }
     }
+    s
+}
+
+/// `r = …θ…` (or `r(θ) = …`): the angle a polar curve's r is of.
+fn polar_angle(lhs: &str, head: Option<&(String, char)>, rhs: &str) -> Option<char> {
+    if let Some((name, var)) = head {
+        return (name == "r" && matches!(var, 'θ' | 'φ')).then_some(*var);
+    }
+    if lhs != "r" {
+        return None;
+    }
+    words(rhs).into_iter().find_map(|w| ANGLES.iter().find(|a| a.0 == w).map(|a| a.1))
+}
+
+/// The runs of letters in `src` (outside quotes).
+fn words(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quoted = false;
+    for c in src.chars() {
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if !quoted && c.is_alphabetic() {
+            cur.push(c);
+        } else if !cur.is_empty() {
+            out.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// A line split into what it defines and the domain after it (as typed): `…, 0 ≤ x ≤ 2`,
+/// `… für 0 < x < 2` (also `for`), `… (x > 0)`. Outside brackets only; a comma between
+/// digits is a decimal comma.
+pub fn split_domain(src: &str) -> (&str, Option<&str>) {
+    let cmp = |s: &str| s.contains(['<', '>', '≤', '≥']);
+    let chars: Vec<(usize, char)> = src.char_indices().collect();
+    let mut depth = 0i32;
+    let mut comma = None;
+    for (k, &(i, c)) in chars.iter().enumerate() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '"' => return (src.trim(), None),
+            ',' | ';' if depth == 0 => {
+                let digit = |j: Option<&(usize, char)>| j.is_some_and(|(_, c)| c.is_ascii_digit());
+                if !(digit(k.checked_sub(1).and_then(|j| chars.get(j))) && digit(chars.get(k + 1))) {
+                    comma = Some(i);
+                }
+            }
+            _ if depth == 0 && c.is_whitespace() => {
+                // " für ": a word of its own.
+                let after = &src[i..].trim_start();
+                for w in DOMAIN_WORDS {
+                    if after.len() > w.len() && after.is_char_boundary(w.len()) && after[..w.len()].eq_ignore_ascii_case(w) && after[w.len()..].starts_with(char::is_whitespace) {
+                        let dom = after[w.len()..].trim();
+                        if cmp(dom) {
+                            return (src[..i].trim(), Some(dom));
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(i) = comma
+        && cmp(&src[i + 1..])
+    {
+        return (src[..i].trim(), Some(src[i + 1..].trim()));
+    }
+    // A comparison in brackets at the end: x² (x > 0).
+    let t = src.trim_end();
+    if t.ends_with(')') {
+        let mut depth = 0i32;
+        for (i, c) in t.char_indices().rev() {
+            match c {
+                ')' => depth += 1,
+                '(' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let (before, inner) = (&t[..i], &t[i + 1..t.len() - 1]);
+                        let spaced = before.ends_with(char::is_whitespace);
+                        let prev = before.trim_end().chars().last();
+                        let call = !spaced && prev.is_some_and(|c| c.is_alphabetic() || c == '\'');
+                        let open = prev.is_none_or(|c| matches!(c, '=' | '+' | '-' | '−' | '*' | '·' | '/' | '^' | ',' | ':' | '(' | '<' | '>' | '≤' | '≥'));
+                        if !call && !open && cmp(inner) {
+                            return (before.trim(), Some(inner.trim()));
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    (src.trim(), None)
 }
 
 /// Reads an expression on its own (in the names `known`).
 pub fn parse_expr(src: &str, known: &HashSet<String>) -> Result<Node, String> {
-    let toks = lex(src, known)?;
+    parse_with(src, known, &Vars::new())
+}
+
+/// Reads an expression with variables besides x, y, t.
+fn parse_with(src: &str, known: &HashSet<String>, vars: &Vars) -> Result<Node, String> {
+    let mut known = known.clone();
+    known.extend(vars.iter().map(|v| v.0.clone()));
+    let toks = lex(src, &known)?;
     if toks.is_empty() {
         return Err("Leer".into());
     }
-    let mut p = P { toks, i: 0, abs: 0, sep: false };
+    let mut p = P { toks, i: 0, abs: 0, sep: false, vars: vars.clone() };
     let n = p.chain()?;
     if p.i < p.toks.len() {
         return Err(match p.toks[p.i] {
@@ -206,7 +374,7 @@ fn split_label(src: &str) -> (Option<String>, &str) {
     (None, src)
 }
 
-fn top_level_eq(s: &str) -> Option<usize> {
+pub(crate) fn top_level_eq(s: &str) -> Option<usize> {
     let b = s.as_bytes();
     let mut depth = 0i32;
     for (i, &c) in b.iter().enumerate() {
@@ -226,12 +394,18 @@ fn top_level_eq(s: &str) -> Option<usize> {
     None
 }
 
-/// "f(x)" / "g(t)" on the left of "=": the function's name and variable.
+/// "f(x)" / "g(t)" / "a(b)" on the left of "=": the function's name and variable (a small
+/// letter but y and e, or θ, φ).
 fn fn_head(lhs: &str) -> Option<(String, char)> {
     let open = lhs.find('(')?;
     let name = lhs[..open].trim();
     let inner = lhs[open + 1..].strip_suffix(')')?.trim();
-    (is_ident(name) && !name.contains('\'') && matches!(inner, "x" | "t")).then(|| (name.to_string(), inner.chars().next().unwrap()))
+    let mut cs = inner.chars();
+    let var = match (cs.next(), cs.next()) {
+        (Some(c), None) if (c.is_ascii_lowercase() && !matches!(c, 'y' | 'e')) || matches!(c, 'θ' | 'φ') => c,
+        _ => ANGLES.iter().find(|a| a.0 == inner && a.0.len() > 2).map(|a| a.1)?,
+    };
+    (is_ident(name) && !name.contains('\'') && !matches!(name, "x" | "y") && name.chars().count() <= 12).then(|| (name.to_string(), var))
 }
 
 /// Which commas are decimal commas: between digits, outside brackets, or inside a bracket that
@@ -417,17 +591,26 @@ pub fn unknown_letters(src: &str, known: &HashSet<String>) -> Vec<String> {
     if let Some(l) = &label {
         known.insert(l.clone());
     }
+    let (rest, domain) = split_domain(rest);
     let mut scan = rest;
     if let Some(at) = top_level_eq(rest) {
         let lhs = rest[..at].trim();
-        if let Some((name, _)) = fn_head(lhs) {
+        let head = fn_head(lhs);
+        if polar_angle(lhs, head.as_ref(), &rest[at + 1..]).is_some() {
+            known.extend(ANGLES.iter().map(|a| a.0.to_string()));
+            scan = &rest[at + 1..];
+        } else if let Some((name, var)) = head {
             known.insert(name);
+            known.insert(var.to_string());
             scan = &rest[at + 1..];
         } else if is_ident(lhs) && !matches!(lhs, "x" | "y") {
             known.insert(lhs.to_string());
             scan = &rest[at + 1..];
         }
     }
+    // The domain's letters count too (0 ≤ x ≤ a).
+    let joined = format!("{scan} {}", domain.unwrap_or(""));
+    let scan = joined.as_str();
     let is_known = |w: &str, last_call: bool| {
         known.contains(w) || FUNCS.contains(&w.to_lowercase().as_str()) || matches!(w, "x" | "y" | "t" | "pi" | "e") || (last_call && command(w).is_some())
     };
@@ -524,6 +707,8 @@ struct P {
     abs: usize,
     /// Inside "( … )", where a bar after a value separates (1|2) instead of opening |x|.
     sep: bool,
+    /// Variables besides x, y, t (see [`Vars`]).
+    vars: Vars,
 }
 
 impl P {
@@ -654,6 +839,16 @@ impl P {
                 if matches!(name.as_str(), "x" | "y" | "t") {
                     return Ok(Node::Var(name.chars().next().unwrap()));
                 }
+                // A function's own variable (b in a(b) = 3b), θ in a polar curve; b(…) is b times the bracket.
+                if let Some(&(_, v)) = self.vars.iter().find(|(n, _)| *n == name) {
+                    if self.peek() == Some(&Tok::Open) {
+                        self.i += 1;
+                        let args = self.args(Tok::Close)?;
+                        let [a] = <[Node; 1]>::try_from(args).map_err(|_| "Ein Komma zu viel".to_string())?;
+                        return Ok(Node::Bin(Op::Mul, Box::new(Node::Var(v)), Box::new(a)));
+                    }
+                    return Ok(Node::Var(v));
+                }
                 let mut primes = 0u8;
                 while self.eat(&Tok::Prime) {
                     primes += 1;
@@ -677,7 +872,7 @@ impl P {
                         return Err(format!("Hinter „{name}“ fehlt noch etwas"));
                     }
                     let mut a = if self.eat(&Tok::Minus) { Node::Neg(Box::new(self.power()?)) } else { self.power()? };
-                    while matches!(self.peek(), Some(Tok::Num(_))) || matches!(self.peek(), Some(Tok::Ident(n)) if matches!(n.as_str(), "x" | "y" | "t" | "pi" | "e")) {
+                    while matches!(self.peek(), Some(Tok::Num(_))) || matches!(self.peek(), Some(Tok::Ident(n)) if matches!(n.as_str(), "x" | "y" | "t" | "pi" | "e") || self.vars.iter().any(|v| v.0 == *n)) {
                         a = Node::Bin(Op::Mul, Box::new(a), Box::new(self.power()?));
                     }
                     return Ok(Node::Call(name, 0, vec![a]));
@@ -789,6 +984,47 @@ mod tests {
         let i = parse_input("Kreis((1,5), 3)", &known).unwrap();
         let Body::Expr(Node::Call(_, _, a)) = i.body else { panic!() };
         assert_eq!(a[0], Node::Point(Box::new(Node::Num(1.0)), Box::new(Node::Num(5.0))), "a comma in (a, b) separates");
+    }
+
+    #[test]
+    fn a_domain_is_read_after_what_it_bounds() {
+        for (src, body, dom) in [
+            ("f(x) = x^2, 0 ≤ x ≤ 2", "f(x) = x^2", Some("0 ≤ x ≤ 2")),
+            ("x² für 0 < x < 2", "x²", Some("0 < x < 2")),
+            ("x^2 For x>0", "x^2", Some("x>0")),
+            ("x² (x > 0)", "x²", Some("x > 0")),
+            ("g: y = 2x + 1 (0 <= x <= 3)", "g: y = 2x + 1", Some("0 <= x <= 3")),
+            ("Wenn(x < 0, -x)", "Wenn(x < 0, -x)", None),
+            ("A = (1, 2)", "A = (1, 2)", None),
+            ("f(x) = 0,5x", "f(x) = 0,5x", None),
+            ("Text(\"a, b < c\")", "Text(\"a, b < c\")", None),
+            ("b = (a < 3)", "b = (a < 3)", None),
+            ("Schneide(f, g)", "Schneide(f, g)", None),
+        ] {
+            assert_eq!(split_domain(src), (body, dom), "{src}");
+        }
+        let i = parse_input("f(x) = x^2 für 0 < x ≤ 2", &k(&[])).unwrap();
+        assert_eq!(i.domain, Some(Node::Chain(vec![Node::Num(0.0), Node::Var('x'), Node::Num(2.0)], vec![Cmp::Lt, Cmp::Le])));
+        assert!(parse_input("f(x) = x^2, 2", &k(&[])).is_err(), "a domain needs a comparison");
+        // The words of a domain are no letters to make sliders of; the bounds' letters are.
+        assert_eq!(unknown_letters("f(x) = x^2 für 0 < x < a", &k(&[])), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn functions_of_other_letters_and_polar_curves() {
+        let i = parse_input("a(b) = 3b + b(b - 1)", &k(&[])).unwrap();
+        assert_eq!((i.name.as_deref(), i.param), (Some("a"), Some('b')));
+        assert!(matches!(i.body, Body::Expr(Node::Bin(Op::Add, _, _))));
+        assert!(unknown_letters("a(b) = 3b", &k(&[])).is_empty());
+        let r = parse_input("c: r = 1 + cos θ", &k(&[])).unwrap();
+        assert!(r.polar && r.param == Some('θ') && r.name.as_deref() == Some("c"));
+        assert!(parse_input("r = 2 theta", &k(&[])).unwrap().polar);
+        assert!(!parse_input("r = 2", &k(&[])).unwrap().polar);
+        assert_eq!(shape("a(b) = 3b"), Shape { param: Some('b'), polar: false, labelled: false });
+        assert_eq!(shape("c: r = sin(2θ)"), Shape { param: Some('θ'), polar: true, labelled: true });
+        assert_eq!(shape("g: y = x"), Shape { param: None, polar: false, labelled: true });
+        // x(A) and capitals are no function heads.
+        assert!(fn_head("x(A)").is_none() && fn_head("f(A)").is_none() && fn_head("f(e)").is_none());
     }
 
     #[test]
