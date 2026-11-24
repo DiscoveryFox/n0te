@@ -555,8 +555,8 @@ impl App {
 
     pub fn title(&self) -> String {
         match &self.screen {
-            Screen::Library => "n0te".into(),
-            Screen::Notebook(o) => format!("n0te — {}", o.nb.title()),
+            Screen::Library => crate::app_name().into(),
+            Screen::Notebook(o) => format!("{} — {}", crate::app_name(), o.nb.title()),
         }
     }
 

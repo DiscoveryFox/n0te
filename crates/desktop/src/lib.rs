@@ -24,8 +24,40 @@ pub mod widgets;
 
 pub use app::{App, Message};
 
-/// Runs the app in a window. `import`: a `.n0te` file to import first (from the command line).
+/// Which of the two programs this is: the same app, set up for keyboard and mouse ("n0te
+/// Laptop", the `n0te` binary) or for pen and touch ("n0te Tablet", `n0te-tablet`, the port of
+/// the Android tablet app).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Laptop,
+    Tablet,
+}
+
+static MODE: std::sync::OnceLock<Mode> = std::sync::OnceLock::new();
+
+/// The program's mode (Laptop unless [`run_as`] said otherwise; tests run as Laptop).
+pub fn mode() -> Mode {
+    *MODE.get().unwrap_or(&Mode::Laptop)
+}
+
+/// The program's name as people see it: window title, menus.
+pub fn app_name() -> &'static str {
+    match mode() {
+        // On Linux the laptop app has always been plain "n0te".
+        Mode::Laptop if cfg!(target_os = "linux") => "n0te",
+        Mode::Laptop => "n0te Laptop",
+        Mode::Tablet => "n0te Tablet",
+    }
+}
+
+/// Runs the laptop app in a window. `import`: a `.n0te` file to import first (from the command line).
 pub fn run(import: Option<std::path::PathBuf>) -> iced::Result {
+    run_as(Mode::Laptop, import)
+}
+
+/// Runs the app as `mode` (see [`Mode`]).
+pub fn run_as(mode: Mode, import: Option<std::path::PathBuf>) -> iced::Result {
+    let _ = MODE.set(mode);
     let root = app::default_root();
     let mut app = iced::application(move || App::boot_with(root.clone(), import.clone()), App::update, App::view)
         .title(App::title)
