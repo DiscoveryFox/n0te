@@ -87,7 +87,10 @@ it. Draw a line and then a small V at its end: it becomes a clean arrowhead, sti
 style. Circle strokes with the lasso to move, scale, recolour, copy them into another notebook or
 send them to the laptop's clipboard. Pen down and drag down or sideways to insert space.
 
-> Picture: these tools live in the Android app; a tablet screenshot will follow here.
+![n0te Tablet on a page: a rough rectangle and circle held still became clean shapes, a wobbly line became straight with an arrowhead drawn as a V, and the lasso holds a word](docs/screenshots/tablet.png)
+
+*(Picture: n0te Tablet, headless with the mouse as the pen; the same recognizers as on the
+Android tablet.)*
 
 ### Pages and notebooks
 

@@ -20,6 +20,8 @@ export N0TE_PDFIUM_LIB="$root/third_party/pdfium/linux-x64/lib/libpdfium.so"
 
 mkdir -p "$out"
 "$cargo" run --locked --profile fast -p n0te-desktop --example screenshots -- "$out"
+# n0te Tablet (its own process: the app runs as n0te Tablet, the mouse stands in for the pen).
+"$cargo" run --locked --profile fast -p n0te-desktop --example tablet_shots -- "$out"
 
 if python3 -c 'import PIL' 2>/dev/null; then
 	python3 -I - "$out"/*.png <<'PY'
