@@ -57,8 +57,10 @@ jobs:
           - arch: x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+          # Cross-compiled on the x64 runner (its MSVC has the ARM64 tools): works in private
+          # repos too, where the windows-11-arm runners aren't free.
           - arch: arm64
-            os: windows-11-arm
+            os: windows-latest
             target: aarch64-pc-windows-msvc
     defaults:
       run:

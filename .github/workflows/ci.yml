@@ -57,8 +57,10 @@ jobs:
           - arch: x64
             os: windows-latest
             target: x86_64-pc-windows-msvc
+          # Cross-compiled on the x64 runner (its MSVC has the ARM64 tools): works in private
+          # repos too, where the windows-11-arm runners aren't free.
           - arch: arm64
-            os: windows-11-arm
+            os: windows-latest
             target: aarch64-pc-windows-msvc
     defaults:
       run:
@@ -91,7 +93,7 @@ jobs:
         continue-on-error: true
         env:
           N0TE_PDFIUM_LIB: ${{ github.workspace }}\third_party\pdfium\win-x64\bin\pdfium.dll
-        run: cargo test --locked --target ${{ matrix.target }} -p n0te-core -p n0te-pdf -p n0te-desktop -p n0te-sync
+        run: cargo test --locked --target ${{ matrix.target }} -p n0te-core -p n0te-pdf -p n0te-platform -p n0te-desktop -p n0te-sync
       - name: Collect the exes
         run: |
           out=target/${{ matrix.target }}/release
