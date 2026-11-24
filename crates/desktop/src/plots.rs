@@ -29,6 +29,7 @@ use n0te_core::notebook::Background;
 use n0te_core::plot::lang::{self, Body, Node};
 use n0te_core::plot::{self, Kind, LabelMode, LineStyle, MARK_CROSSINGS, MARK_EXTREMA, MARK_TURNS, MARK_ZEROS, Obj, PALETTE, Plot, PointStyle, Slider, Snap, Val};
 
+use crate::i18n::{Lang, lang, tr, trf};
 use crate::theme;
 
 /// The pen colours, like the tablet's: black, blue, red, green, orange, purple.
@@ -220,27 +221,27 @@ fn swap_x(s: &str, to: char) -> String {
 /// What an object is, as the properties name it.
 pub fn kind_name(kind: Option<Kind>, slider: bool) -> &'static str {
     if slider {
-        return "Schieberegler";
+        return tr("Schieberegler");
     }
     match kind {
-        Some(Kind::Number) => "Zahl",
-        Some(Kind::Bool) => "Wahrheitswert",
-        Some(Kind::Point) => "Punkt",
-        Some(Kind::Points) => "Punkte",
-        Some(Kind::Vector) => "Vektor",
-        Some(Kind::Function) => "Funktion",
-        Some(Kind::Line) => "Gerade",
-        Some(Kind::Lines) => "Geraden",
-        Some(Kind::Segment) => "Strecke",
-        Some(Kind::Ray) => "Strahl",
-        Some(Kind::Circle) => "Kreis",
-        Some(Kind::Polygon) => "Vieleck",
-        Some(Kind::Curve) => "Kurve",
-        Some(Kind::Implicit) => "Kurve",
-        Some(Kind::Angle) => "Winkel",
-        Some(Kind::Area) => "Fläche",
-        Some(Kind::Text) => "Text",
-        None => "mit einem Fehler",
+        Some(Kind::Number) => tr("Zahl"),
+        Some(Kind::Bool) => tr("Wahrheitswert"),
+        Some(Kind::Point) => tr("Punkt"),
+        Some(Kind::Points) => tr("Punkte"),
+        Some(Kind::Vector) => tr("Vektor"),
+        Some(Kind::Function) => tr("Funktion"),
+        Some(Kind::Line) => tr("Gerade"),
+        Some(Kind::Lines) => tr("Geraden"),
+        Some(Kind::Segment) => tr("Strecke"),
+        Some(Kind::Ray) => tr("Strahl"),
+        Some(Kind::Circle) => tr("Kreis"),
+        Some(Kind::Polygon) => tr("Vieleck"),
+        Some(Kind::Curve) => tr("Kurve"),
+        Some(Kind::Implicit) => tr("Kurve"),
+        Some(Kind::Angle) => tr("Winkel"),
+        Some(Kind::Area) => tr("Fläche"),
+        Some(Kind::Text) => tr("Text"),
+        None => tr("mit einem Fehler"),
     }
 }
 
@@ -283,7 +284,7 @@ fn and_list(names: &[String]) -> String {
     match names {
         [] => String::new(),
         [one] => one.clone(),
-        [rest @ .., last] => format!("{} und {last}", rest.join(", ")),
+        [rest @ .., last] => trf("{} und {}", &[&rest.join(", "), last]),
     }
 }
 
@@ -346,6 +347,15 @@ pub const COMMANDS: [(&str, &str, &str, &str); 35] = [
     ("Max", "Max", "a, b", "die größere Zahl"),
 ];
 
+/// A command by its German name as the app shows it: GeoGebra's English name when the app
+/// speaks English ("Schneide" → "Intersect"), else as it is.
+pub fn command_name(de: &'static str) -> &'static str {
+    match lang() {
+        Lang::En => COMMANDS.iter().find(|c| c.0 == de).map_or(de, |c| c.1),
+        Lang::De => de,
+    }
+}
+
 /// How many suggestions show at most.
 const SUGGESTIONS: usize = 5;
 
@@ -368,7 +378,8 @@ impl Suggestion {
 }
 
 /// The commands starting with `typed` (at least two letters, case and "ae" for "ä" don't
-/// matter), the German names first, an exact match before the others.
+/// matter), the German names first (the English ones when the app speaks English), an exact
+/// match before the others.
 pub fn suggest(typed: &str) -> Vec<Suggestion> {
     let t = typed.to_lowercase();
     if t.chars().count() < 2 {
@@ -378,26 +389,32 @@ pub fn suggest(typed: &str) -> Vec<Suggestion> {
         let n = name.to_lowercase();
         n.starts_with(&t) || n.replace('ä', "ae").starts_with(&t)
     };
+    let english = lang() == Lang::En;
     let mut found: Vec<(bool, bool, usize, Suggestion)> = Vec::new();
     for (k, &(de, en, args, about)) in COMMANDS.iter().enumerate() {
-        let name = if starts(de) {
-            de
-        } else if starts(en) {
-            en
+        let (first, second) = if english { (en, de) } else { (de, en) };
+        let name = if starts(first) {
+            first
+        } else if starts(second) {
+            second
         } else {
             continue;
         };
-        found.push((name.to_lowercase() != t, name != de, k, Suggestion { name, de, args, about }));
+        found.push((name.to_lowercase() != t, name != first, k, Suggestion { name, de, args, about }));
     }
     found.sort_by_key(|f| (f.0, f.1, f.2));
     found.into_iter().take(SUGGESTIONS).map(|f| f.3).collect()
 }
 
 /// What a function marks by itself, as the panel names it.
-pub const MARKS: [(u8, &str); 4] = [(MARK_ZEROS, "Nullstellen"), (MARK_EXTREMA, "Hoch- und Tiefpunkte"), (MARK_CROSSINGS, "Schnittpunkte"), (MARK_TURNS, "Wendepunkte")];
+pub fn mark_names() -> [(u8, &'static str); 4] {
+    [(MARK_ZEROS, tr("Nullstellen")), (MARK_EXTREMA, tr("Hoch- und Tiefpunkte")), (MARK_CROSSINGS, tr("Schnittpunkte")), (MARK_TURNS, tr("Wendepunkte"))]
+}
 
 /// The label modes, as the panel names them.
-pub const LABELS: [(LabelMode, &str); 5] = [(LabelMode::Off, "Aus"), (LabelMode::Name, "Name"), (LabelMode::NameValue, "Name & Wert"), (LabelMode::Value, "Wert"), (LabelMode::Caption, "Beschriftung")];
+pub fn label_modes() -> [(LabelMode, &'static str); 5] {
+    [(LabelMode::Off, tr("Aus")), (LabelMode::Name, "Name"), (LabelMode::NameValue, tr("Name & Wert")), (LabelMode::Value, tr("Wert")), (LabelMode::Caption, tr("Beschriftung"))]
+}
 
 /// The input line (focus).
 pub fn input_id() -> iced::widget::Id {
@@ -662,7 +679,7 @@ impl Editor {
     /// name must be free and nothing may depend on the old one, and the objects that worked
     /// must still work.
     pub fn redefine(&self, id: &str, text: &str) -> Result<Plot, String> {
-        let i = self.index(id).ok_or("Dieses Objekt gibt es nicht mehr")?;
+        let i = self.index(id).ok_or(tr("Dieses Objekt gibt es nicht mehr"))?;
         let old = self.plot.objs[i].name();
         let text = text.trim();
         let text = match plot::name_of(text) {
@@ -674,17 +691,17 @@ impl Editor {
             && new != old
         {
             if self.plot.objs.iter().any(|o| o.name() == new) {
-                return Err(format!("Den Namen {new} gibt es schon"));
+                return Err(trf("Den Namen {} gibt es schon", &[&new]));
             }
             let deps = self.names_of(&self.plot.dependents(id));
             if !deps.is_empty() {
-                return Err(format!("Umbenennen geht nicht: {} {} von {old} ab", and_list(&deps), if deps.len() == 1 { "hängt" } else { "hängen" }));
+                return Err(if deps.len() == 1 { trf("Umbenennen geht nicht: {} hängt von {} ab", &[&and_list(&deps), &old]) } else { trf("Umbenennen geht nicht: {} hängen von {} ab", &[&and_list(&deps), &old]) });
             }
         }
         let before = self.plot.errors();
         let p = self.plot.set_def(id, &text)?;
         if let Some(j) = p.errors().iter().zip(&before).position(|(now, was)| now.is_some() && was.is_none()) {
-            return Err(format!("Dann stimmt {} nicht mehr: {}", p.objs[j].name(), p.errors()[j].clone().unwrap_or_default()));
+            return Err(trf("Dann stimmt {} nicht mehr: {}", &[&p.objs[j].name(), &p.errors()[j].clone().unwrap_or_default()]));
         }
         Ok(p)
     }
@@ -815,8 +832,14 @@ impl Editor {
                 }
             }
             Msg::Insert(k) => {
-                if let Some(&(_, insert, usage)) = QUICK.get(k) {
-                    self.input.push_str(insert);
+                if let Some(&(label, insert, usage)) = QUICK.get(k) {
+                    // In English the button's English name: "Point()" (the core takes both).
+                    let name = command_name(label);
+                    if name == label {
+                        self.input.push_str(insert);
+                    } else {
+                        self.input.push_str(&format!("{name}()"));
+                    }
                     self.input_error = None;
                     self.hint = Some(usage);
                     // Between the brackets.
@@ -1082,9 +1105,9 @@ impl Editor {
         let (a, b) = (self.ranges[axis * 2].value(), self.ranges[axis * 2 + 1].value());
         let n = if axis == 0 { "x" } else { "y" };
         match (a, b) {
-            (None, _) => Some(format!("{n} von: keine Zahl")),
-            (_, None) => Some(format!("{n} bis: keine Zahl")),
-            (Some(a), Some(b)) if b <= a => Some(format!("{n} bis muss größer sein als {n} von")),
+            (None, _) => Some(trf("{} von: keine Zahl", &[&n])),
+            (_, None) => Some(trf("{} bis: keine Zahl", &[&n])),
+            (Some(a), Some(b)) if b <= a => Some(trf("{} bis muss größer sein als {} von", &[&n, &n])),
             _ => None,
         }
     }
@@ -1093,11 +1116,11 @@ impl Editor {
     pub fn slider_error(&self) -> Option<String> {
         let v: Vec<Option<f64>> = self.slider_fields.iter().map(|f| f.value()).collect();
         match (v[0], v[1], v[2]) {
-            (None, _, _) => Some("von: keine Zahl".into()),
-            (_, None, _) => Some("bis: keine Zahl".into()),
-            (_, _, None) => Some("Schritt: keine Zahl".into()),
-            (Some(a), Some(b), _) if b <= a => Some("bis muss größer sein als von".into()),
-            (_, _, Some(s)) if s < 0.0 => Some("Der Schritt darf nicht kleiner als 0 sein".into()),
+            (None, _, _) => Some(tr("von: keine Zahl").into()),
+            (_, None, _) => Some(tr("bis: keine Zahl").into()),
+            (_, _, None) => Some(tr("Schritt: keine Zahl").into()),
+            (Some(a), Some(b), _) if b <= a => Some(tr("bis muss größer sein als von").into()),
+            (_, _, Some(s)) if s < 0.0 => Some(tr("Der Schritt darf nicht kleiner als 0 sein").into()),
             _ => None,
         }
     }
@@ -1120,7 +1143,7 @@ impl Editor {
             p.y_name = p.y_name.trim().to_string();
         }
         if !p.is_valid() {
-            return Err("Dieser Bereich lässt sich nicht zeichnen".into());
+            return Err(tr("Dieser Bereich lässt sich nicht zeichnen").into());
         }
         Ok(p)
     }
@@ -1136,7 +1159,7 @@ impl Editor {
         };
         let right = column![
             container(Preview { plot: &self.plot, drawn: highlighted(&self.plot, self.selected_index()), paper: self.paper, cache: &self.preview, size: Size::new(RIGHT, 250.0) }).id(preview_id()),
-            row![tab("Eigenschaften", Tab::Object), tab("Grafik", Tab::Graphics)].spacing(6),
+            row![tab(tr("Eigenschaften"), Tab::Object), tab(tr("Grafik"), Tab::Graphics)].spacing(6),
             scrollable(container(side).padding(Padding { right: 12.0, ..Padding::ZERO })).style(theme::scroll_dark).height(Length::Shrink),
         ]
         .spacing(12)
@@ -1153,15 +1176,15 @@ impl Editor {
         // Why OK is off, when the Grafik side isn't showing it.
         let why = if self.tab == Tab::Graphics { None } else { result.as_ref().err().cloned() };
         let col = column![
-            theme::heading("Koordinatensystem", 22.0),
+            theme::heading(tr("Koordinatensystem"), 22.0),
             crate::widgets::leave_room(body, 80.0),
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
             row![
-                button(theme::btn("Koordinatensystem löschen")).padding(theme::pad()).on_press(Msg::Delete).style(theme::ghost),
+                button(theme::btn(tr("Koordinatensystem löschen"))).padding(theme::pad()).on_press(Msg::Delete).style(theme::ghost),
                 Space::new().width(Length::Fill),
                 text(why.unwrap_or_default()).size(12).color(theme::p().accent),
                 Space::new().width(12),
-                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Msg::Cancel).style(theme::ghost),
+                button(theme::btn(tr("Abbrechen"))).padding(theme::pad()).on_press(Msg::Cancel).style(theme::ghost),
                 Space::new().width(8),
                 button(theme::btn("OK")).padding(theme::pad()).on_press_maybe(result.is_ok().then_some(Msg::Ok)).style(theme::accent_button),
             ]
@@ -1181,13 +1204,13 @@ impl Editor {
         let known: HashSet<String> = objs.iter().map(|o| o.name()).collect();
         let mut col = column![theme::caption("Algebra")].spacing(4);
         if objs.is_empty() {
-            col = col.push(container(text("Noch leer. Unten eingeben, z. B. f(x) = x^2 oder A = (1|2), und Enter.").size(13).color(theme::p().muted)).padding([6, 4]));
+            col = col.push(container(text(tr("Noch leer. Unten eingeben, z. B. f(x) = x^2 oder A = (1|2), und Enter.")).size(13).color(theme::p().muted)).padding([6, 4]));
         }
         let mut helpers = false;
         for i in order {
             if objs[i].style.aux && !helpers {
                 helpers = true;
-                col = col.push(container(theme::caption("Hilfsobjekte")).padding(Padding { top: 8.0, ..Padding::ZERO }));
+                col = col.push(container(theme::caption(tr("Hilfsobjekte"))).padding(Padding { top: 8.0, ..Padding::ZERO }));
             }
             col = col.push(self.row(i, &vals[i], &known));
         }
@@ -1198,7 +1221,7 @@ impl Editor {
     /// line, or the commands that fit what is being typed.
     fn input_line(&self) -> Element<'_, Msg> {
         let suggestions = self.suggestions();
-        let field = text_input("Eingabe …", &self.input).id(input_id()).on_input(Msg::Input).on_submit(Msg::InputSubmit).font(theme::MONO).padding(9).size(14).style(theme::field);
+        let field = text_input(tr("Eingabe …"), &self.input).id(input_id()).on_input(Msg::Input).on_submit(Msg::InputSubmit).font(theme::MONO).padding(9).size(14).style(theme::field);
         let mut col = column![InputLine { field: field.into(), value: &self.input, suggesting: !suggestions.is_empty() }].spacing(4);
         if let Some(e) = &self.input_error {
             col = col.push(container(text(e.clone()).size(12.5).color(theme::p().accent)).padding([2, 4]));
@@ -1208,13 +1231,13 @@ impl Editor {
             return col.push(Space::new().height(2)).push(suggestion_list(&suggestions)).into();
         }
         let quick = Row::with_children(QUICK.iter().enumerate().map(|(k, &(label, _, usage))| {
-            let b = button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Insert(k)).style(theme::secondary);
-            tooltip(b, container(text(usage).size(12)).padding([3, 8]).max_width(320).style(theme::chip), tooltip::Position::Bottom).gap(4).into()
+            let b = button(theme::btn_small(command_name(label))).padding([3, 8]).on_press(Msg::Insert(k)).style(theme::secondary);
+            tooltip(b, container(text(tr(usage)).size(12)).padding([3, 8]).max_width(320).style(theme::chip), tooltip::Position::Bottom).gap(4).into()
         }))
         .spacing(5)
         .wrap()
         .vertical_spacing(5);
-        col.push(Space::new().height(4)).push(quick).push(container(text(self.hint.unwrap_or(HELP)).size(12).color(theme::p().muted)).padding([2, 2])).into()
+        col.push(Space::new().height(4)).push(quick).push(container(text(tr(self.hint.unwrap_or(HELP))).size(12).color(theme::p().muted)).padding([2, 2])).into()
     }
 
     /// One object of the algebra view: its dot, its value with how it came about under it (or
@@ -1242,7 +1265,7 @@ impl Editor {
         let deps = self.names_of(&self.plot.dependents(&o.id));
         // Only the selected row can be deleted (fewer ×); the others keep its room.
         let x: Element<'_, Msg> = if selected {
-            let tip = if deps.is_empty() { "Löschen".to_string() } else { format!("Löschen, mit {}", and_list(&deps)) };
+            let tip = if deps.is_empty() { tr("Löschen").to_string() } else { trf("Löschen, mit {}", &[&and_list(&deps)]) };
             tooltip(button(text("×").size(16)).padding([2, 9]).on_press(Msg::AskRemove(id.clone())).style(theme::ghost), container(text(tip).size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Left).gap(4).into()
         } else {
             Space::new().into()
@@ -1262,9 +1285,9 @@ impl Editor {
         }
         if self.confirm.as_deref() == Some(o.id.as_str()) {
             let ask = row![
-                text(format!("Mit {} {} auch {}.", o.name(), if deps.len() == 1 { "geht" } else { "gehen" }, and_list(&deps))).size(12.5).width(Length::Fill),
-                button(theme::btn_small("Alle löschen")).padding([3, 9]).on_press(Msg::Remove(id.clone())).style(theme::secondary),
-                button(theme::btn_small("Behalten")).padding([3, 9]).on_press(Msg::KeepIt).style(theme::ghost),
+                text(if deps.len() == 1 { trf("Mit {} geht auch {}.", &[&o.name(), &and_list(&deps)]) } else { trf("Mit {} gehen auch {}.", &[&o.name(), &and_list(&deps)]) }).size(12.5).width(Length::Fill),
+                button(theme::btn_small(tr("Alle löschen"))).padding([3, 9]).on_press(Msg::Remove(id.clone())).style(theme::secondary),
+                button(theme::btn_small(tr("Behalten"))).padding([3, 9]).on_press(Msg::KeepIt).style(theme::ghost),
             ]
             .spacing(8)
             .align_y(Alignment::Center);
@@ -1277,7 +1300,7 @@ impl Editor {
     fn properties(&self, vals: &[Result<Val, String>]) -> Element<'_, Msg> {
         let muted = |s: &str| text(s.to_string()).size(12.5).color(theme::p().muted);
         let Some(i) = self.selected_index() else {
-            return muted("Klicke links auf ein Objekt (oder in der Vorschau): hier stehen dann seine Farbe, Linie, Beschriftung …").into();
+            return muted(tr("Klicke links auf ein Objekt (oder in der Vorschau): hier stehen dann seine Farbe, Linie, Beschriftung …")).into();
         };
         let o = &self.plot.objs[i];
         let s = &o.style;
@@ -1291,56 +1314,56 @@ impl Editor {
                 .align_y(Alignment::Center)
         ]
         .spacing(16);
-        col = col.push(section("Farbe", swatches(s.color)));
+        col = col.push(section(tr("Farbe"), swatches(s.color)));
         if has_line(kind) {
             let w = if s.width > 0.0 { s.width } else { self.plot.width };
             let styles = row![line_style(LineStyle::Solid, s.line, s.color), line_style(LineStyle::Dashed, s.line, s.color), line_style(LineStyle::Dotted, s.line, s.color)].spacing(4);
             let width = row![slider(0.3..=6.0, w.clamp(0.3, 6.0), Msg::Width).step(0.1f32).style(theme::slider_style), value(plot::fmt_num(w as f64))].spacing(10).align_y(Alignment::Center);
-            col = col.push(section("Linie", column![styles, width].spacing(8).into()));
+            col = col.push(section(tr("Linie"), column![styles, width].spacing(8).into()));
         }
         if matches!(kind, Some(Kind::Point | Kind::Points)) {
             let size = if s.size > 0.0 { s.size } else { point_size(&self.plot) };
             let styles = row![point_style(PointStyle::Dot, s.point, s.color), point_style(PointStyle::Cross, s.point, s.color), point_style(PointStyle::Ring, s.point, s.color)].spacing(4);
             let size = row![slider(1.0..=8.0, size.clamp(1.0, 8.0), Msg::Size).step(0.1f32).style(theme::slider_style), value(plot::fmt_num(size as f64))].spacing(10).align_y(Alignment::Center);
-            col = col.push(section("Punkt", column![styles, size].spacing(8).into()));
+            col = col.push(section(tr("Punkt"), column![styles, size].spacing(8).into()));
         }
         if has_fill(kind) {
             let fill = row![slider(0.0..=1.0, s.fill.clamp(0.0, 1.0), Msg::Fill).step(0.05f32).style(theme::slider_style), value(format!("{} %", (s.fill * 100.0).round()))].spacing(10).align_y(Alignment::Center);
-            col = col.push(section("Füllung", fill.into()));
+            col = col.push(section(tr("Füllung"), fill.into()));
         }
-        let labels = Row::with_children(LABELS.iter().map(|&(mode, label)| button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Label(mode)).style(theme::option(s.label == mode)).into())).spacing(5).wrap().vertical_spacing(5);
+        let labels = Row::with_children(label_modes().iter().map(|&(mode, label)| button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Label(mode)).style(theme::option(s.label == mode)).into())).spacing(5).wrap().vertical_spacing(5);
         let mut label = column![labels].spacing(8);
         if s.label == LabelMode::Caption {
-            label = label.push(text_input("Text der Beschriftung", &s.caption).on_input(Msg::Caption).padding(7).size(13).style(theme::field));
+            label = label.push(text_input(tr("Text der Beschriftung"), &s.caption).on_input(Msg::Caption).padding(7).size(13).style(theme::field));
         }
-        col = col.push(section("Beschriftung", label.into()));
+        col = col.push(section(tr("Beschriftung"), label.into()));
         if kind == Some(Kind::Function) {
             let mut marks = column![].spacing(8);
-            for &(bit, label) in &MARKS {
+            for (bit, label) in mark_names() {
                 marks = marks.push(toggler(s.special & bit != 0).label(label).on_toggle(move |on| Msg::Special(bit, on)).size(16).text_size(13).spacing(8).style(theme::switch));
             }
-            marks = marks.push(switch(s.coords, "Koordinaten dazu", Msg::Coords));
-            col = col.push(section("Markieren", marks.into()));
+            marks = marks.push(switch(s.coords, tr("Koordinaten dazu"), Msg::Coords));
+            col = col.push(section(tr("Markieren"), marks.into()));
         }
         if s.slider.is_some() {
             let field = |k: usize, label: &'static str| {
                 column![theme::caption(label), text_input("", &self.slider_fields[k].text).on_input(move |t| Msg::SliderField(k, t)).font(theme::MONO).padding(6).size(13).width(Length::Fixed(74.0)).style(theme::field)].spacing(4)
             };
-            let mut range = column![row![field(0, "von"), field(1, "bis"), field(2, "Schritt")].spacing(10)].spacing(6);
+            let mut range = column![row![field(0, tr("von")), field(1, tr("bis")), field(2, tr("Schritt"))].spacing(10)].spacing(6);
             if let Some(e) = self.slider_error() {
                 range = range.push(text(e).size(12.5).color(theme::p().accent));
             }
-            range = range.push(switch(true, "Als Schieberegler", Msg::MakeSlider));
-            col = col.push(section("Schieberegler", range.into()));
+            range = range.push(switch(true, tr("Als Schieberegler"), Msg::MakeSlider));
+            col = col.push(section(tr("Schieberegler"), range.into()));
         } else if kind == Some(Kind::Number) && plain_number(o) {
-            col = col.push(switch(false, "Als Schieberegler", Msg::MakeSlider));
+            col = col.push(switch(false, tr("Als Schieberegler"), Msg::MakeSlider));
         }
-        let mut last = column![switch(s.visible, "Sichtbar", Msg::Shown)].spacing(8);
+        let mut last = column![switch(s.visible, tr("Sichtbar"), Msg::Shown)].spacing(8);
         // Only what drags can be held in place.
         if movable(&self.plot, i) || s.fixed {
-            last = last.push(switch(s.fixed, "Fixiert (lässt sich nicht ziehen)", Msg::Fixed));
+            last = last.push(switch(s.fixed, tr("Fixiert (lässt sich nicht ziehen)"), Msg::Fixed));
         }
-        col.push(last.push(switch(s.aux, "Hilfsobjekt", Msg::Aux))).into()
+        col.push(last.push(switch(s.aux, tr("Hilfsobjekt"), Msg::Aux))).into()
     }
 
     /// The coordinate system: ranges, axes, grid, Punktfang, the look.
@@ -1351,9 +1374,9 @@ impl Editor {
         let axis_row = |axis: usize| {
             row![
                 text(if axis == 0 { "x" } else { "y" }).font(theme::MONO_BOLD).size(14).color(theme::p().text).width(Length::Fixed(16.0)),
-                theme::caption("von"),
+                theme::caption(tr("von")),
                 num(axis * 2),
-                theme::caption("bis"),
+                theme::caption(tr("bis")),
                 num(axis * 2 + 1),
             ]
             .spacing(7)
@@ -1363,8 +1386,8 @@ impl Editor {
         let mut range = column![
             axis_row(0),
             axis_row(1),
-            row![small("y passend", self.plot.fit_y().is_some().then_some(Msg::FitY)), small("Gleiche Einheiten", Some(Msg::EqualUnits))].spacing(8),
-            switch(self.plot.pi, "x in π", Msg::Pi),
+            row![small(tr("y passend"), self.plot.fit_y().is_some().then_some(Msg::FitY)), small(tr("Gleiche Einheiten"), Some(Msg::EqualUnits))].spacing(8),
+            switch(self.plot.pi, tr("x in π"), Msg::Pi),
         ]
         .spacing(8);
         for axis in 0..2 {
@@ -1374,18 +1397,18 @@ impl Editor {
         }
         // Back to the ranges the panel opened with: next to the heading, once they changed.
         let reset: Element<'_, Msg> = if self.view_changed() {
-            button(theme::btn_small("Ansicht zurücksetzen")).padding([2, 8]).on_press(Msg::ResetView).style(theme::ghost).into()
+            button(theme::btn_small(tr("Ansicht zurücksetzen"))).padding([2, 8]).on_press(Msg::ResetView).style(theme::ghost).into()
         } else {
             Space::new().into()
         };
-        let heading = row![theme::caption("Bereich"), Space::new().width(Length::Fill), reset].align_y(Alignment::Center).height(Length::Fixed(20.0));
+        let heading = row![theme::caption(tr("Bereich")), Space::new().width(Length::Fill), reset].align_y(Alignment::Center).height(Length::Fixed(20.0));
         let name = |value: &str, hint: &'static str, f: fn(String) -> Msg| text_input(hint, value).on_input(f).font(theme::MONO).padding(6).size(13).width(Length::Fixed(82.0)).style(theme::field);
         // What only matters with the axes (their names) or the grid (the finer one) shows with them.
-        let mut axes = column![switch(self.plot.axes, "Achsen", Msg::Axes)].spacing(8);
+        let mut axes = column![switch(self.plot.axes, tr("Achsen"), Msg::Axes)].spacing(8);
         if self.plot.axes {
             axes = axes.push(
                 row![
-                    theme::caption("Namen"),
+                    theme::caption(tr("Namen")),
                     Space::new().width(4),
                     text("x").font(theme::MONO_BOLD).size(14).color(theme::p().text),
                     name(&self.plot.x_name, "x", Msg::XName),
@@ -1396,18 +1419,18 @@ impl Editor {
                 .align_y(Alignment::Center),
             );
         }
-        let mut grid = column![switch(self.plot.grid, "Raster", Msg::Grid)].spacing(8);
+        let mut grid = column![switch(self.plot.grid, tr("Raster"), Msg::Grid)].spacing(8);
         if self.plot.grid {
-            grid = grid.push(switch(self.plot.minor, "Feines Raster dazwischen", Msg::Minor));
+            grid = grid.push(switch(self.plot.minor, tr("Feines Raster dazwischen"), Msg::Minor));
         }
-        let snap = Row::with_children([(Snap::Auto, "automatisch"), (Snap::Grid, "am Raster"), (Snap::Off, "aus")].map(|(s, label)| button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Snap(s)).style(theme::option(self.plot.snap == s)).into())).spacing(5);
-        let page = column![switch(self.plot.clean, "Wie mit dem Lineal gezeichnet", Msg::Clean), switch(self.plot.interactive, "Punkte und Schieberegler ziehen", Msg::Interactive)].spacing(8);
+        let snap = Row::with_children([(Snap::Auto, tr("automatisch")), (Snap::Grid, tr("am Raster")), (Snap::Off, tr("aus"))].map(|(s, label)| button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::Snap(s)).style(theme::option(self.plot.snap == s)).into())).spacing(5);
+        let page = column![switch(self.plot.clean, tr("Wie mit dem Lineal gezeichnet"), Msg::Clean), switch(self.plot.interactive, tr("Punkte und Schieberegler ziehen"), Msg::Interactive)].spacing(8);
         column![
             column![heading, range].spacing(7),
-            section("Achsen", axes.into()),
-            section("Raster", grid.into()),
-            section("Punktfang", snap.into()),
-            section("Auf der Seite", page.into()),
+            section(tr("Achsen"), axes.into()),
+            section(tr("Raster"), grid.into()),
+            section(tr("Punktfang"), snap.into()),
+            section(tr("Auf der Seite"), page.into()),
         ]
         .spacing(16)
         .into()
@@ -1454,7 +1477,7 @@ fn suggestion_list<'a>(list: &[Suggestion]) -> Element<'a, Msg> {
     let width = list.iter().map(|s| s.usage().chars().count()).max().unwrap_or(0) as f32 * 13.5 * 0.61 + 4.0;
     let rows = list.iter().enumerate().map(|(k, s)| {
         let usage = row![text(s.name).font(theme::MONO_BOLD).size(13.5).color(theme::p().text), text(format!("({})", s.args)).font(theme::MONO).size(13.5).color(theme::p().muted)].width(Length::Fixed(width));
-        let mut line = row![usage, Space::new().width(14), text(s.about).size(12.5).color(theme::p().muted).width(Length::Fill)].align_y(Alignment::Center);
+        let mut line = row![usage, Space::new().width(14), text(tr(s.about)).size(12.5).color(theme::p().muted).width(Length::Fill)].align_y(Alignment::Center);
         if k == 0 {
             // The key that takes it, as a key cap.
             let cap = |_: &Theme| container::Style { text_color: Some(theme::p().muted), border: Border { radius: 4.0.into(), width: 1.0, color: theme::p().border }, ..Default::default() };
@@ -1484,7 +1507,7 @@ fn dot<'a>(o: &Obj) -> Element<'a, Msg> {
         ..Default::default()
     });
     let b = button(paper).padding(4).on_press(Msg::Visible(o.id.clone())).style(theme::ghost);
-    let tip = if shown { "Ausblenden" } else { "Zeigen" };
+    let tip = if shown { tr("Ausblenden") } else { tr("Zeigen") };
     container(tooltip(b, container(text(tip).size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Top).gap(4)).id(dot_id(&o.id)).into()
 }
 
@@ -1523,9 +1546,9 @@ fn swatches<'a>(current: u32) -> Element<'a, Msg> {
 /// its name over it.
 fn line_style<'a>(style: LineStyle, current: LineStyle, ink: u32) -> Element<'a, Msg> {
     let (glyph, tip) = match style {
-        LineStyle::Solid => (SOLID, "durchgezogen"),
-        LineStyle::Dashed => (DASHED, "gestrichelt"),
-        LineStyle::Dotted => (DOTTED, "gepunktet"),
+        LineStyle::Solid => (SOLID, tr("durchgezogen")),
+        LineStyle::Dashed => (DASHED, tr("gestrichelt")),
+        LineStyle::Dotted => (DOTTED, tr("gepunktet")),
     };
     pick(glyph, tip, style == current, ink, Msg::Line(style))
 }
@@ -1533,9 +1556,9 @@ fn line_style<'a>(style: LineStyle, current: LineStyle, ink: u32) -> Element<'a,
 /// One of the point styles to pick.
 fn point_style<'a>(style: PointStyle, current: PointStyle, ink: u32) -> Element<'a, Msg> {
     let (glyph, tip) = match style {
-        PointStyle::Dot => (DOT, "Punkt"),
-        PointStyle::Cross => (CROSS, "Kreuz"),
-        PointStyle::Ring => (RING, "Kreis"),
+        PointStyle::Dot => (DOT, tr("Punkt")),
+        PointStyle::Cross => (CROSS, tr("Kreuz")),
+        PointStyle::Ring => (RING, tr("Kreis")),
     };
     pick(glyph, tip, style == current, ink, Msg::Point(style))
 }
