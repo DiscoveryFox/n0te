@@ -63,29 +63,47 @@ pub struct Pdf {
 
 static READY: OnceLock<Mutex<Option<mpsc::UnboundedReceiver<()>>>> = OnceLock::new();
 
+/// pdfium's file name on this system.
+const PDFIUM: &str = if cfg!(windows) { "pdfium.dll" } else { "libpdfium.so" };
+
 /// Where pdfium is: `N0TE_PDFIUM_LIB`, next to the installed app, or the repo's copy.
+/// Windows: `pdfium.dll` next to the program (the installer puts it there), else
+/// `N0TE_PDFIUM_LIB`.
 pub fn find_pdfium() -> Option<PathBuf> {
     let mut c: Vec<PathBuf> = Vec::new();
-    if let Some(p) = std::env::var_os("N0TE_PDFIUM_LIB") {
-        c.push(p.into());
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
+    let exe_dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf));
+    #[cfg(windows)]
     {
-        c.push(dir.join("../lib/n0te/libpdfium.so"));
+        if let Some(dir) = &exe_dir {
+            c.push(dir.join(PDFIUM));
+        }
+        if let Some(p) = std::env::var_os("N0TE_PDFIUM_LIB") {
+            c.push(p.into());
+        }
     }
-    if let Some(h) = std::env::var_os("HOME") {
-        c.push(PathBuf::from(h).join(".local/lib/n0te/libpdfium.so"));
+    #[cfg(not(windows))]
+    {
+        if let Some(p) = std::env::var_os("N0TE_PDFIUM_LIB") {
+            c.push(p.into());
+        }
+        if let Some(dir) = &exe_dir {
+            c.push(dir.join("../lib/n0te/libpdfium.so"));
+        }
+        if let Some(h) = std::env::var_os("HOME") {
+            c.push(PathBuf::from(h).join(".local/lib/n0te/libpdfium.so"));
+        }
+        c.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/pdfium/linux-x64/lib/libpdfium.so"));
     }
-    c.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/pdfium/linux-x64/lib/libpdfium.so"));
     c.into_iter().find(|p| p.is_file())
 }
 
 impl Pdf {
     /// Loads pdfium and starts the worker; documents are the library's blobs.
     pub fn start(library_root: &Path) -> Result<Arc<Pdf>, String> {
-        let lib_path = find_pdfium().ok_or("libpdfium.so nicht gefunden")?;
-        let engine = PdfEngine::load_with_font_dirs(&lib_path, &["/usr/share/fonts"]).map_err(|e| e.to_string())?;
+        let lib_path = find_pdfium().ok_or(format!("{PDFIUM} nicht gefunden"))?;
+        // Fonts a PDF doesn't embed: pdfium on Windows asks the system itself.
+        let font_dirs: &[&str] = if cfg!(windows) { &[] } else { &["/usr/share/fonts"] };
+        let engine = PdfEngine::load_with_font_dirs(&lib_path, font_dirs).map_err(|e| e.to_string())?;
         let lib = Library::open(library_root).map_err(|e| e.to_string())?;
         let tiles = Arc::new(Mutex::new(Tiles::default()));
         let (tx, rx) = mpsc::unbounded();
@@ -246,10 +264,18 @@ fn depth(r: &OutlineRow) -> u32 {
 
 /// Recent PDFs in Downloads and Documents (newest first), for the import list.
 pub fn recent_pdfs() -> Vec<(PathBuf, std::time::SystemTime)> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    use n0te_platform::paths;
+    #[cfg(not(windows))]
+    let dirs: Vec<PathBuf> = {
+        let home = paths::home().unwrap_or_default();
+        ["Downloads", "Downloads/n0bridge", "Documents", "Dokumente", "Desktop"].iter().map(|d| home.join(d)).collect()
+    };
+    // Windows: the known folders (Documents and Desktop often live in OneDrive).
+    #[cfg(windows)]
+    let dirs: Vec<PathBuf> = [paths::downloads(), paths::documents(), paths::desktop()].into_iter().flatten().collect();
     let mut out = Vec::new();
-    for dir in ["Downloads", "Downloads/n0bridge", "Documents", "Dokumente", "Desktop"] {
-        let Ok(rd) = std::fs::read_dir(home.join(dir)) else { continue };
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else { continue };
         for e in rd.flatten() {
             let p = e.path();
             if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf"))

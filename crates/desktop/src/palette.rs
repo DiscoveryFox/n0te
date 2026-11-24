@@ -77,7 +77,9 @@ pub fn items(app: &App) -> Vec<Item> {
             v.push(item("Seite drehen", "Strg R · hoch ↔ quer", Command::RotatePage));
             v.push(item("Papier und Format der Seite", "A4, A5, eigene Größe · oder oben auf die Seitenzahl", Command::PageSetup));
             v.push(item("PDF exportieren", "Strg E", Command::Export));
-            v.push(item("An das Tablet senden", "über n0bridge (.n0te)", Command::SendToTablet));
+            if crate::app::n0bridge_installed() {
+                v.push(item("An das Tablet senden", "über n0bridge (.n0te)", Command::SendToTablet));
+            }
             v.push(item("Live mit dem Tablet", "es öffnet das Notizbuch, Folgen, Laserpointer", Command::Live));
             v.push(item("Teilen / Gäste einladen", "nur lesen oder lesen & schreiben", Command::Share));
             v.push(item("Verlauf: früheren Stand wiederherstellen", "Strg H", Command::History));

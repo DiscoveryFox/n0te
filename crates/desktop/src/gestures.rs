@@ -49,6 +49,8 @@ fn logging() -> bool {
     *ON.get_or_init(|| std::env::var_os("N0TE_GESTURE_LOG").is_some())
 }
 
+/// A gesture to the app (only the Wayland listener sends any).
+#[cfg(target_os = "linux")]
 fn send(g: Gesture) {
     if logging() {
         eprintln!("n0te gesture: {g:?}");

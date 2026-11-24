@@ -1,20 +1,52 @@
-//! The connection to the n0te-sync service ($XDG_RUNTIME_DIR/n0te-sync.sock): a long-lived
-//! "session" for live events (other devices' changes, presence, live strokes, open/follow
-//! requests) and live commands, plus one-shot requests (devices, pairing, invites).
+//! The connection to the n0te-sync service (`$XDG_RUNTIME_DIR/n0te-sync.sock`; Windows: the
+//! user's named pipe, see `n0te_platform::ipc`): a long-lived "session" for live events
+//! (other devices' changes, presence, live strokes, open/follow requests) and live commands,
+//! plus one-shot requests (devices, pairing, invites). Linux: systemd's user unit runs the
+//! service; Windows: the apps start it themselves when it isn't running.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use iced::Subscription;
 use iced::futures::StreamExt;
 use iced::futures::channel::mpsc;
 use iced::futures::stream::{self, BoxStream};
+use n0te_platform::ipc::{Endpoint, Stream};
 use serde_json::Value;
 
-pub fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("n0te-sync.sock")
+/// A connection to the service (fails at once when it isn't running).
+fn connect() -> std::io::Result<Stream> {
+    Stream::connect(&Endpoint::service())
+}
+
+/// What to tell people when the sync service isn't running.
+pub fn service_hint() -> &'static str {
+    if cfg!(windows) {
+        "Der Sync-Dienst läuft nicht. n0te startet ihn gleich selbst (n0te-sync.exe im Programmordner)."
+    } else {
+        "Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync"
+    }
+}
+
+/// Windows: starts the sync service (`n0te-sync.exe run` next to this program, windowless and
+/// detached), at most every 30 s; the next [`Session::connect`] finds it. A second one started
+/// meanwhile by the other app just ends (one service per library). Elsewhere nothing: systemd
+/// runs it.
+fn start_service() {
+    #[cfg(windows)]
+    {
+        use std::time::{Duration, Instant};
+        static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+        let Ok(mut last) = LAST.lock() else { return };
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(30)) {
+            return;
+        }
+        *last = Some(Instant::now());
+        let Some(exe) = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.join("n0te-sync.exe"))) else { return };
+        if exe.is_file() {
+            let _ = n0te_platform::spawn_detached(&exe, &["run"]);
+        }
+    }
 }
 
 /// What the service reports.
@@ -129,13 +161,16 @@ pub fn subscription() -> Subscription<LiveEvent> {
 
 /// An open session with the service.
 pub struct Session {
-    out: Mutex<UnixStream>,
+    out: Mutex<Stream>,
 }
 
 impl Session {
-    /// Connects (None when the service isn't running).
+    /// Connects (None when the service isn't running; on Windows it gets started then).
     pub fn connect() -> Option<Session> {
-        let mut s = UnixStream::connect(socket_path()).ok()?;
+        let Ok(mut s) = connect() else {
+            start_service();
+            return None;
+        };
         writeln!(s, "[\"session\"]").ok()?;
         let read = s.try_clone().ok()?;
         let tx = channel().0.clone();
@@ -160,7 +195,7 @@ impl Session {
 
 /// A one-shot command to the service; its text output or the error.
 pub fn request(args: &[&str]) -> Result<String, String> {
-    let mut s = UnixStream::connect(socket_path()).map_err(|_| "Sync-Dienst läuft nicht".to_string())?;
+    let mut s = connect().map_err(|_| "Sync-Dienst läuft nicht".to_string())?;
     writeln!(s, "{}", serde_json::to_string(args).unwrap_or_default()).map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;

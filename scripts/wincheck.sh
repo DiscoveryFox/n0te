@@ -30,5 +30,5 @@ fi
 export CARGO_TARGET_DIR="$here/target/wincheck"
 cd "$here"
 args=("$@")
-[[ ${#args[@]} -eq 0 ]] && args=(-p n0te-core -p n0te-pdf -p n0te-sync -p n0te-desktop)
+[[ ${#args[@]} -eq 0 ]] && args=(-p n0te-core -p n0te-pdf -p n0te-platform -p n0te-sync -p n0te-desktop)
 exec "${CARGO:-$HOME/.cargo/bin/cargo}" check --target "$target" "${args[@]}"

@@ -3798,6 +3798,7 @@ dependencies = [
  "iced_test",
  "n0te-core",
  "n0te-pdf",
+ "n0te-platform",
  "png 0.18.1",
  "raw-window-handle",
  "serde_json",
