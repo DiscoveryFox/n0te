@@ -26,6 +26,10 @@ raw-window-handle = "0.6"
 # n0te Tablet's pen on Windows: WM_POINTER through a window subclass (tablet/pen.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_TabletPC", "Win32_UI_WindowsAndMessaging"] }
+# Handwriting search: the system's ink recognizer (tablet/recognize.rs).
+windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Foundation_Numerics", "UI_Input_Inking"] }
+windows-collections = "0.3"
+windows-numerics = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31"

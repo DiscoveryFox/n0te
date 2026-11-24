@@ -3787,6 +3787,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "loro",
+ "sha1_smol",
  "thiserror 2.0.21",
 ]
 
@@ -3804,6 +3805,10 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+ "windows 0.62.2",
+ "windows-collections",
+ "windows-numerics",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

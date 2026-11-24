@@ -185,6 +185,8 @@ pub enum Message {
     Pen(crate::tablet::pen::PenEvent),
     Tablet(crate::tablet::Msg),
     PenAttached(bool),
+    /// The part of the one-second tick both programs share.
+    TickRest,
     WaylandDisplay(Option<usize>),
     Gesture(Gesture),
     Glide(Instant),
@@ -1182,6 +1184,14 @@ impl App {
             }
             Message::DoneText => self.finish_text(),
             Message::Tick => {
+                if crate::mode() == crate::Mode::Tablet {
+                    let t = self.tablet_tick();
+                    let rest = self.handle(Message::TickRest);
+                    return Task::batch([t, rest]);
+                }
+                return self.handle(Message::TickRest);
+            }
+            Message::TickRest => {
                 if self.editing.as_ref().is_some_and(|e| e.dirty && e.last_change.elapsed().as_millis() > 800) {
                     self.save_text(false);
                 }

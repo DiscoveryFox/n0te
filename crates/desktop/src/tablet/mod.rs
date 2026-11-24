@@ -12,6 +12,7 @@
 
 pub mod overlay;
 pub mod pen;
+pub mod recognize;
 pub mod toolbar;
 
 use std::collections::HashMap;
@@ -70,6 +71,8 @@ pub enum Msg {
     Cut,
     /// Paste what was copied in the middle of the view.
     Paste,
+    /// Handwriting of a sheet was read (notebook, sheet, lines, keys to drop).
+    Indexed(String, String, Vec<n0te_core::sheet::IndexLine>, Vec<String>),
 }
 
 /// A stroke being written.
@@ -165,6 +168,9 @@ pub struct Tablet {
     down: Option<(Point, u32, u32)>,
     /// Copied strokes, relative to their top-left corner.
     clip: Vec<(Brush, Vec<InkPoint>)>,
+    /// Sheets whose handwriting is to be read (since when), and whether a read runs.
+    index_due: HashMap<(String, String), std::time::Instant>,
+    indexing: bool,
     /// Sheets kept open so their undo history lives on: (notebook, sheet) → sheet.
     sheets: HashMap<(String, String), Sheet>,
     /// Our edits, oldest first (undo goes back through them across pages); and what was undone.
@@ -196,6 +202,8 @@ impl Default for Tablet {
             moving: None,
             down: None,
             clip: Vec::new(),
+            index_due: HashMap::new(),
+            indexing: false,
             sheets: HashMap::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -407,6 +415,15 @@ impl App {
                 self.say(format!("{} Striche kopiert", self.tablet.clip.len()));
             }
             Msg::Paste => self.paste_strokes(),
+            Msg::Indexed(nb, sheet, put, drop) => {
+                self.tablet.indexing = false;
+                if (!put.is_empty() || !drop.is_empty())
+                    && let Some(s) = self.tablet_sheet(&nb, &sheet)
+                    && s.set_index(&put, &drop).is_ok()
+                {
+                    self.store_kept(&nb, &sheet);
+                }
+            }
         }
         Task::none()
     }
@@ -816,6 +833,33 @@ impl App {
         self.store_kept(nb, sheet);
         self.tablet.undo.push((nb.to_string(), sheet.to_string()));
         self.tablet.redo.clear();
+        self.tablet.index_due.insert((nb.to_string(), sheet.to_string()), std::time::Instant::now());
+    }
+
+    /// Every second: reads the handwriting of a sheet left alone for a moment (one at a time,
+    /// on a worker thread). Nothing happens where the system has no handwriting recognizer.
+    pub(crate) fn tablet_tick(&mut self) -> Task<Message> {
+        if self.tablet.indexing || self.tablet.busy() || self.tablet.index_due.is_empty() {
+            return Task::none();
+        }
+        static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*AVAILABLE.get_or_init(recognize::available) {
+            self.tablet.index_due.clear();
+            return Task::none();
+        }
+        let Some(k) = self.tablet.index_due.iter().filter(|(_, t)| t.elapsed().as_millis() > 1500).map(|(k, _)| k.clone()).next() else { return Task::none() };
+        self.tablet.index_due.remove(&k);
+        let (nb, sheet) = k;
+        let Some(input) = self.tablet_sheet(&nb, &sheet).and_then(recognize::prepare) else { return Task::none() };
+        self.tablet.indexing = true;
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(recognize::read(input));
+        });
+        Task::perform(rx, move |r| {
+            let (put, drop) = r.unwrap_or_default();
+            Message::Tablet(Msg::Indexed(nb.clone(), sheet.clone(), put, drop))
+        })
     }
 
     /// Stores a kept-open sheet (it syncs from there) and redraws the panes showing it.

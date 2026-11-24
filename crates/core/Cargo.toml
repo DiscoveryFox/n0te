@@ -9,5 +9,7 @@ publish.workspace = true
 loro.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
+# Handwriting line keys, the same as the Android app's (inklines::key).
+sha1_smol = "1"
 
 [dev-dependencies]
