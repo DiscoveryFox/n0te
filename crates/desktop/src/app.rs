@@ -106,6 +106,9 @@ pub enum Message {
     FollowThem(bool),
     TheyFollow(bool),
     PairStart,
+    /// The pair code typed or pasted (from another device's "koppeln"), and using it.
+    PairEnter(String),
+    PairAccept,
     PairToTablet,
     PairSent(Result<String, String>),
     ShowShare(bool),
@@ -377,6 +380,8 @@ pub struct App {
     /// When where this laptop looks was last sent, per notebook.
     presence_at: HashMap<String, Instant>,
     pub pair_code: Option<String>,
+    /// A pair code from another device, being typed / pasted.
+    pub pair_enter: String,
     /// Share panel open, with the invites of the open notebook.
     pub share: Option<Vec<live::Invite>>,
     /// The newest invite link as a QR code (the view borrows it).
@@ -504,6 +509,7 @@ impl App {
             invite_open: None,
             presence_at: HashMap::new(),
             pair_code: None,
+            pair_enter: String::new(),
             share: None,
             share_qr: None,
             pair_qr: None,
@@ -1297,6 +1303,22 @@ impl App {
                 }
                 Err(e) => self.say(format!("Koppeln: {e}")),
             },
+            Message::PairEnter(t) => self.pair_enter = t,
+            Message::PairAccept => {
+                let code = self.pair_enter.trim().to_string();
+                if code.is_empty() {
+                    return Task::none();
+                }
+                match live::request(&["accept", &code]) {
+                    Ok(name) => {
+                        self.pair_enter.clear();
+                        // The service says "Gekoppelt mit <name> (<id>)".
+                        self.say(if name.trim().is_empty() { "Gekoppelt".to_string() } else { name.trim().to_string() });
+                        self.devices = live::devices();
+                    }
+                    Err(e) => self.say(format!("Koppeln: {e}")),
+                }
+            }
             Message::PairToTablet => {
                 let Some(code) = self.pair_code.clone().filter(|_| n0bridge_installed()) else { return Task::none() };
                 return Task::perform(
@@ -3476,8 +3498,19 @@ impl App {
                 .align_y(Alignment::Center),
             );
         }
+        // The other way round: a code (or n0te-pair: link) another device shows, typed or pasted
+        // here — n0te Tablet on Windows pairs with a laptop like this (no camera needed).
+        col = col.push(
+            row![
+                text_input("Code eines anderen Geräts einfügen (n0te-pair:…)", &self.pair_enter).on_input(Message::PairEnter).on_submit(Message::PairAccept).padding(8).size(13).style(theme::field),
+                button(theme::btn_small("Koppeln")).padding(theme::pad()).on_press_maybe((!self.pair_enter.trim().is_empty()).then_some(Message::PairAccept)).style(theme::secondary),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        );
+        let pair_label = if crate::mode() == crate::Mode::Tablet { "Gerät koppeln (Code zeigen)" } else { "Tablet koppeln" };
         match &self.pair_code {
-            None => col = col.push(button(theme::btn("Tablet koppeln")).padding(theme::pad()).on_press(Message::PairStart).style(theme::secondary)),
+            None => col = col.push(button(theme::btn(pair_label)).padding(theme::pad()).on_press(Message::PairStart).style(theme::secondary)),
             Some(code) => {
                 // The QR code: the tablet scans it (n0te → Einstellungen → Laptop → QR scannen).
                 if let Some(data) = &self.pair_qr {
