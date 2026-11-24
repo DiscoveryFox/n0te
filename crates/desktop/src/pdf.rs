@@ -72,12 +72,20 @@ pub fn find_pdfium() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
+        // Windows: pdfium.dll sits next to the exes (installer and portable zip).
+        if cfg!(windows) {
+            c.push(dir.join("pdfium.dll"));
+        }
         c.push(dir.join("../lib/n0te/libpdfium.so"));
     }
     if let Some(h) = std::env::var_os("HOME") {
         c.push(PathBuf::from(h).join(".local/lib/n0te/libpdfium.so"));
     }
-    c.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/pdfium/linux-x64/lib/libpdfium.so"));
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/pdfium");
+    if cfg!(windows) {
+        c.push(repo.join(if cfg!(target_arch = "aarch64") { "win-arm64" } else { "win-x64" }).join("bin/pdfium.dll"));
+    }
+    c.push(repo.join("linux-x64/lib/libpdfium.so"));
     c.into_iter().find(|p| p.is_file())
 }
 
