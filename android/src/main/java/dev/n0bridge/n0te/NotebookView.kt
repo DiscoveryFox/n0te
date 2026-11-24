@@ -1030,6 +1030,8 @@ class NotebookView(context: Context) : View(context) {
         val sel = selection!!
         for (part in sel.parts) model?.state(part.sheetId)?.let { it.floating = emptySet(); it.invalidateNode() }
         selection = null
+        for (e in selInk.values) e.node.discardDisplayList()
+        selInk.clear()
         listener?.onSelectionChanged(null)
         invalidate()
     }
@@ -1541,9 +1543,46 @@ class NotebookView(context: Context) : View(context) {
     // Drawing
     // ========================================================================================
 
+    /**
+     * While a selection is carried (nothing else on the screen moves): everything but it as one
+     * picture at screen resolution, recorded as the drag starts, so a frame is that picture and
+     * the selection's own (see [SelInk]) however much ink lies around.
+     */
+    private var still: RenderNode? = null
+    private var stillAt = FloatArray(0)
+    private var recordingStill = false
+
+    /** Draws a frame of a selection being carried from [still]; false when this frame is drawn as usual. */
+    private fun drawCarried(c: Canvas, m: NotebookModel): Boolean {
+        if (action != Action.MOVE_SEL || board != null || !c.isHardwareAccelerated || recordingStill) {
+            if (!recordingStill) still?.takeIf { it.hasDisplayList() }?.discardDisplayList()
+            return false
+        }
+        val n = still ?: RenderNode("carried").also { still = it }
+        val at = floatArrayOf(tx, ty, scale, width.toFloat(), height.toFloat())
+        if (!n.hasDisplayList() || !at.contentEquals(stillAt)) {
+            n.setPosition(0, 0, width, height)
+            n.setUseCompositingLayer(true, null)
+            val rc = n.beginRecording(width, height)
+            recordingStill = true
+            try { onDraw(rc) } finally { recordingStill = false }
+            n.endRecording()
+            stillAt = at
+        }
+        c.drawRenderNode(n)
+        c.save()
+        c.translate(tx, ty)
+        c.scale(scale, scale)
+        drawLassoAndSelection(c, m)
+        c.restore()
+        return true
+    }
+
     override fun onDraw(c: Canvas) {
+        val m = model
+        if (m != null && drawCarried(c, m)) return
         c.drawColor(bgColor)
-        val m = model ?: return
+        if (m == null) return
         val texel = Pencil.texelFor(scale)
         if (texel != pencilTexel || Pencil.generation != pencilGeneration) {
             // The pencil grain is baked into the recorded pages: re-record those with pencil ink.
@@ -1632,7 +1671,8 @@ class NotebookView(context: Context) : View(context) {
                 c.restore()
             }
         }
-        drawLassoAndSelection(c, m)
+        // Carried, the selection is drawn over the still picture of the rest.
+        if (!recordingStill) drawLassoAndSelection(c, m)
         drawFlash(c)
         drawPlotBox(c)
         drawTextFrames(c, m)
@@ -2215,11 +2255,7 @@ class NotebookView(context: Context) : View(context) {
             c.save()
             c.translate(p.rect.left, p.rect.top)
             c.concat(selMatrix(sel))
-            haloPaint.strokeWidth = 4.5f / scale / selScale
-            for (im in st.images) if (im.id in st.floating) drawBox(c, im)
-            for (im in st.images) if (im.id in sel.ids) c.drawRect(im.x, im.y, im.x + im.w, im.y + im.h, haloPaint)
-            for (s in st.strokes) if (s.id in sel.ids) c.drawPath(s.path, haloPaint)
-            if (st.floating.isNotEmpty()) for (s in st.strokes) if (s.id in st.floating) drawStroke(c, s)
+            drawSelectedInk(c, st, sel.ids, 4.5f / scale / selScale)
             c.restore()
         }
         selPaint.strokeWidth = 1f / scale
@@ -2262,6 +2298,59 @@ class NotebookView(context: Context) : View(context) {
 
     private val endRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFFFFF.toInt(); style = Paint.Style.FILL; setShadowLayer(3f, 0f, 1f, 0x55000000) }
 
+    /**
+     * A selection's look on one page: the red outline of what is selected and, while it moves,
+     * the strokes and pictures themselves. Recorded once (per selection, zoom and change of the
+     * page) at screen resolution into a layer of its own, which a frame then only moves, scales
+     * or turns: thousands of selected strokes cost a frame what one picture does.
+     */
+    private class SelInk(val node: RenderNode) {
+        var version = -1
+        var ids: Set<String>? = null
+        var floating: Set<String>? = null
+        var halo = 0f
+        var zoom = 0f
+        var texel = 0f
+    }
+    private val selInk = HashMap<String, SelInk>()
+
+    /** [ids] of [st] drawn as selected (canvas in page points, the selection's move applied). */
+    private fun drawSelectedInk(c: Canvas, st: SheetState, ids: Set<String>, halo: Float) {
+        if (!c.isHardwareAccelerated) { recordSelectedInk(c, st, ids, halo); return }
+        val e = selInk.getOrPut(st.id) { SelInk(RenderNode("selection-${st.id}")) }
+        // Recorded in screen pixels (a layer drawn at the page's zoom stays sharp).
+        val z = scale
+        if (!e.node.hasDisplayList() || e.version != st.version || e.ids !== ids || e.floating !== st.floating || e.halo != halo || e.zoom != z || e.texel != pencilTexel) {
+            val b = RectF()
+            for (s in st.strokes) if (s.id in ids) { if (b.isEmpty) b.set(s.bounds) else b.union(s.bounds) }
+            for (im in st.images) if (im.id in ids) { if (b.isEmpty) b.set(im.x, im.y, im.x + im.w, im.y + im.h) else b.union(im.x, im.y, im.x + im.w, im.y + im.h) }
+            b.inset(-halo - 2f, -halo - 2f)
+            val l = kotlin.math.floor(b.left * z).toInt(); val t = kotlin.math.floor(b.top * z).toInt()
+            val r = kotlin.math.ceil(b.right * z).toInt(); val bt = kotlin.math.ceil(b.bottom * z).toInt()
+            e.node.setPosition(l, t, r, bt)
+            // A layer only up to a size the GPU takes easily (else the strokes are drawn each frame).
+            e.node.setUseCompositingLayer(r - l <= SEL_LAYER_MAX && bt - t <= SEL_LAYER_MAX && (r - l).toLong() * (bt - t) <= SEL_LAYER_PIXELS, null)
+            val rc = e.node.beginRecording()
+            rc.translate(-l.toFloat(), -t.toFloat())
+            rc.scale(z, z)
+            recordSelectedInk(rc, st, ids, halo)
+            e.node.endRecording()
+            e.version = st.version; e.ids = ids; e.floating = st.floating; e.halo = halo; e.zoom = z; e.texel = pencilTexel
+        }
+        c.save()
+        c.scale(1f / z, 1f / z)
+        c.drawRenderNode(e.node)
+        c.restore()
+    }
+
+    private fun recordSelectedInk(c: Canvas, st: SheetState, ids: Set<String>, halo: Float) {
+        haloPaint.strokeWidth = halo
+        for (im in st.images) if (im.id in st.floating) drawBox(c, im)
+        for (im in st.images) if (im.id in ids) c.drawRect(im.x, im.y, im.x + im.w, im.y + im.h, haloPaint)
+        for (s in st.strokes) if (s.id in ids) c.drawPath(s.path, haloPaint)
+        if (st.floating.isNotEmpty()) for (s in st.strokes) if (s.id in st.floating) drawStroke(c, s)
+    }
+
     /** The selected parts' bounds together (world coordinates, without a running move). */
     private fun selUnion(sel: Selection): RectF {
         val u = RectF()
@@ -2276,7 +2365,6 @@ class NotebookView(context: Context) : View(context) {
     /** A selection over several pages: each part outlined (and drawn while moving), one box around all. */
     private fun drawMultiSelection(c: Canvas, m: NotebookModel, sel: Selection) {
         val u = selUnion(sel)
-        haloPaint.strokeWidth = 4.5f / scale / selScale
         for (part in sel.parts) {
             val p = placedFor(part.sheetId) ?: continue
             val st = m.sheets[part.sheetId] ?: continue
@@ -2284,10 +2372,7 @@ class NotebookView(context: Context) : View(context) {
             c.translate(p.rect.left + selDx, p.rect.top + selDy)
             // Scaled about the box's top-left, the same point for every page.
             c.scale(selScale, selScale, u.left - p.rect.left, u.top - p.rect.top)
-            for (im in st.images) if (im.id in st.floating) drawBox(c, im)
-            for (im in st.images) if (im.id in part.ids) c.drawRect(im.x, im.y, im.x + im.w, im.y + im.h, haloPaint)
-            for (s in st.strokes) if (s.id in part.ids) c.drawPath(s.path, haloPaint)
-            if (st.floating.isNotEmpty()) for (s in st.strokes) if (s.id in st.floating) drawStroke(c, s)
+            drawSelectedInk(c, st, part.ids, 4.5f / scale / selScale)
             c.restore()
         }
         val b = selectionRectWorld(sel)
@@ -4599,6 +4684,9 @@ class NotebookView(context: Context) : View(context) {
         const val HANDLE_R = 15f
         /** A line's end dragged this far (dp) across the line turns it (closer, only its length changes). */
         const val END_TURN_DP = 28f
+        /** The biggest layer a selection gets (pixels a side, pixels in all: 32 MB). */
+        const val SEL_LAYER_MAX = 4096
+        const val SEL_LAYER_PIXELS = 8L shl 20
         const val KIND_PENCIL = 1
         const val LAYOUT_ANIM_MS = 300f
         /** The magnifier strip's height (share of the view) and its "move on" part (share of its width). */
