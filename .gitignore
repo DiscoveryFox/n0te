@@ -4,3 +4,5 @@
 /android/.gradle/
 /android/.kotlin/
 /android/local.properties
+# n0bridge's root .gitignore ignores bin/ (build output); this one is source.
+!/crates/desktop/src/bin/
