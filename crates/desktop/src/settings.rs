@@ -40,6 +40,8 @@ pub struct Settings {
     pub auto_update: bool,
     /// Where updates come from (owner/repo on GitHub).
     pub update_repo: String,
+    /// PDF export: side pages all at the end (else right after their page).
+    pub export_sides_at_end: bool,
 }
 
 /// How many open times the settings keep.
@@ -77,6 +79,7 @@ impl Default for Settings {
             language: "auto".into(),
             auto_update: true,
             update_repo: crate::updater::DEFAULT_REPO.into(),
+            export_sides_at_end: false,
         }
     }
 }
@@ -117,6 +120,7 @@ impl Settings {
                 "language" => s.language = if matches!(v, "de" | "en") { v.to_string() } else { "auto".into() },
                 "auto_update" => s.auto_update = v != "0",
                 "update_repo" if v.contains('/') => s.update_repo = v.trim().trim_start_matches("https://github.com/").trim_end_matches('/').to_string(),
+                "export_sides" => s.export_sides_at_end = v == "end",
                 _ => {}
             }
         }
@@ -151,7 +155,7 @@ impl Settings {
         let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
         let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\nexport_sides={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -170,6 +174,7 @@ impl Settings {
             self.language,
             u8::from(self.auto_update),
             self.update_repo,
+            if self.export_sides_at_end { "end" } else { "inline" },
         )
     }
 
@@ -197,6 +202,13 @@ mod tests {
         let back = Settings::parse(&s.text());
         assert_eq!(back, s);
         assert!(!back.guest_frames && back.share_view);
+    }
+
+    #[test]
+    fn the_export_order_survives_a_save() {
+        assert!(!Settings::default().export_sides_at_end, "side pages next to their page, as always");
+        let s = Settings { export_sides_at_end: true, ..Settings::default() };
+        assert_eq!(Settings::parse(&s.text()), s);
     }
 
     #[test]

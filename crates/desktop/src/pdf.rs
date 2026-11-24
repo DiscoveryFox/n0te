@@ -193,13 +193,15 @@ impl Pdf {
         Ok(sheets.len())
     }
 
-    /// Exports all sheets (`None`) or the given ones as a PDF; returns bytes and page count.
-    pub fn export(&self, lib: &Library, nb: &Notebook, selected: Option<&[String]>) -> Result<(Vec<u8>, usize), String> {
+    /// Exports all sheets (`None`) or the given ones as a PDF, side pages where `order` puts
+    /// them; returns bytes and page count.
+    pub fn export(&self, lib: &Library, nb: &Notebook, selected: Option<&[String]>, order: n0te_pdf::notebook::ExportOrder) -> Result<(Vec<u8>, usize), String> {
         let id = nb.id();
         let specs = nb.sheet_specs();
         let pages = n0te_pdf::notebook::export_sheets_with_images(
             nb,
             selected,
+            order,
             |sheet| {
                 let s = lib.load_sheet(&id, sheet)?;
                 // Coordinate systems go in as ink under the handwriting (the same look as on screen).

@@ -803,10 +803,11 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         N0te.background({ nb.outline(true) }) { r -> r.getOrNull()?.let(then) }
     }
 
-    fun exportPdf(sheetIds: List<String>?, file: java.io.File, then: (Result<Int>) -> Unit) {
+    /** Exports [sheetIds] (null: all) to [file]; [sidesAtEnd]: side pages after all main pages, else right after theirs. */
+    fun exportPdf(sheetIds: List<String>?, file: java.io.File, sidesAtEnd: Boolean, then: (Result<Int>) -> Unit) {
         val svc = N0te.pdf ?: return then(Result.failure(IllegalStateException("PDF nicht verfügbar")))
         flush()
-        N0te.background({ nb.exportPdfToFile(svc, sheetIds, file.absolutePath).toInt() }, then)
+        N0te.background({ nb.exportPdfToFile(svc, sheetIds, sidesAtEnd, file.absolutePath).toInt() }, then)
     }
 
     /** Where a node sits: its parent group (null = main column), index and the siblings (I/O thread). */

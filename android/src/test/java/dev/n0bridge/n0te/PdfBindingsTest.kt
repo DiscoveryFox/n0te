@@ -179,7 +179,7 @@ class PdfBindingsTest {
             val sheet = nb.openSheet(sheets[0].sheetId)
             val line = (0..40).flatMap { listOf(150f + it * 5f, 150f, 0.5f, it * 8f) }.toFloatArray()
             sheet.addStroke(FfiBrush(6f, 0f, 0xFFD71921u, 0u), pack(*line))
-            val exported = nb.exportPdf(pdf, null)
+            val exported = nb.exportPdf(pdf, null, false)
             assertTrue(String(exported, 0, 5, Charsets.ISO_8859_1) == "%PDF-")
 
             // Import the export again: same pages, ink where it was drawn.

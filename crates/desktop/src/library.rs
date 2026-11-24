@@ -401,9 +401,9 @@ pub fn pdf_panel<'a>(pdfs: &'a [(PathBuf, SystemTime)], title: &'a str) -> Eleme
     container(list).padding(18).width(Length::Fill).max_width(900).style(theme::panel).into()
 }
 
-/// Export as a dialog: pick the scope (whole notebook, this page, a selection), then one
-/// primary action. Selected pages take their side pages along.
-pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportWhat, current: u32) -> Element<'a, Message> {
+/// Export as a dialog: pick the scope (whole notebook, this page, a selection), where the side
+/// pages go (`sides_at_end`), then one primary action. Selected pages take their side pages along.
+pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportWhat, current: u32, sides_at_end: bool) -> Element<'a, Message> {
     let tile = |what: ExportWhat, title: &str, sub: String| {
         button(column![text(title.to_string()).font(theme::title_font()).size(15).color(theme::p().text), text(sub).size(12).color(theme::p().muted)].spacing(4))
             .padding([14, 16])
@@ -433,6 +433,17 @@ pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportW
         col = col.push(theme::caption(tr("Seiten (+n: Seitenblätter, kommen mit)")));
         col = col.push(iced::widget::scrollable(iced::widget::Row::with_children(chips).spacing(6).wrap().vertical_spacing(6)).style(theme::scroll_dark).height(Length::Fixed(190.0)));
     }
+    let order = |at_end: bool, label: &str| button(text(label.to_string()).size(12)).padding([6, 11]).on_press(Message::ExportSidesAtEnd(at_end)).style(theme::tab(sides_at_end == at_end));
+    col = col.push(
+        row![
+            theme::caption(tr("Seitenblätter")),
+            Space::new().width(Length::Fill),
+            order(false, tr("direkt nach ihrer Seite")),
+            order(true, tr("am Ende")),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    );
     let ready = mode != ExportWhat::Picked || !picked.is_empty();
     col = col.push(container(Space::new()).height(1).width(Length::Fill).style(theme::hairline));
     col = col.push(

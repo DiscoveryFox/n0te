@@ -36,6 +36,8 @@ object Settings {
     val guestFrames get() = b("guest_frames", true)
     /** Guests see where this tablet is looking. */
     val shareView get() = b("share_view", true)
+    /** PDF export: side pages all at the end (else right after their page); the export dialog's last choice. */
+    val exportSidesAtEnd get() = b("export_sides_at_end", false)
     fun set(key: String, v: Boolean) { p?.edit()?.putBoolean(key, v)?.apply() }
     fun set(key: String, v: Float) { p?.edit()?.putFloat(key, v)?.apply() }
     fun set(key: String, v: String) { p?.edit()?.putString(key, v)?.apply() }

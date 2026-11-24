@@ -1630,7 +1630,7 @@ class NotebookActivity : ComponentActivity() {
             val safe = title.ifBlank { "n0te" }.replace(Regex("[^\\p{L}\\p{N} _-]"), "_")
             val f = File(dir, "$safe$suffix.pdf")
             status = "Exportiere…"
-            m.exportPdf(ids, f) { r ->
+            m.exportPdf(ids, f, Settings.exportSidesAtEnd) { r ->
                 r.onSuccess { pages ->
                     status = null
                     val uri = FileProvider.getUriForFile(this@NotebookActivity, "$packageName.files", f)
@@ -2080,6 +2080,13 @@ class NotebookActivity : ComponentActivity() {
                             ScopeTile("Ganzes Notizbuch", "$pageCount Seiten mit Seitenblättern", scope == "all", Modifier.weight(1f)) { scope = "all" }
                             ScopeTile("Diese Seite", if (currentPage > 0) "Seite $currentPage und ihre Seitenblätter" else "Mit Seitenblättern", scope == "page", Modifier.weight(1f)) { scope = "page" }
                             ScopeTile("Auswahl …", "Bestimmte Seiten wählen", scope == "pick", Modifier.weight(1f)) { scope = "pick" }
+                        }
+                        // Where side pages go in the PDF (remembered).
+                        var sidesAtEnd by remember { mutableStateOf(Settings.exportSidesAtEnd) }
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text("Seitenblätter", color = Ui.Muted, fontSize = 13.sp, modifier = Modifier.weight(1f))
+                            SmallChoice("Direkt nach ihrer Seite", !sidesAtEnd) { sidesAtEnd = false; Settings.set("export_sides_at_end", false) }
+                            SmallChoice("Am Ende", sidesAtEnd) { sidesAtEnd = true; Settings.set("export_sides_at_end", true) }
                         }
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                             // Only worth saying where the screen is dark.

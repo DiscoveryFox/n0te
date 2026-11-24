@@ -4,6 +4,7 @@
 use std::collections::{HashMap, HashSet};
 
 use n0te_core::ink::{self, Brush, InkPoint, Rect};
+pub use n0te_core::notebook::ExportOrder;
 use n0te_core::notebook::{Background, Notebook, OutlineRow, SheetSpec};
 use n0te_core::sheet;
 use n0te_core::store::{Library, blob_id};
@@ -67,6 +68,7 @@ pub fn add_pdf_sheets(nb: &Notebook, pdf: &StoredPdf, parent: Option<&str>, inde
 /// The pages for exporting `nb`: every sheet in reading order (groups expanded; per main sheet
 /// its left side sheets outermost first, the sheet, its right side sheets), or only the
 /// `selected` sheet ids, still in reading order (an id not in the notebook is an error).
+/// [`export_sheets_with_images`] can put the side sheets at the end instead ([`ExportOrder`]).
 ///
 /// PDF sheets become their PDF page (split at space inserted into it, `SheetSpec::gaps`),
 /// fixed-size sheets blank pages of their size, boards a page around their strokes
@@ -78,14 +80,17 @@ pub fn export_sheets(nb: &Notebook, selected: Option<&[String]>, mut strokes: im
 
 /// [`export_sheets`] with each sheet's text boxes too (`content` returns strokes and boxes).
 pub fn export_sheets_with_text(nb: &Notebook, selected: Option<&[String]>, mut content: impl FnMut(&str) -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>)>) -> Result<Vec<ExportSheet>> {
-    export_sheets_with_images(nb, selected, |id| content(id).map(|(s, t)| (s, t, Vec::new())), |_| None)
+    export_sheets_with_images(nb, selected, ExportOrder::Inline, |id| content(id).map(|(s, t)| (s, t, Vec::new())), |_| None)
 }
 
 /// [`export_sheets_with_text`] with each sheet's images too: `content` also returns the images,
-/// `blob` their bytes (JPEG is embedded; images whose bytes are missing are left out).
+/// `blob` their bytes (JPEG is embedded; images whose bytes are missing are left out). `order`:
+/// side sheets right after their main sheet, or all of them at the end (in their main sheets'
+/// order, left ones before right ones; boards stay where they are, like every main sheet).
 pub fn export_sheets_with_images(
     nb: &Notebook,
     selected: Option<&[String]>,
+    order: ExportOrder,
     mut content: impl FnMut(&str) -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>, Vec<sheet::ImageObj>)>,
     blob: impl Fn(&str) -> Option<Vec<u8>>,
 ) -> Result<Vec<ExportSheet>> {
@@ -98,7 +103,7 @@ pub fn export_sheets_with_images(
             }
         }
     }
-    let order = nb.sheet_order();
+    let order = nb.sheet_order_by(order);
     let ids: Vec<String> = match selected {
         None => order,
         Some(sel) => {
@@ -190,7 +195,7 @@ mod tests {
                 vec![sheet::ImageObj { id: "i".into(), blob: "b".into(), x: 900.0, y: 700.0, w: 300.0, h: 200.0 }],
             ))
         };
-        let pages = export_sheets_with_images(&nb, Some(&[board]), content, |_| Some(vec![0xFF, 0xD8])).unwrap();
+        let pages = export_sheets_with_images(&nb, Some(&[board]), ExportOrder::Inline, content, |_| Some(vec![0xFF, 0xD8])).unwrap();
         let SheetSource::Blank { width, height } = pages[0].source else { panic!() };
         // From the text's left edge (-300) to the picture's right edge (1200), its top (-200) to the picture's bottom (900).
         assert!((width - (1500.0 + 2.0 * BOARD_MARGIN)).abs() < 0.01, "{width}");
@@ -230,5 +235,42 @@ mod tests {
         assert_eq!(some[0].source, all[0].source);
         assert!(export_sheets(&nb, Some(&["nope".to_string()]), ink).is_err());
         let _ = s_main;
+    }
+
+    #[test]
+    fn side_pages_at_the_end() {
+        let nb = Notebook::create(1, "x").unwrap();
+        // Pages 1 (PDF page 0) with a left and two right side pages, 2 (a board), 3 (PDF page 2)
+        // with a left one. Every page tells which it is by its size or PDF page.
+        let page = |n: u32| SheetSpec { pdf: Some(("b".repeat(64), n)), ..SheetSpec::a4(Background::Blank) };
+        let side = |w: f32| SheetSpec { width: w, ..SheetSpec::a4(Background::Lines) };
+        let (p1, _) = nb.add_sheet(None, 0, &page(0)).unwrap();
+        nb.add_side_sheet(&p1, Side::Right, 0, &side(301.0)).unwrap();
+        nb.add_side_sheet(&p1, Side::Right, 1, &side(302.0)).unwrap();
+        nb.add_side_sheet(&p1, Side::Left, 0, &side(300.0)).unwrap();
+        let (_, board) = nb.add_sheet(None, 1, &SheetSpec::board()).unwrap();
+        let (p3, _) = nb.add_sheet(None, 2, &page(2)).unwrap();
+        nb.add_side_sheet(&p3, Side::Left, 0, &side(310.0)).unwrap();
+        let ink = |id: &str| -> Result<(Vec<sheet::Stroke>, Vec<sheet::TextBox>, Vec<sheet::ImageObj>)> {
+            Ok((if id == board { vec![stroke(0.0, 0.0)] } else { vec![] }, vec![], vec![]))
+        };
+        let which = |pages: &[ExportSheet]| -> Vec<String> {
+            pages
+                .iter()
+                .map(|p| match &p.source {
+                    SheetSource::Pdf { page, .. } => format!("p{page}"),
+                    SheetSource::Blank { .. } if !p.strokes.is_empty() => "board".into(),
+                    SheetSource::Blank { width, .. } => format!("s{width}"),
+                })
+                .collect()
+        };
+        let inline = export_sheets_with_images(&nb, None, ExportOrder::Inline, ink, |_| None).unwrap();
+        assert_eq!(which(&inline), ["s300", "p0", "s301", "s302", "board", "s310", "p2"]);
+        let at_end = export_sheets_with_images(&nb, None, ExportOrder::SidesAtEnd, ink, |_| None).unwrap();
+        assert_eq!(which(&at_end), ["p0", "board", "p2", "s300", "s301", "s302", "s310"]);
+        // Picked pages keep that order too.
+        let some: Vec<String> = nb.sheet_order().into_iter().filter(|id| *id != board).collect();
+        let picked = export_sheets_with_images(&nb, Some(&some), ExportOrder::SidesAtEnd, ink, |_| None).unwrap();
+        assert_eq!(which(&picked), ["p0", "p2", "s300", "s301", "s302", "s310"]);
     }
 }
