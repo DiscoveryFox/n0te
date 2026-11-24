@@ -53,11 +53,11 @@ class ShareActivity : ComponentActivity() {
         return out
     }
 
-    /** The file's name as the other app shows it ("Skript.pdf"), else the last part of its path. */
+    /** The file's name as the other app shows it ("Skript.pdf"), else the last part of its path if that is a file name. */
     private fun displayName(uri: Uri): String? =
         runCatching {
             contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
-        }.getOrNull()?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment?.substringAfterLast('/')
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { '.' in it }
 
     /** One PDF (opened with n0te, or shared alone): it can also become a notebook of its own. */
     private val pdf: Uri? by lazy {
