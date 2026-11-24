@@ -125,7 +125,7 @@ Section "-n0te sync" SecCore
   File "${STAGE}/LICENSE.txt"
   File "${STAGE}/THIRD_PARTY_NOTICES.txt"
   SetOutPath "$INSTDIR\licenses"
-  File /r "${STAGE}/licenses/*.*"
+  File /r "${STAGE}/licenses/*"
   SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
   WriteRegStr HKCU "Software\n0te" "InstallDir" "$INSTDIR"
