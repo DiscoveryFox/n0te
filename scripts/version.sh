@@ -20,10 +20,10 @@ cargo_version() {
 android_version() { sed -n 's/^[[:space:]]*versionName = "\([^"]*\)".*/\1/p' android/build.gradle.kts | head -1; }
 android_code() { sed -n 's/^[[:space:]]*versionCode = \([0-9][0-9]*\).*/\1/p' android/build.gradle.kts | head -1; }
 
-# The body of "## [X.Y.Z] ..." up to the next "## [" heading (or the link list at the end).
+# The body of "## [X.Y.Z] ..." up to the next "## " heading (or the link list at the end).
 notes() {
 	awk -v v="$1" '
-		/^## \[/ { if (on) exit; on = (index($0, "## [" v "]") == 1); next }
+		/^## / { if (on) exit; on = (index($0, "## [" v "]") == 1); next }
 		on && /^\[[^]]+\]: / { exit }
 		on { print }
 	' CHANGELOG.md | sed -e '/./,$!d' | sed -e ':a' -e '/^\n*$/{$d;N;ba' -e '}'
