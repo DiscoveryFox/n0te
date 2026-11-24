@@ -9,6 +9,7 @@ use n0te_core::pens::{self, PenType};
 use super::{EraserMode, Msg, Tablet, Tool};
 use crate::app::Message;
 use crate::pages::argb;
+use crate::i18n::{tr, trf};
 use crate::theme;
 
 /// Touch target size (px).
@@ -43,30 +44,30 @@ fn icon_button<'a>(glyph: &'static [u8], m: Option<Msg>) -> Element<'a, Message>
 
 fn tool_label(t: Tool) -> &'static str {
     match t {
-        Tool::Pen => "Stift",
-        Tool::Marker => "Marker",
-        Tool::Eraser => "Radierer",
-        Tool::Lasso => "Lasso",
-        Tool::Text => "Text",
-        Tool::Laser => "Laser",
+        Tool::Pen => tr("Stift"),
+        Tool::Marker => tr("Marker"),
+        Tool::Eraser => tr("Radierer"),
+        Tool::Lasso => tr("Lasso"),
+        Tool::Text => tr("Text"),
+        Tool::Laser => tr("Laser"),
     }
 }
 
 pub fn pen_label(p: PenType) -> &'static str {
     match p {
-        PenType::Fountain => "Füller",
-        PenType::Ballpoint => "Kugelschreiber",
-        PenType::Pencil => "Bleistift",
-        PenType::Brush => "Pinsel",
+        PenType::Fountain => tr("Füller"),
+        PenType::Ballpoint => tr("Kugelschreiber"),
+        PenType::Pencil => tr("Bleistift"),
+        PenType::Brush => tr("Pinsel"),
     }
 }
 
 fn pen_hint(p: PenType) -> &'static str {
     match p {
-        PenType::Fountain => "Strich folgt dem Druck",
-        PenType::Ballpoint => "Gleichmäßiger Strich",
-        PenType::Pencil => "Graphit: weich am Rand, dunkler bei Druck",
-        PenType::Brush => "Stark druckabhängig",
+        PenType::Fountain => tr("Strich folgt dem Druck"),
+        PenType::Ballpoint => tr("Gleichmäßiger Strich"),
+        PenType::Pencil => tr("Graphit: weich am Rand, dunkler bei Druck"),
+        PenType::Brush => tr("Stark druckabhängig"),
     }
 }
 
@@ -116,8 +117,8 @@ pub fn view(t: &Tablet) -> Element<'_, Message> {
     }
     if t.tool == Tool::Eraser {
         tools = tools.push(Space::new().width(6));
-        tools = tools.push(tool_button("Ganze Striche", t.eraser_mode == EraserMode::Stroke, Msg::EraserMode(EraserMode::Stroke)));
-        tools = tools.push(tool_button("Fläche", t.eraser_mode == EraserMode::Area, Msg::EraserMode(EraserMode::Area)));
+        tools = tools.push(tool_button(tr("Ganze Striche"), t.eraser_mode == EraserMode::Stroke, Msg::EraserMode(EraserMode::Stroke)));
+        tools = tools.push(tool_button(tr("Fläche"), t.eraser_mode == EraserMode::Area, Msg::EraserMode(EraserMode::Area)));
     }
     let mut colors = row![].spacing(0).align_y(Alignment::Center);
     let pal = pens::PALETTES[t.palette % pens::PALETTES.len()];
@@ -133,16 +134,16 @@ pub fn view(t: &Tablet) -> Element<'_, Message> {
     let redo = icon_button(REDO, t.can_redo().then_some(Msg::Redo));
     let mut bar = row![tools, Space::new().width(14), colors, Space::new().width(10), widths, Space::new().width(Length::Fill)].align_y(Alignment::Center);
     if let Some(sel) = &t.selection {
-        bar = bar.push(text(format!("{} ausgewählt", sel.ids.len())).font(theme::meta_font()).size(theme::SMALL).color(theme::p().muted));
+        bar = bar.push(text(trf("{} ausgewählt", &[&sel.ids.len()])).font(theme::meta_font()).size(theme::SMALL).color(theme::p().muted));
         bar = bar.push(Space::new().width(8));
-        bar = bar.push(button(theme::btn_small("Kopieren")).padding(theme::pad()).on_press(msg(Msg::Copy)).style(theme::ghost));
-        bar = bar.push(button(theme::btn_small("Ausschneiden")).padding(theme::pad()).on_press(msg(Msg::Cut)).style(theme::ghost));
-        bar = bar.push(button(theme::btn_small("Löschen")).padding(theme::pad()).on_press(msg(Msg::DeleteSelection)).style(theme::ghost));
-        bar = bar.push(button(theme::btn_small("Fertig")).padding(theme::pad()).on_press(msg(Msg::ClearSelection)).style(theme::ghost));
+        bar = bar.push(button(theme::btn_small(tr("Kopieren"))).padding(theme::pad()).on_press(msg(Msg::Copy)).style(theme::ghost));
+        bar = bar.push(button(theme::btn_small(tr("Ausschneiden"))).padding(theme::pad()).on_press(msg(Msg::Cut)).style(theme::ghost));
+        bar = bar.push(button(theme::btn_small(tr("Löschen"))).padding(theme::pad()).on_press(msg(Msg::DeleteSelection)).style(theme::ghost));
+        bar = bar.push(button(theme::btn_small(tr("Fertig"))).padding(theme::pad()).on_press(msg(Msg::ClearSelection)).style(theme::ghost));
         bar = bar.push(Space::new().width(8));
     }
     if !t.clip_is_empty() && t.selection.is_none() {
-        bar = bar.push(button(theme::btn_small("Einfügen")).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost));
+        bar = bar.push(button(theme::btn_small(tr("Einfügen"))).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost));
     }
     bar = bar.push(undo).push(redo);
     container(bar).padding([4, 10]).width(Length::Fill).style(theme::chrome).into()
@@ -163,10 +164,10 @@ pub fn pen_menu(t: &Tablet) -> Element<'_, Message> {
     col = col.push(Space::new().height(6));
     let mut pals = row![].spacing(4);
     for (i, name) in pens::PALETTE_NAMES.iter().enumerate() {
-        pals = pals.push(button(text(*name).size(11.5)).padding([4, 8]).on_press(msg(Msg::Palette(i))).style(theme::option(i == t.palette)));
+        pals = pals.push(button(text(tr(name)).size(11.5)).padding([4, 8]).on_press(msg(Msg::Palette(i))).style(theme::option(i == t.palette)));
     }
     col = col.push(
-        iced::widget::toggler(t.finger_draws).label("Mit dem Finger schreiben").on_toggle(|on| msg(Msg::FingerDraws(on))).size(18).text_size(13).spacing(10).style(theme::switch),
+        iced::widget::toggler(t.finger_draws).label(tr("Mit dem Finger schreiben")).on_toggle(|on| msg(Msg::FingerDraws(on))).size(18).text_size(13).spacing(10).style(theme::switch),
     );
     col = col.push(iced::widget::scrollable(pals).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).width(Length::Fixed(260.0)));
     container(col).padding(8).style(theme::menu).into()

@@ -194,6 +194,8 @@ pub enum Message {
     Gesture(Gesture),
     Glide(Instant),
     Momentum(bool),
+    /// "auto", "de" or "en".
+    Language(String),
     /// Search in the outline's field: typed; the pause after a key is over (the key's number);
     /// the results (search number, query, pages; None: a newer search took over); Enter (show
     /// the first hit); empty the field; Ctrl+F.
@@ -551,6 +553,7 @@ impl App {
     /// Starts the app; `import` = a `.n0te` file given on the command line (opened after import).
     pub fn boot_with(root: PathBuf, import: Option<PathBuf>) -> (Self, Task<Message>) {
         let mut app = Self::with_settings(root, Settings::load());
+        crate::i18n::set_from(&app.settings.language);
         app.persist_settings = true;
         app.offline = false;
         if crate::mode() == crate::Mode::Tablet {
@@ -1106,6 +1109,13 @@ impl App {
                     }
                 }
                 return self.glide_step(now);
+            }
+            Message::Language(l) => {
+                crate::i18n::set_from(&l);
+                self.settings.language = l;
+                if self.persist_settings {
+                    self.settings.save();
+                }
             }
             Message::Momentum(on) => {
                 self.settings.momentum = on;
@@ -3595,6 +3605,15 @@ impl App {
                 "Text",
                 "Textseiten und Textfelder.",
                 iced::widget::toggler(self.settings.formula_center).label("Formeln zentrieren ($$…$$ und Formelblöcke)").on_toggle(Message::FormulaCenter).size(20).text_size(14).spacing(12).style(theme::switch).into(),
+            ),
+            rule(),
+            section(
+                crate::i18n::tr("Sprache"),
+                crate::i18n::tr("Automatisch: unter Windows die Sprache des Systems."),
+                {
+                    let opt = |label: &'static str, v: &'static str| button(text(crate::i18n::tr(label)).size(13)).padding([6, 12]).on_press(Message::Language(v.into())).style(theme::option(self.settings.language == v));
+                    row![opt("Automatisch", "auto"), opt("Deutsch", "de"), opt("English", "en")].spacing(6).into()
+                },
             ),
             rule(),
             section("Geräte", "Sync mit dem Tablet, direkt und ohne Server.", self.devices_view()),

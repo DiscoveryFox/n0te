@@ -34,6 +34,8 @@ pub struct Settings {
     pub outline_pictures: bool,
     /// The hint on how two notebooks side by side work was shown once.
     pub split_seen: bool,
+    /// "auto" (Windows: the system's language; Linux: German), "de" or "en".
+    pub language: String,
 }
 
 /// How many open times the settings keep.
@@ -68,6 +70,7 @@ impl Default for Settings {
             lib_opened: Vec::new(),
             outline_pictures: false,
             split_seen: false,
+            language: "auto".into(),
         }
     }
 }
@@ -105,6 +108,7 @@ impl Settings {
                 }
                 "outline_view" => s.outline_pictures = v == "pictures",
                 "split_seen" => s.split_seen = v == "1",
+                "language" => s.language = if matches!(v, "de" | "en") { v.to_string() } else { "auto".into() },
                 _ => {}
             }
         }
@@ -137,7 +141,7 @@ impl Settings {
         let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
         let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -153,6 +157,7 @@ impl Settings {
             opened.join(";"),
             if self.outline_pictures { "pictures" } else { "list" },
             if self.split_seen { 1 } else { 0 },
+            self.language,
         )
     }
 

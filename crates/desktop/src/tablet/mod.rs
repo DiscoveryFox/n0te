@@ -422,7 +422,7 @@ impl App {
                     self.tablet.selection = None;
                     self.edit_tracked(&sel.notebook, &sel.sheet, |s| s.remove(&sel.ids));
                 }
-                self.say(format!("{} Striche kopiert", self.tablet.clip.len()));
+                self.say(crate::i18n::trf("{} Striche kopiert", &[&self.tablet.clip.len()]));
             }
             Msg::Paste => self.paste_strokes(),
             Msg::Indexed(nb, sheet, put, drop) => {
@@ -488,7 +488,7 @@ impl App {
             return Task::none();
         }
         if self.read_only_nb(&notebook) {
-            self.say("Nur lesen: ändern kann, wer dich eingeladen hat");
+            self.say(crate::i18n::tr("Nur lesen: ändern kann, wer dich eingeladen hat"));
             return Task::none();
         }
         let origin = (placed.rect.x0, placed.rect.y0);
@@ -830,15 +830,15 @@ impl App {
     /// Changes a sheet through its kept-open copy, stores it and remembers the edit for undo.
     pub(crate) fn edit_tracked(&mut self, nb: &str, sheet: &str, f: impl FnOnce(&Sheet) -> n0te_core::Result<()>) {
         if self.read_only_nb(nb) {
-            self.say("Nur lesen: ändern kann, wer dich eingeladen hat");
+            self.say(crate::i18n::tr("Nur lesen: ändern kann, wer dich eingeladen hat"));
             return;
         }
         let Some(s) = self.tablet_sheet(nb, sheet) else {
-            self.say("Seite nicht lesbar");
+            self.say(crate::i18n::tr("Seite nicht lesbar"));
             return;
         };
         if let Err(e) = f(s) {
-            self.say(format!("Nicht geändert: {e}"));
+            self.say(crate::i18n::trf("Nicht geändert: {}", &[&e]));
             return;
         }
         self.store_kept(nb, sheet);
@@ -893,7 +893,7 @@ impl App {
                 if undo { self.tablet.redo.push((nb, sheet)) } else { self.tablet.undo.push((nb, sheet)) }
             }
             Ok(false) => {}
-            Err(e) => self.say(format!("Rückgängig ging nicht: {e}")),
+            Err(e) => self.say(crate::i18n::trf("Rückgängig ging nicht: {}", &[&e])),
         }
         self.tablet.selection = None;
     }

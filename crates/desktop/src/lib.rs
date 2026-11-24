@@ -5,6 +5,7 @@ pub mod app;
 pub mod blocks;
 pub mod demo;
 pub mod gestures;
+pub mod i18n;
 pub mod latex;
 pub mod library;
 pub mod live;
