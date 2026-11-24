@@ -40,28 +40,31 @@ devices meet again (CRDTs). Devices talk directly to each other, end-to-end encr
 
 ## Features
 
-Legend: ● available · ◐ partly (see note) · ○ in progress or planned · – not available
+Legend: ● available · ◐ partly / built but not yet tried on real hardware (see note) · ○ planned · – not available
 
 | Area | Android | n0te Laptop · Linux | n0te Laptop · Windows | n0te Tablet · Windows (preview) |
 |---|:---:|:---:|:---:|:---:|
-| [Ink and pens](#ink-and-pens) | ● | ◐ shows ink | ◐ shows ink | ◐ shows ink, pen input ○ |
-| [Shapes, arrows, lasso](#shapes-arrows-lasso) | ● | ◐ shows them | ◐ shows them | ○ |
+| [Ink and pens](#ink-and-pens) | ● | ◐ shows ink | ◐ shows ink | ◐ pens, marker, eraser, pressure, tilt, eraser end, palm, finger mode |
+| [Shapes, arrows, lasso](#shapes-arrows-lasso) | ● | ◐ shows them | ◐ shows them | ◐ shapes, arrowheads, lasso (move, scale, copy) |
 | [Pages and notebooks](#pages-and-notebooks) | ● | ● | ● | ● |
 | [PDF](#pdf) | ● | ● | ● | ● |
 | [Text and LaTeX](#text-and-latex) | ● | ● | ◐ formulas need TeX | ◐ formulas need TeX |
 | [Graphs](#graphs) | ● | ● | ● | ● |
-| [Search](#search) | ● | ● | ● | ● |
+| [Search](#search) | ● | ● | ● | ◐ reads handwriting with Windows' recognizer |
 | [Library](#library) | ● | ● | ● | ● |
 | [Two notebooks side by side](#two-notebooks-side-by-side) | ● | ● | ● | ● |
-| [Sync and pairing](#sync-and-pairing) | ● | ● | ○ | ○ |
-| [Live sessions](#live-sessions) | ● | ● | ○ | ○ |
-| [Guests](#guests) | ● | ● | ○ | ○ |
-| [Version history](#version-history) | – (the laptop keeps it) | ● | ○ | ○ |
+| [Sync and pairing](#sync-and-pairing) | ● | ● | ◐ | ◐ |
+| [Live sessions](#live-sessions) | ● | ● | ◐ | ◐ |
+| [Guests](#guests) | ● | ● | ◐ | ◐ |
+| [Version history](#version-history) | – (the laptop keeps it) | ● | ◐ | ◐ |
 
-n0te Laptop draws no ink by design: handwriting is the tablet's job. n0te Tablet for Windows runs
-the n0te Laptop interface for now, so it has what n0te Laptop has; writing with the pen (pressure,
-tilt, eraser end, palm rejection), shapes and the lasso come next. The Windows builds are new:
-they are built on GitHub Actions and have not been tried much on real machines yet.
+n0te Laptop draws no ink by design: handwriting is the tablet's job. n0te Tablet for Windows is
+n0te Laptop's interface plus the tablet's tools: the Windows pen (pressure, tilt, eraser end,
+barrel button, hover, palm rejection), the tablet's pen types and palettes, eraser, lasso, shapes
+and arrowheads (the same recognizers as the Android app, ported to the shared core), laser, text
+tool, finger mode and handwriting search. The Windows builds are new: they are built on GitHub
+Actions and have not been tried on real Windows pen devices yet, so expect rough edges and
+please report what you find.
 
 The pictures below are n0te Laptop on Linux, taken headless from demo notebooks
 (`scripts/screenshots.sh`); the handwriting in them is generated, so it is not meant to be read.
