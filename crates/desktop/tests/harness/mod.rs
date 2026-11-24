@@ -71,6 +71,18 @@ pub struct Harness {
     pub modifiers: keyboard::Modifiers,
 }
 
+/// Tests and the screenshot example open throwaway libraries under the temp dir
+/// (`n0te-…`); they go when the harness does, so test runs don't fill /tmp.
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let root = self.app.root.clone();
+        let tmp = std::env::temp_dir();
+        if root.starts_with(&tmp) && root.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("n0te-")) {
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+}
+
 pub fn load_fonts() {
     let mut fs = iced_test::renderer::graphics::text::font_system().write().expect("font system");
     for f in theme::FONT_DATA {
