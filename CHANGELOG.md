@@ -44,8 +44,8 @@ version number.
 ### Windows packages
 
 - Installer without administrator rights (per user): pick n0te Laptop, n0te Tablet or both;
-  Start menu entries, `.n0te` files open in n0te Laptop, `n0te://` invite links go to n0te
-  Tablet, n0te-sync starts at sign-in. Uninstalling keeps your notebooks.
+  Start menu entries, `.n0te` files open in n0te Laptop, `n0te://` invite links are registered
+  for n0te Tablet, n0te-sync starts at sign-in. Uninstalling keeps your notebooks.
 - Portable zip with the same programs. Builds for x64 and ARM64 (Snapdragon). Not code-signed
   yet: SmartScreen may warn about an unknown publisher.
 

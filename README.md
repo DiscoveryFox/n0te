@@ -115,8 +115,8 @@ Text boxes anywhere on a page and whole text pages: headings, lists, checkboxes,
 blocks with highlighting, and LaTeX. *Example:* type `$\frac{f(b)-f(a)}{b-a}$` for a formula in the
 line, `$$` on its own line for a centred one; `#`, `-`, `1.`, `[ ]` and ` ``` ` start headings,
 lists, checkboxes and code. On the laptop a double click on a page makes a text box, Ctrl+N a text
-page. The tablet renders formulas itself; the laptop uses a local TeX installation (TeX Live,
-MiKTeX).
+page. The tablet renders formulas itself; the laptop uses a local TeX installation (`latex` and
+`dvisvgm`, e.g. TeX Live; not tried on Windows yet).
 
 ### Graphs
 
@@ -212,9 +212,9 @@ current one.
    (unknown publisher): click **More info → Run anyway**. Compare the file with `SHA256SUMS.txt`
    from the release if you like (`Get-FileHash <file>` in PowerShell).
 
-The installer adds Start menu entries, opens `.n0te` files with n0te Laptop and `n0te://` invite
-links with n0te Tablet (if installed), and starts n0te-sync at sign-in (sync on Windows is still
-being ported, see the table above). Uninstall it under Settings → Apps; your notebooks in
+The installer adds Start menu entries, opens `.n0te` files with n0te Laptop, registers `n0te://`
+invite links for n0te Tablet (or n0te Laptop) and starts n0te-sync at sign-in; joining by link and
+sync itself work on Windows once n0te-sync is ported (see the table above). Uninstall it under Settings → Apps; your notebooks in
 `%APPDATA%\n0te` stay.
 
 **Portable:** `n0te-<version>-windows-<arch>-portable.zip` has the same programs. Unpack and run

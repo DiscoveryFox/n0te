@@ -26,7 +26,7 @@ n0te is and does, see the [README](../README.md).
   pinned, hash-checked prebuilt libraries into `third_party/pdfium/` (gitignored).
 - Linux builds of n0te Laptop: `pkg-config`, Wayland and xkbcommon headers (`libwayland-dev
   libxkbcommon-dev` on Debian/Ubuntu).
-- Formulas in n0te Laptop: a local TeX with `latex` and `dvisvgm` (TeX Live, MiKTeX).
+- Formulas in n0te Laptop: a local TeX with `latex` and `dvisvgm` (TeX Live; Windows untested).
 - Android: JDK 17 or newer, Gradle 9.9 (no wrapper in the repo), Android SDK 35, NDK
   27.2.12479018, `rustup target add aarch64-linux-android`.
 
