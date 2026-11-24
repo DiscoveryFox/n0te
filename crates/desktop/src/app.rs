@@ -25,6 +25,7 @@ use crate::palette::{self, Command};
 use crate::search::{self, Search};
 use crate::settings::Settings;
 use crate::split::{self, PaneKey, Split};
+use crate::i18n::{tr, trc, trf};
 use crate::{library, sidebar, theme};
 
 /// A notebook in the library list.
@@ -846,7 +847,7 @@ impl App {
                         self.opened(&id);
                         return sidebar::reveal_current(self);
                     }
-                    Err(e) => self.say(format!("Notizbuch nicht lesbar: {e}")),
+                    Err(e) => self.say(trf("Notizbuch nicht lesbar: {}", &[&e])),
                 }
             }
             Message::Back => {
@@ -883,7 +884,7 @@ impl App {
                 }
                 // Moved by hand (not resized): following the owner ends (it would snap back).
                 if speaks && before.viewport == c.viewport && self.follow_host.take().is_some() {
-                    self.say("Folgen beendet");
+                    self.say(tr("Folgen beendet"));
                 }
                 self.follow_notes();
                 if speaks {
@@ -943,9 +944,9 @@ impl App {
                         Screen::Notebook(s) if s.shows(&id) => self.refresh_open(&id, true, &[]),
                         Screen::Notebook(_) => {}
                     }
-                    self.say(format!("„{title}“ übernommen (mit dem Stand hier zusammengeführt)"));
+                    self.say(trf("„{}“ übernommen (mit dem Stand hier zusammengeführt)", &[&title]));
                 }
-                Err(e) => self.say(format!("Import fehlgeschlagen: {e}")),
+                Err(e) => self.say(trf("Import fehlgeschlagen: {}", &[&e])),
             },
             Message::SendToTablet => {
                 // Only through n0bridge (the palette offers it only then).
@@ -959,20 +960,20 @@ impl App {
                 let bytes = match self.lib.export_bundle(&o.id) {
                     Ok(b) => b,
                     Err(e) => {
-                        self.say(format!("Export fehlgeschlagen: {e}"));
+                        self.say(trf("Export fehlgeschlagen: {}", &[&e]));
                         return Task::none();
                     }
                 };
                 if let Err(e) = std::fs::create_dir_all(&dir).and_then(|_| std::fs::write(&path, bytes)) {
-                    self.say(format!("Export fehlgeschlagen: {e}"));
+                    self.say(trf("Export fehlgeschlagen: {}", &[&e]));
                     return Task::none();
                 }
-                self.say("Sende an das Tablet …");
+                self.say(tr("Sende an das Tablet …"));
                 return Task::perform(send_with_n0bridge(path), Message::Sent);
             }
             Message::Sent(r) => self.say(match r {
-                Ok(_) => "An das Tablet gesendet — dort in n0te: IMPORTIEREN".to_string(),
-                Err(e) => format!("Senden fehlgeschlagen: {e}"),
+                Ok(_) => tr("An das Tablet gesendet — dort in n0te: IMPORTIEREN").to_string(),
+                Err(e) => trf("Senden fehlgeschlagen: {}", &[&e]),
             }),
             Message::StartCreate => self.creating = Some(String::new()),
             Message::NewPaper(b) => {
@@ -997,7 +998,7 @@ impl App {
             }
             Message::Create => {
                 let title = self.creating.take().unwrap_or_default();
-                let title = if title.trim().is_empty() { "Neues Notizbuch".to_string() } else { title.trim().to_string() };
+                let title = if title.trim().is_empty() { tr("Neues Notizbuch").to_string() } else { title.trim().to_string() };
                 let made = self.lib.create_notebook(&title).and_then(|nb| {
                     let (w, h) = (self.settings.new_w, self.settings.new_h);
                     nb.add_sheet(None, 0, &SheetSpec { width: w, height: h, background: self.new_paper, spacing: self.new_spacing, pdf: None, gaps: Vec::new() })?;
@@ -1009,7 +1010,7 @@ impl App {
                         self.refresh();
                         let _ = self.open(&id);
                     }
-                    Err(e) => self.say(format!("Anlegen fehlgeschlagen: {e}")),
+                    Err(e) => self.say(trf("Anlegen fehlgeschlagen: {}", &[&e])),
                 }
             }
             Message::DismissStatus => self.status = None,
@@ -1037,9 +1038,9 @@ impl App {
             Message::RotatePage => match self.page_in_view() {
                 Some((node, spec)) if spec.pdf.is_none() && !spec.is_board() => {
                     let (w, h) = format::oriented(spec.width, spec.height, spec.width <= spec.height);
-                    self.resize(vec![node], w, h, Some(format!("Seite gedreht: {}", format::describe(w, h))));
+                    self.resize(vec![node], w, h, Some(trf("Seite gedreht: {}", &[&sidebar::format_name(w, h)])));
                 }
-                Some(_) => self.say("PDF-Seiten und Boards lassen sich nicht drehen"),
+                Some(_) => self.say(tr("PDF-Seiten und Boards lassen sich nicht drehen")),
                 None => {}
             },
             Message::PageToAll => {
@@ -1058,7 +1059,7 @@ impl App {
                             Ok(())
                         });
                     }
-                    let done = format!("{} für {} Seiten übernommen", format::describe(spec.width, spec.height), nodes.len());
+                    let done = trf("{} für {} Seiten übernommen", &[&sidebar::format_name(spec.width, spec.height), &nodes.len()]);
                     self.resize(nodes, spec.width, spec.height, Some(done));
                 }
             }
@@ -1133,7 +1134,7 @@ impl App {
                     "n0te" => self.handle(Message::Import(p)),
                     "pdf" => self.handle(Message::ImportPdf(p)),
                     _ => {
-                        self.say("Nur PDF- und .n0te-Dateien");
+                        self.say(tr("Nur PDF- und .n0te-Dateien"));
                         Task::none()
                     }
                 };
@@ -1247,7 +1248,7 @@ impl App {
             Message::Live(e) => return self.on_live(e),
             Message::StartLive => {
                 let Some(d) = self.devices.iter().find(|d| d.online).cloned() else {
-                    self.say("Kein Gerät online: Tablet koppeln (Einstellungen) und n0te dort öffnen");
+                    self.say(tr("Kein Gerät online: Tablet koppeln (Einstellungen) und n0te dort öffnen"));
                     return Task::none();
                 };
                 // Live goes with ★: the tablet opens the main pane's notebook.
@@ -1258,7 +1259,7 @@ impl App {
                 }
                 self.live_session = Some(LiveSession { device: d.id, name: d.name.clone(), follow_them: false, they_follow: false });
                 self.send_presence_all();
-                self.say(format!("Live mit {}: es öffnet das Notizbuch", d.name));
+                self.say(trf("Live mit {}: es öffnet das Notizbuch", &[&d.name]));
             }
             Message::StopLive => {
                 if let (Some(l), Some(s)) = (&self.live_session, &self.sync)
@@ -1313,7 +1314,7 @@ impl App {
                     self.pair_qr = iced::widget::qr_code::Data::new(code.as_bytes()).ok();
                     self.pair_code = Some(code);
                 }
-                Err(e) => self.say(format!("Koppeln: {e}")),
+                Err(e) => self.say(trf("Koppeln: {}", &[&e])),
             },
             Message::PairEnter(t) => self.pair_enter = t,
             Message::PairAccept => {
@@ -1325,10 +1326,10 @@ impl App {
                     Ok(name) => {
                         self.pair_enter.clear();
                         // The service says "Gekoppelt mit <name> (<id>)".
-                        self.say(if name.trim().is_empty() { "Gekoppelt".to_string() } else { name.trim().to_string() });
+                        self.say(if name.trim().is_empty() { tr("Gekoppelt").to_string() } else { name.trim().to_string() });
                         self.devices = live::devices();
                     }
-                    Err(e) => self.say(format!("Koppeln: {e}")),
+                    Err(e) => self.say(trf("Koppeln: {}", &[&e])),
                 }
             }
             Message::PairToTablet => {
@@ -1342,8 +1343,8 @@ impl App {
                 );
             }
             Message::PairSent(r) => self.say(match r {
-                Ok(_) => "Code ist in der Tablet-Zwischenablage: dort n0te → Einstellungen → LAPTOP KOPPELN".to_string(),
-                Err(e) => format!("Senden fehlgeschlagen: {e}"),
+                Ok(_) => tr("Code ist in der Tablet-Zwischenablage: dort n0te → Einstellungen → LAPTOP KOPPELN").to_string(),
+                Err(e) => trf("Senden fehlgeschlagen: {}", &[&e]),
             }),
             Message::ShowShare(on) => {
                 self.share = if on {
@@ -1369,7 +1370,7 @@ impl App {
                                 .collect(),
                         ),
                         Err(e) => {
-                            self.say(format!("Verlauf: {e}"));
+                            self.say(trf("Verlauf: {}", &[&e]));
                             None
                         }
                     }
@@ -1387,9 +1388,9 @@ impl App {
                         if self.entries.iter().any(|e| e.id == id) {
                             let _ = self.open(&id);
                         }
-                        self.say("Früherer Stand als neues Notizbuch wiederhergestellt (das aktuelle bleibt unverändert)");
+                        self.say(tr("Früherer Stand als neues Notizbuch wiederhergestellt (das aktuelle bleibt unverändert)"));
                     }
-                    Err(e) => self.say(format!("Wiederherstellen: {e}")),
+                    Err(e) => self.say(trf("Wiederherstellen: {}", &[&e])),
                 }
             }
             Message::Invite(rw, days) => {
@@ -1405,19 +1406,19 @@ impl App {
                 }
                 match live::request(&args) {
                     Ok(link) => {
-                        self.say("Einladung erstellt und kopiert");
+                        self.say(tr("Einladung erstellt und kopiert"));
                         // The new link opens (its QR code shows).
                         self.invite_open = live::invites().into_iter().find(|i| i.link == link).map(|i| i.id);
                         let _ = self.handle(Message::ShowShare(true));
                         return iced::clipboard::write(link);
                     }
-                    Err(e) => self.say(format!("Einladen: {e}")),
+                    Err(e) => self.say(trf("Einladen: {}", &[&e])),
                 }
             }
             Message::SetRole(id, write) => {
                 match live::request(&["set-role", &id, if write { "write" } else { "read" }]) {
-                    Ok(_) => self.say(if write { "Gäste dürfen jetzt mitschreiben" } else { "Gäste dürfen jetzt nur lesen" }),
-                    Err(e) => self.say(format!("Rechte: {e}")),
+                    Ok(_) => self.say(if write { tr("Gäste dürfen jetzt mitschreiben") } else { tr("Gäste dürfen jetzt nur lesen") }),
+                    Err(e) => self.say(trf("Rechte: {}", &[&e])),
                 }
                 return self.handle(Message::ShowShare(true));
             }
@@ -1447,9 +1448,9 @@ impl App {
                 self.refresh_guests();
                 if ready {
                     let _ = self.open(&id);
-                    self.say("Beigetreten");
+                    self.say(tr("Beigetreten"));
                 } else {
-                    self.say("Beigetreten — das Notizbuch kommt, sobald der Besitzer erreichbar ist");
+                    self.say(tr("Beigetreten — das Notizbuch kommt, sobald der Besitzer erreichbar ist"));
                 }
             }
             Message::Summon(device) => {
@@ -1464,17 +1465,17 @@ impl App {
                 let refs: Vec<&str> = args.iter().map(String::as_str).collect();
                 match live::request(&refs) {
                     Ok(_) => self.say(match &device {
-                        Some(d) => format!("{} kommt zu dir", self.guests.iter().find(|g| &g.device == d).map(|g| g.name.clone()).unwrap_or_else(|| "Der Gast".into())),
-                        None => "Alle Gäste kommen zu dir".into(),
+                        Some(d) => trf("{} kommt zu dir", &[&self.guests.iter().find(|g| &g.device == d).map(|g| g.name.clone()).unwrap_or_else(|| tr("Der Gast").into())]),
+                        None => tr("Alle Gäste kommen zu dir").into(),
                     }),
-                    Err(e) => self.say(format!("Holen: {e}")),
+                    Err(e) => self.say(trf("Holen: {}", &[&e])),
                 }
             }
             Message::JumpTo(device) => {
                 if let Some((sheet, r)) = self.last_views.get(&device).cloned() {
                     self.look_at(&sheet, r);
                 } else {
-                    self.say("Diese Ansicht ist gerade nicht bekannt");
+                    self.say(tr("Diese Ansicht ist gerade nicht bekannt"));
                 }
             }
             Message::FollowHost(on) => {
@@ -1494,7 +1495,7 @@ impl App {
             }
             Message::Admit(device, yes) => {
                 if let Err(e) = live::request(&[if yes { "admit" } else { "deny" }, &device]) {
-                    self.say(format!("Einlass: {e}"));
+                    self.say(trf("Einlass: {}", &[&e]));
                 }
                 self.refresh_guests();
                 return self.handle(Message::ShowShare(true));
@@ -1505,23 +1506,23 @@ impl App {
                     return Task::none();
                 }
                 self.removing = None;
-                let name = self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| "Der Gast".into());
+                let name = self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| tr("Der Gast").into());
                 match live::request(&["remove-guest", &device]) {
-                    Ok(_) => self.say(format!("{name} ist entfernt und kommt mit dem Link nicht mehr herein")),
-                    Err(e) => self.say(format!("Entfernen: {e}")),
+                    Ok(_) => self.say(trf("{} ist entfernt und kommt mit dem Link nicht mehr herein", &[&name])),
+                    Err(e) => self.say(trf("Entfernen: {}", &[&e])),
                 }
                 self.refresh_guests();
                 return self.handle(Message::ShowShare(true));
             }
             Message::AllowAgain(invite, device) => {
                 if let Err(e) = live::request(&["allow-again", &invite, &device]) {
-                    self.say(format!("Zulassen: {e}"));
+                    self.say(trf("Zulassen: {}", &[&e]));
                 }
                 return self.handle(Message::ShowShare(true));
             }
             Message::SetExpiry(invite, days) => {
                 if let Err(e) = live::request(&["set-expiry", &invite, &days.to_string()]) {
-                    self.say(format!("Ablauf: {e}"));
+                    self.say(trf("Ablauf: {}", &[&e]));
                 }
                 return self.handle(Message::ShowShare(true));
             }
@@ -1534,7 +1535,7 @@ impl App {
                     args.push("--single");
                 }
                 if let Err(e) = live::request(&args) {
-                    self.say(format!("Einladung: {e}"));
+                    self.say(trf("Einladung: {}", &[&e]));
                 }
                 return self.handle(Message::ShowShare(true));
             }
@@ -1547,13 +1548,13 @@ impl App {
             }
             Message::Revoke(id) => {
                 match live::request(&["revoke", &id]) {
-                    Ok(_) => self.say("Widerrufen: der Gast ist getrennt"),
-                    Err(e) => self.say(format!("Widerrufen: {e}")),
+                    Ok(_) => self.say(tr("Widerrufen: der Gast ist getrennt")),
+                    Err(e) => self.say(trf("Widerrufen: {}", &[&e])),
                 }
                 return self.handle(Message::ShowShare(true));
             }
             Message::CopyText(t) => {
-                self.say("Kopiert");
+                self.say(tr("Kopiert"));
                 return iced::clipboard::write(t);
             }
             Message::StartJoin => self.joining = Some(String::new()),
@@ -1563,7 +1564,7 @@ impl App {
             Message::Join => {
                 let link = self.joining.take().unwrap_or_default();
                 let pin = self.join_pin.take().filter(|p| !p.is_empty());
-                self.say("Verbinde mit dem Besitzer …");
+                self.say(tr("Verbinde mit dem Besitzer …"));
                 // Off the UI thread: with approval the owner may take a while to let us in.
                 return Task::perform(
                     async move {
@@ -1584,11 +1585,11 @@ impl App {
                         // The invite has a PIN: the field shows, then join again.
                         self.joining = Some(link);
                         self.join_pin = Some(String::new());
-                        self.say(if e.contains("falsch") { "Die PIN stimmt nicht" } else { "Diese Einladung braucht eine PIN" });
+                        self.say(if e.contains("falsch") { tr("Die PIN stimmt nicht") } else { tr("Diese Einladung braucht eine PIN") });
                     }
                     Ok(out) => {
                         let id = out.rsplit(' ').next().unwrap_or_default().to_string();
-                        self.say("Lade das Notizbuch vom Besitzer …");
+                        self.say(tr("Lade das Notizbuch vom Besitzer …"));
                         // It arrives in the background: open it once it is here (opening it at
                         // once found nothing), waiting at most 45 s.
                         let root = self.lib.root().to_path_buf();
@@ -1607,7 +1608,7 @@ impl App {
                             |(id, ready)| Message::JoinReady(id, ready),
                         );
                     }
-                    Err(e) => self.say(format!("Beitreten: {e}")),
+                    Err(e) => self.say(trf("Beitreten: {}", &[&e])),
                 }
             }
             Message::OpenPalette => {
@@ -1682,7 +1683,7 @@ impl App {
                         }
                         return self.open_text_page(&sheet, false);
                     }
-                    Err(e) => self.say(format!("Textseite: {e}")),
+                    Err(e) => self.say(trf("Textseite: {}", &[&e])),
                 }
             }
             Message::SearchQuery(q) => {
@@ -1776,7 +1777,7 @@ impl App {
                         if let Some(e) = self.plot_edit.take()
                             && self.edit_sheet(&e.sheet_id, |s| s.remove(std::slice::from_ref(&e.original.id)))
                         {
-                            self.say("Koordinatensystem gelöscht");
+                            self.say(tr("Koordinatensystem gelöscht"));
                         }
                     }
                     Reply::Apply(p) => {
@@ -1792,7 +1793,7 @@ impl App {
                                 s.set_plot(&p)
                             });
                             if gone {
-                                self.say("Das Koordinatensystem wurde inzwischen auf einem anderen Gerät gelöscht");
+                                self.say(tr("Das Koordinatensystem wurde inzwischen auf einem anderen Gerät gelöscht"));
                             }
                         }
                     }
@@ -1816,7 +1817,7 @@ impl App {
     /// Opens the panel for a plot (as stored now), the cursor in its input line.
     fn edit_plot(&mut self, sheet_id: &str, plot_id: &str) -> Task<Message> {
         if self.read_only() {
-            self.say("Nur lesen: Koordinatensysteme ändert, wer dich eingeladen hat");
+            self.say(tr("Nur lesen: Koordinatensysteme ändert, wer dich eingeladen hat"));
             return Task::none();
         }
         self.finish_text();
@@ -1832,7 +1833,7 @@ impl App {
     /// one), stored at once; its panel opens with the cursor in the input line.
     fn insert_plot(&mut self) -> Task<Message> {
         if self.read_only() {
-            self.say("Nur lesen: einfügen kann, wer dich eingeladen hat");
+            self.say(tr("Nur lesen: einfügen kann, wer dich eingeladen hat"));
             return Task::none();
         }
         self.finish_text();
@@ -1841,7 +1842,7 @@ impl App {
         let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
         let Some(page) = o.pages.sheet_at(cx, cy).or_else(|| o.pages.index_of_number(o.pages.current_number(&c)).map(|i| &o.pages.pages[i].placed)) else { return Task::none() };
         if page.spec.background == Background::Text && !page.is_board() {
-            self.say("Auf einer Textseite geht das nicht: Koordinatensysteme gehören auf Papierseiten");
+            self.say(tr("Auf einer Textseite geht das nicht: Koordinatensysteme gehören auf Papierseiten"));
             return Task::none();
         }
         let sheet_id = page.sheet_id.clone();
@@ -1866,19 +1867,19 @@ impl App {
     /// didn't work (said in the status bar).
     fn edit_sheet(&mut self, sheet_id: &str, f: impl FnOnce(&Sheet) -> n0te_core::Result<()>) -> bool {
         if self.read_only() {
-            self.say("Nur lesen: ändern kann, wer dich eingeladen hat");
+            self.say(tr("Nur lesen: ändern kann, wer dich eingeladen hat"));
             return false;
         }
         let Some(nb) = self.notebook_id() else { return false };
         let sheet = match self.lib.load_sheet(&nb, sheet_id) {
             Ok(s) => s,
             Err(e) => {
-                self.say(format!("Seite nicht lesbar: {e}"));
+                self.say(trf("Seite nicht lesbar: {}", &[&e]));
                 return false;
             }
         };
         if let Err(e) = f(&sheet) {
-            self.say(format!("Nicht geändert: {e}"));
+            self.say(trf("Nicht geändert: {}", &[&e]));
             return false;
         }
         self.store_sheet(&nb, sheet_id, &sheet);
@@ -2074,7 +2075,7 @@ impl App {
                 if let LiveEvent::Paired { name, .. } = &e {
                     self.pair_code = None;
                     self.pair_qr = None;
-                    self.say(format!("Gekoppelt mit {name}"));
+                    self.say(trf("Gekoppelt mit {}", &[&name]));
                 }
                 self.devices = live::devices();
                 self.refresh_guests();
@@ -2105,7 +2106,7 @@ impl App {
                     .map(|d| d.name.clone())
                     .or_else(|| guest.map(|g| g.name.clone()))
                     .or_else(|| self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()))
-                    .unwrap_or_else(|| "Gast".into());
+                    .unwrap_or_else(|| tr("Gast").into());
                 let following = self.live_session.as_ref().is_some_and(|l| l.follow_them && l.device == device);
                 let Screen::Notebook(s) = &mut self.screen else { return Task::none() };
                 let main = s.main;
@@ -2153,7 +2154,7 @@ impl App {
                             if s.pane(main).is_some_and(|o| o.id != notebook)
                                 && let Err(e) = self.replace_pane(main, &notebook, None)
                             {
-                                self.say(format!("Notizbuch nicht lesbar: {e}"));
+                                self.say(trf("Notizbuch nicht lesbar: {}", &[&e]));
                             }
                         }
                         Screen::Notebook(s) if s.id == notebook => {}
@@ -2166,7 +2167,7 @@ impl App {
                     self.live_session = Some(LiveSession { device, name: name.clone(), follow_them, they_follow });
                     // Where this view is, right away (the tablet may want to follow it).
                     self.send_presence_all();
-                    self.say(format!("{name} hat dieses Notizbuch live geöffnet"));
+                    self.say(trf("{} hat dieses Notizbuch live geöffnet", &[&name]));
                 }
             }
             LiveEvent::Follow { device, on } => {
@@ -2182,7 +2183,7 @@ impl App {
                 }
             }
             LiveEvent::Guest { name, on, device, .. } => {
-                self.say(if on { format!("{name} ist dazugekommen") } else { format!("{} ist gegangen", self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| "Ein Gast".into())) });
+                self.say(if on { trf("{} ist dazugekommen", &[&name]) } else { trf("{} ist gegangen", &[&self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| tr("Ein Gast").into())]) });
                 if !on && let Screen::Notebook(s) = &self.screen {
                     let gone = self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone());
                     if let Some(gone) = gone {
@@ -2203,26 +2204,26 @@ impl App {
             LiveEvent::Waiting { name, on, .. } => {
                 self.refresh_guests();
                 if on {
-                    self.say(format!("{name} möchte herein (Teilen → Hereinlassen)"));
+                    self.say(trf("{} möchte herein (Teilen → Hereinlassen)", &[&name]));
                 }
                 if self.share.is_some() {
                     return self.handle(Message::ShowShare(true));
                 }
             }
-            LiveEvent::JoinWaiting { owner } => self.say(format!("Warte, bis {owner} dich hereinlässt …")),
+            LiveEvent::JoinWaiting { owner } => self.say(trf("Warte, bis {} dich hereinlässt …", &[&owner])),
             LiveEvent::Summoned { device, notebook, sheet, viewport } => {
                 // The pane that speaks for the notebook goes (the main one when it shows it twice).
                 let Some(key) = self.pane_showing(&notebook) else { return Task::none() };
                 if self.in_pane(key, |app| app.look_at(&sheet, viewport)) == Some(true) {
-                    let name = self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()).or_else(|| self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone())).unwrap_or_else(|| "Der Besitzer".into());
-                    self.say(format!("{name} hat dich zu sich geholt"));
+                    let name = self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()).or_else(|| self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone())).unwrap_or_else(|| tr("Der Besitzer").into());
+                    self.say(trf("{} hat dich zu sich geholt", &[&name]));
                 }
             }
             LiveEvent::Role { write, .. } => {
                 self.refresh_guests();
-                self.say(if write { "Du darfst jetzt mitschreiben" } else { "Ab jetzt nur noch lesen" });
+                self.say(if write { tr("Du darfst jetzt mitschreiben") } else { tr("Ab jetzt nur noch lesen") });
             }
-            LiveEvent::Revoked { .. } => self.say("Die Einladung zu diesem Notizbuch wurde widerrufen"),
+            LiveEvent::Revoked { .. } => self.say(tr("Die Einladung zu diesem Notizbuch wurde widerrufen")),
             LiveEvent::Error { message } => self.say(format!("Sync: {message}")),
             LiveEvent::Disconnected => self.sync = None,
         }
@@ -2436,7 +2437,7 @@ impl App {
                     self.relayout();
                 }
                 Err(e) => {
-                    self.say(format!("Notizen: {e}"));
+                    self.say(trf("Notizen: {}", &[&e]));
                     return Task::none();
                 }
             }
@@ -2559,13 +2560,13 @@ impl App {
             .map(|p| p.placed.label())
             .or_else(|| t.main_node.as_ref().and_then(|m| o.pages.pages.iter().find(|p| &p.placed.node == m)).map(|p| p.placed.label()))
             .unwrap_or_default();
-        let title = if t.docked { format!("NOTIZEN · SEITE {label}") } else { format!("TEXTSEITE · {label}") };
+        let title = if t.docked { trf("NOTIZEN · SEITE {}", &[&label]) } else { trf("TEXTSEITE · {}", &[&label]) };
         let header = row![
             text(title).font(theme::MONO).size(10.5).color(theme::PAPER_MUTED),
             Space::new().width(Length::Fill),
-            text(if t.dirty { "…" } else { "GESPEICHERT" }).font(theme::MONO).size(10.5).color(theme::PAPER_MUTED),
+            text(if t.dirty { "…" } else { tr("GESPEICHERT") }).font(theme::MONO).size(10.5).color(theme::PAPER_MUTED),
             Space::new().width(10),
-            button(theme::btn_small("Schließen")).padding([2, 8]).on_press(Message::CloseTextPage).style(theme::text_tool),
+            button(theme::btn_small(tr("Schließen"))).padding([2, 8]).on_press(Message::CloseTextPage).style(theme::text_tool),
         ]
         .align_y(Alignment::Center);
         // Word-like formatting for the block being edited.
@@ -2634,7 +2635,7 @@ impl App {
     /// it: they share the document).
     pub(crate) fn edit_notebook(&mut self, f: impl FnOnce(&Notebook) -> n0te_core::Result<()>) {
         if self.read_only() {
-            self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
+            self.say(tr("Nur lesen: Seiten ändert, wer dich eingeladen hat"));
             return;
         }
         let Some(o) = self.pane() else { return };
@@ -2644,7 +2645,7 @@ impl App {
         self.relayout_book(&id);
         self.changed(&id, Some(&[]));
         if let Err(e) = done {
-            self.say(format!("Nicht geändert: {e}"));
+            self.say(trf("Nicht geändert: {}", &[&e]));
         }
     }
 
@@ -2677,7 +2678,7 @@ impl App {
     /// the edge (they stay stored, but are cut off on screen and in the PDF).
     fn resize(&mut self, nodes: Vec<String>, w: f32, h: f32, done: Option<String>) {
         if self.read_only() {
-            self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
+            self.say(tr("Nur lesen: Seiten ändert, wer dich eingeladen hat"));
             return;
         }
         let Some(o) = self.pane() else { return };
@@ -2701,7 +2702,7 @@ impl App {
         if total.is_empty() {
             self.apply_size(&nodes, w, h, done);
         } else {
-            self.size_warning = Some(SizeWarning { nodes, w, h, what: total.describe(), count: total.strokes + total.images + total.texts, pages, done });
+            self.size_warning = Some(SizeWarning { nodes, w, h, what: describe_outside(&total), count: total.strokes + total.images + total.texts, pages, done });
         }
     }
 
@@ -2720,22 +2721,21 @@ impl App {
     /// The warning before a size change cuts content off.
     fn size_warning_view<'a>(&'a self, w: &'a SizeWarning) -> Element<'a, Message> {
         let one = w.count == 1;
-        let where_ = if w.pages > 1 { format!(" (auf {} Seiten)", w.pages) } else { String::new() };
+        let where_ = if w.pages > 1 { trf(" (auf {} Seiten)", &[&w.pages]) } else { String::new() };
         let col = column![
-            theme::heading("Nicht alles passt auf die Seite", 20.0),
-            text(format!(
-                "{} {} dann über den Rand{where_} und {} abgeschnitten, auch im PDF.",
-                w.what,
-                if one { "ragt" } else { "ragen" },
-                if one { "wird" } else { "werden" }
-            ))
+            theme::heading(tr("Nicht alles passt auf die Seite"), 20.0),
+            text(if one {
+                trf("{} ragt dann über den Rand{} und wird abgeschnitten, auch im PDF.", &[&w.what, &where_])
+            } else {
+                trf("{} ragen dann über den Rand{} und werden abgeschnitten, auch im PDF.", &[&w.what, &where_])
+            })
             .size(15),
-            text("Gelöscht wird nichts: wird die Seite wieder größer, ist alles wieder da.").size(13).color(theme::p().muted),
+            text(tr("Gelöscht wird nichts: wird die Seite wieder größer, ist alles wieder da.")).size(13).color(theme::p().muted),
             row![
                 Space::new().width(Length::Fill),
-                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::ConfirmSize(false)).style(theme::ghost),
+                button(theme::btn(tr("Abbrechen"))).padding(theme::pad()).on_press(Message::ConfirmSize(false)).style(theme::ghost),
                 Space::new().width(8),
-                button(theme::btn("Trotzdem ändern")).padding(theme::pad()).on_press(Message::ConfirmSize(true)).style(theme::accent_button),
+                button(theme::btn(tr("Trotzdem ändern"))).padding(theme::pad()).on_press(Message::ConfirmSize(true)).style(theme::accent_button),
             ]
             .align_y(Alignment::Center),
         ]
@@ -2827,7 +2827,7 @@ impl App {
     /// text page open (and not typed in) in another pane shows the new text.
     pub(crate) fn store_sheet(&mut self, nb: &str, sheet_id: &str, sheet: &Sheet) {
         if let Err(e) = self.lib.save_sheet(nb, sheet_id, sheet) {
-            self.say(format!("Speichern fehlgeschlagen: {e}"));
+            self.say(trf("Speichern fehlgeschlagen: {}", &[&e]));
         }
         let lib = self.lib.clone();
         if let Screen::Notebook(s) = &mut self.screen {
@@ -2955,7 +2955,7 @@ impl App {
                 .size(e.size * cam.zoom)
                 .font(theme::SANS)
                 .padding(4)
-                .placeholder("Text, Markdown: # Titel, - Punkt, **fett**, $x^2$")
+                .placeholder(tr("Text, Markdown: # Titel, - Punkt, **fett**, $x^2$"))
                 .style(theme::editor_on_paper_framed)
                 .highlight_with::<crate::mdstyle::MdInline>((), crate::mdstyle::format);
             out.push(pin(column![tools, container(editor).width(Length::Fixed(e.w * cam.zoom))].spacing(4)).x(x - 4.0).y(y - 32.0).into());
@@ -2973,10 +2973,10 @@ impl App {
     /// A PDF: in the library a new notebook named after the file, in a notebook new pages
     /// right after the current one.
     fn import_pdf(&mut self, path: &Path) {
-        let Some(pdf) = self.pdf.clone() else { return self.say("PDF geht nicht: libpdfium.so fehlt") };
+        let Some(pdf) = self.pdf.clone() else { return self.say(tr("PDF geht nicht: libpdfium.so fehlt")) };
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
-            Err(e) => return self.say(format!("Nicht lesbar: {e}")),
+            Err(e) => return self.say(trf("Nicht lesbar: {}", &[&e])),
         };
         let name = path.file_stem().map(|s| s.to_string_lossy().replace('_', " ")).unwrap_or_else(|| "PDF".into());
         match &self.screen {
@@ -2987,9 +2987,9 @@ impl App {
                 match pdf.import(&self.lib, &o.nb, bytes, parent.as_deref(), index) {
                     Ok(n) => {
                         self.relayout();
-                        self.say(format!("{n} Seiten aus „{name}“ eingefügt"));
+                        self.say(trf("{} Seiten aus „{}“ eingefügt", &[&n, &name]));
                     }
-                    Err(e) => self.say(format!("Import fehlgeschlagen: {e}")),
+                    Err(e) => self.say(trf("Import fehlgeschlagen: {}", &[&e])),
                 }
             }
             Screen::Library => {
@@ -2999,7 +2999,7 @@ impl App {
                         self.refresh();
                         let _ = self.open(&id);
                     }
-                    Err(e) => self.say(format!("Import fehlgeschlagen: {e}")),
+                    Err(e) => self.say(trf("Import fehlgeschlagen: {}", &[&e])),
                 }
             }
         }
@@ -3007,7 +3007,7 @@ impl App {
 
     /// Writes the PDF to ~/Downloads (a free name) and remembers it for "ÖFFNEN".
     fn export_pdf(&mut self, what: ExportWhat) {
-        let Some(pdf) = self.pdf.clone() else { return self.say("PDF geht nicht: libpdfium.so fehlt") };
+        let Some(pdf) = self.pdf.clone() else { return self.say(tr("PDF geht nicht: libpdfium.so fehlt")) };
         let Screen::Notebook(o) = &self.screen else { return };
         let row = |main: &str| -> Vec<String> {
             let mut r: Vec<&n0te_core::layout::Placed> = o.pages.pages.iter().map(|p| &p.placed).filter(|p| p.main_node == main).collect();
@@ -3026,7 +3026,7 @@ impl App {
             }
         };
         if selected.as_ref().is_some_and(|s| s.is_empty()) {
-            return self.say("Keine Seite gewählt");
+            return self.say(tr("Keine Seite gewählt"));
         }
         let title = o.nb.title();
         match pdf.export(&self.lib, &o.nb, selected.as_deref()) {
@@ -3035,13 +3035,13 @@ impl App {
                 match n0te_core::store::write_atomic(&path, &bytes) {
                     Ok(()) => {
                         self.export = None;
-                        self.say(format!("{pages} Seiten exportiert: {}", path.display()));
+                        self.say(trf("{} Seiten exportiert: {}", &[&pages, &path.display()]));
                         self.last_export = Some(path);
                     }
-                    Err(e) => self.say(format!("Speichern fehlgeschlagen: {e}")),
+                    Err(e) => self.say(trf("Speichern fehlgeschlagen: {}", &[&e])),
                 }
             }
-            Err(e) => self.say(format!("Export fehlgeschlagen: {e}")),
+            Err(e) => self.say(trf("Export fehlgeschlagen: {}", &[&e])),
         }
     }
 
@@ -3248,16 +3248,16 @@ impl App {
     fn history_panel<'a>(&'a self, list: &'a [(u64, String)]) -> Element<'a, Message> {
         let mut col = column![
             row![
-                theme::heading("Verlauf", 20.0),
+                theme::heading(tr("Verlauf"), 20.0),
                 Space::new().width(Length::Fill),
-                button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowHistory(false)).style(theme::ghost),
+                button(theme::btn(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowHistory(false)).style(theme::ghost),
             ]
             .align_y(Alignment::Center),
-            text("Der Sync-Dienst sichert alle 5 Minuten. Ältere Stände werden ausgedünnt: alles der letzten Stunde, stündlich für einen Tag, täglich für 30 Tage, danach wöchentlich.").size(12).color(theme::p().muted),
+            text(tr("Der Sync-Dienst sichert alle 5 Minuten. Ältere Stände werden ausgedünnt: alles der letzten Stunde, stündlich für einen Tag, täglich für 30 Tage, danach wöchentlich.")).size(12).color(theme::p().muted),
         ]
         .spacing(8);
         if list.is_empty() {
-            col = col.push(text("Noch keine Stände gesichert.").size(13).color(theme::p().muted));
+            col = col.push(text(tr("Noch keine Stände gesichert.")).size(13).color(theme::p().muted));
         }
         let mut rows = column![].spacing(2);
         for (at, label) in list.iter().rev() {
@@ -3265,7 +3265,7 @@ impl App {
                 row![
                     text(label.clone()).font(theme::meta_font()).size(12.5),
                     Space::new().width(Length::Fill),
-                    button(theme::btn_small("Als Kopie wiederherstellen")).padding([3, 8]).on_press(Message::Restore(*at)).style(theme::ghost),
+                    button(theme::btn_small(tr("Als Kopie wiederherstellen"))).padding([3, 8]).on_press(Message::Restore(*at)).style(theme::ghost),
                 ]
                 .align_y(Alignment::Center),
             );
@@ -3282,41 +3282,41 @@ impl App {
         let nb = self.notebook_id().unwrap_or_default();
         let small = |t: &str, m: Message| button(theme::btn_small(t)).padding(theme::pad()).on_press(m).style(theme::ghost);
         let muted = |t: String| text(t).size(12).color(theme::p().muted);
-        let close = button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowShare(false)).style(theme::ghost);
+        let close = button(theme::btn(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowShare(false)).style(theme::ghost);
 
         // As a guest: the owner's view.
         if let Some(j) = self.joined.iter().find(|j| j.notebook == nb) {
             let following = self.follow_host.is_some();
             let col = column![
-                row![theme::heading("Gast", 20.0), Space::new().width(Length::Fill), close].align_y(Alignment::Center),
-                text(format!("bei {} · {}", j.owner_name, if j.write { "du darfst mitschreiben" } else { "nur lesen" })).size(14).color(theme::p().text),
+                row![theme::heading(tr("Gast"), 20.0), Space::new().width(Length::Fill), close].align_y(Alignment::Center),
+                text(trf("bei {} · {}", &[&j.owner_name, &if j.write { tr("du darfst mitschreiben") } else { tr("nur lesen") }])).size(14).color(theme::p().text),
                 row![
-                    button(theme::btn(&format!("Zu {} springen", j.owner_name))).padding(theme::pad()).on_press(Message::JumpTo(j.owner.clone())).style(theme::secondary),
-                    button(theme::btn(&format!("{} folgen", j.owner_name))).padding(theme::pad()).on_press(Message::FollowHost(!following)).style(theme::tab(following)),
+                    button(theme::btn(&trf("Zu {} springen", &[&j.owner_name]))).padding(theme::pad()).on_press(Message::JumpTo(j.owner.clone())).style(theme::secondary),
+                    button(theme::btn(&trf("{} folgen", &[&j.owner_name]))).padding(theme::pad()).on_press(Message::FollowHost(!following)).style(theme::tab(following)),
                 ]
                 .spacing(8),
-                muted("Folgen endet, sobald du selbst verschiebst.".into()),
-                iced::widget::toggler(self.settings.guest_frames).label(format!("Rahmen von {} zeigen", j.owner_name)).on_toggle(Message::GuestFrames).size(18).text_size(13).spacing(10).style(theme::switch),
+                muted(tr("Folgen endet, sobald du selbst verschiebst.").into()),
+                iced::widget::toggler(self.settings.guest_frames).label(trf("Rahmen von {} zeigen", &[&j.owner_name])).on_toggle(Message::GuestFrames).size(18).text_size(13).spacing(10).style(theme::switch),
             ]
             .spacing(12);
             return container(col).padding(20).width(Length::Fill).max_width(620).style(theme::panel).into();
         }
 
         let mut col = column![
-            row![theme::heading("Teilen", 20.0), Space::new().width(12), muted("Direkt von hier, ohne Server.".into()), Space::new().width(Length::Fill), close].align_y(Alignment::Center),
+            row![theme::heading(tr("Teilen"), 20.0), Space::new().width(12), muted(tr("Direkt von hier, ohne Server.").into()), Space::new().width(Length::Fill), close].align_y(Alignment::Center),
         ]
         .spacing(10);
         if self.sync.is_none() {
-            col = col.push(text("Der Sync-Dienst läuft nicht (systemctl --user enable --now n0te-sync).").size(13).color(theme::p().accent));
+            col = col.push(text(tr("Der Sync-Dienst läuft nicht (systemctl --user enable --now n0te-sync).")).size(13).color(theme::p().accent));
         }
         // At the door, then who is here.
         for g in self.waiting.iter().filter(|g| g.notebook == nb) {
             col = col.push(
                 row![
-                    text(format!("{} möchte herein", g.name)).size(14).color(theme::p().text),
+                    text(trf("{} möchte herein", &[&g.name])).size(14).color(theme::p().text),
                     Space::new().width(Length::Fill),
-                    small("Nein", Message::Admit(g.device.clone(), false)),
-                    button(theme::btn_small("Herein")).padding(theme::pad()).on_press(Message::Admit(g.device.clone(), true)).style(theme::accent_button),
+                    small(tr("Nein"), Message::Admit(g.device.clone(), false)),
+                    button(theme::btn_small(tr("Herein"))).padding(theme::pad()).on_press(Message::Admit(g.device.clone(), true)).style(theme::accent_button),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -3324,7 +3324,7 @@ impl App {
         }
         let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
         if here.is_empty() {
-            col = col.push(muted("Gerade ist niemand da.".into()));
+            col = col.push(muted(tr("Gerade ist niemand da.").into()));
         }
         for g in &here {
             let sure = self.removing.as_deref() == Some(g.device.as_str());
@@ -3332,14 +3332,14 @@ impl App {
                 row![
                     container(Space::new().width(8).height(8)).style(|_| container::Style { background: Some(theme::p().accent.into()), border: iced::Border { radius: 4.0.into(), ..Default::default() }, ..Default::default() }),
                     text(g.name.clone()).size(14).color(theme::p().text),
-                    muted(if g.write { "schreibt".into() } else { "liest".into() }),
+                    muted(if g.write { tr("schreibt").into() } else { tr("liest").into() }),
                     Space::new().width(Length::Fill),
-                    small("Hinschauen", Message::JumpTo(g.device.clone())),
-                    small("Zu mir holen", Message::Summon(Some(g.device.clone()))),
+                    small(tr("Hinschauen"), Message::JumpTo(g.device.clone())),
+                    small(tr("Zu mir holen"), Message::Summon(Some(g.device.clone()))),
                     if sure {
-                        button(theme::btn_small("Wirklich entfernen?")).padding(theme::pad()).on_press(Message::RemoveGuest(g.device.clone())).style(theme::accent_button)
+                        button(theme::btn_small(tr("Wirklich entfernen?"))).padding(theme::pad()).on_press(Message::RemoveGuest(g.device.clone())).style(theme::accent_button)
                     } else {
-                        small("Entfernen", Message::RemoveGuest(g.device.clone()))
+                        small(tr("Entfernen"), Message::RemoveGuest(g.device.clone()))
                     },
                 ]
                 .spacing(8)
@@ -3347,7 +3347,7 @@ impl App {
             );
         }
         if here.len() > 1 {
-            col = col.push(row![Space::new().width(Length::Fill), button(theme::btn_small("Alle zu mir holen")).padding(theme::pad()).on_press(Message::Summon(None)).style(theme::secondary)]);
+            col = col.push(row![Space::new().width(Length::Fill), button(theme::btn_small(tr("Alle zu mir holen"))).padding(theme::pad()).on_press(Message::Summon(None)).style(theme::secondary)]);
         }
         col = col.push(container(Space::new().height(1)).width(Length::Fill).style(theme::hairline));
         // Invites: one line each; the open one shows its settings.
@@ -3355,29 +3355,29 @@ impl App {
         for i in invites.iter().rev().filter(|i| !i.revoked) {
             let open = self.invite_open.as_deref() == Some(i.id.as_str());
             let until = match i.expires {
-                0 => "ohne Ablauf".to_string(),
-                e if e < now => "abgelaufen".to_string(),
+                0 => tr("ohne Ablauf").to_string(),
+                e if e < now => tr("abgelaufen").to_string(),
                 e => remaining(e - now),
             };
             let mut facts = vec![until];
             if i.online > 0 {
-                facts.push(format!("{} da", i.online));
+                facts.push(trf("{} da", &[&i.online]));
             }
             if i.approve {
-                facts.push("bestätigen".into());
+                facts.push(tr("bestätigen").into());
             }
             if i.single {
-                facts.push("ein Gerät".into());
+                facts.push(tr("ein Gerät").into());
             }
             if let Some(p) = &i.pin {
                 facts.push(format!("PIN {p}"));
             }
             let mut card = column![
                 row![
-                    column![text(format!("Link · {}", if i.rw { "lesen & schreiben" } else { "nur lesen" })).size(14).color(theme::p().text), muted(facts.join(" · "))].spacing(2),
+                    column![text(format!("Link · {}", if i.rw { tr("lesen & schreiben") } else { tr("nur lesen") })).size(14).color(theme::p().text), muted(facts.join(" · "))].spacing(2),
                     Space::new().width(Length::Fill),
-                    small("Link kopieren", Message::CopyText(i.link.clone())),
-                    small(if open { "Weniger" } else { "Einstellungen" }, Message::ToggleInvite(i.id.clone())),
+                    small(tr("Link kopieren"), Message::CopyText(i.link.clone())),
+                    small(if open { tr("Weniger") } else { tr("Einstellungen") }, Message::ToggleInvite(i.id.clone())),
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -3386,13 +3386,13 @@ impl App {
             if open {
                 card = card.push(
                     row![
-                        button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
-                        button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
+                        button(theme::btn_small(tr("Nur lesen"))).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), false)).style(theme::tab(!i.rw)),
+                        button(theme::btn_small(tr("Lesen & schreiben"))).padding(theme::pad()).on_press(Message::SetRole(i.id.clone(), true)).style(theme::tab(i.rw)),
                         Space::new().width(18),
-                        button(theme::btn_small("1 Tag")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 1)).style(theme::tab(false)),
-                        button(theme::btn_small("7 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 7)).style(theme::tab(false)),
-                        button(theme::btn_small("30 Tage")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 30)).style(theme::tab(false)),
-                        button(theme::btn_small("Unbegrenzt")).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 0)).style(theme::tab(i.expires == 0)),
+                        button(theme::btn_small(tr("1 Tag"))).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 1)).style(theme::tab(false)),
+                        button(theme::btn_small(tr("7 Tage"))).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 7)).style(theme::tab(false)),
+                        button(theme::btn_small(tr("30 Tage"))).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 30)).style(theme::tab(false)),
+                        button(theme::btn_small(tr("Unbegrenzt"))).padding(theme::pad()).on_press(Message::SetExpiry(i.id.clone(), 0)).style(theme::tab(i.expires == 0)),
                     ]
                     .spacing(6)
                     .align_y(Alignment::Center),
@@ -3401,9 +3401,9 @@ impl App {
                 let (approve, single) = (i.approve, i.single);
                 card = card.push(
                     row![
-                        iced::widget::toggler(i.approve).label("Neue Gäste erst bestätigen").on_toggle(move |on| Message::SetInviteOptions(id1.clone(), on, single)).size(16).text_size(12).spacing(8).style(theme::switch),
+                        iced::widget::toggler(i.approve).label(tr("Neue Gäste erst bestätigen")).on_toggle(move |on| Message::SetInviteOptions(id1.clone(), on, single)).size(16).text_size(12).spacing(8).style(theme::switch),
                         Space::new().width(16),
-                        iced::widget::toggler(i.single).label("Nur ein Gerät").on_toggle(move |on| Message::SetInviteOptions(id2.clone(), approve, on)).size(16).text_size(12).spacing(8).style(theme::switch),
+                        iced::widget::toggler(i.single).label(tr("Nur ein Gerät")).on_toggle(move |on| Message::SetInviteOptions(id2.clone(), approve, on)).size(16).text_size(12).spacing(8).style(theme::switch),
                         Space::new().width(16),
                         iced::widget::toggler(i.pin.is_some()).label("PIN").on_toggle(move |on| Message::SetPin(id3.clone(), on)).size(16).text_size(12).spacing(8).style(theme::switch),
                     ]
@@ -3411,28 +3411,28 @@ impl App {
                 );
                 if let Some(pin) = &i.pin {
                     card = card.push(
-                        row![text(pin.clone()).font(theme::MONO_BOLD).size(20).color(theme::p().text), muted("getrennt vom Link sagen".into()), Space::new().width(Length::Fill), small("Neue PIN", Message::SetPin(i.id.clone(), true))]
+                        row![text(pin.clone()).font(theme::MONO_BOLD).size(20).color(theme::p().text), muted(tr("getrennt vom Link sagen").into()), Space::new().width(Length::Fill), small(tr("Neue PIN"), Message::SetPin(i.id.clone(), true))]
                             .spacing(12)
                             .align_y(Alignment::Center),
                     );
                 }
                 for (device, name) in &i.banned {
-                    card = card.push(row![muted(format!("Entfernt: {name}")), Space::new().width(Length::Fill), small("Wieder zulassen", Message::AllowAgain(i.id.clone(), device.clone()))].align_y(Alignment::Center));
+                    card = card.push(row![muted(trf("Entfernt: {}", &[&name])), Space::new().width(Length::Fill), small(tr("Wieder zulassen"), Message::AllowAgain(i.id.clone(), device.clone()))].align_y(Alignment::Center));
                 }
                 let qr: Element<'a, Message> = match &self.share_qr {
-                    Some(data) => row![scannable_qr(data, 3.0), muted("Mit dem Tablet scannen".into())].spacing(12).align_y(Alignment::Center).into(),
+                    Some(data) => row![scannable_qr(data, 3.0), muted(tr("Mit dem Tablet scannen").into())].spacing(12).align_y(Alignment::Center).into(),
                     None => Space::new().into(),
                 };
-                card = card.push(row![qr, Space::new().width(Length::Fill), small("Link widerrufen", Message::Revoke(i.id.clone()))].align_y(Alignment::End));
+                card = card.push(row![qr, Space::new().width(Length::Fill), small(tr("Link widerrufen"), Message::Revoke(i.id.clone()))].align_y(Alignment::End));
             }
             col = col.push(container(card).padding(12).width(Length::Fill).style(theme::group));
         }
         col = col.push(
             row![
-                muted("Einladen:".into()),
-                button(theme::btn_small("Nur lesen")).padding(theme::pad()).on_press(Message::Invite(false, 7)).style(theme::secondary),
-                button(theme::btn_small("Lesen & schreiben")).padding(theme::pad()).on_press(Message::Invite(true, 7)).style(theme::secondary),
-                muted("· 7 Tage, änderbar".into()),
+                muted(tr("Einladen:").into()),
+                button(theme::btn_small(tr("Nur lesen"))).padding(theme::pad()).on_press(Message::Invite(false, 7)).style(theme::secondary),
+                button(theme::btn_small(tr("Lesen & schreiben"))).padding(theme::pad()).on_press(Message::Invite(true, 7)).style(theme::secondary),
+                muted(tr("· 7 Tage, änderbar").into()),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
@@ -3440,9 +3440,9 @@ impl App {
         col = col.push(container(Space::new().height(1)).width(Length::Fill).style(theme::hairline));
         col = col.push(
             row![
-                iced::widget::toggler(self.settings.guest_frames).label("Zeigen, wo Gäste hinschauen").on_toggle(Message::GuestFrames).size(16).text_size(12).spacing(8).style(theme::switch),
+                iced::widget::toggler(self.settings.guest_frames).label(tr("Zeigen, wo Gäste hinschauen")).on_toggle(Message::GuestFrames).size(16).text_size(12).spacing(8).style(theme::switch),
                 Space::new().width(24),
-                iced::widget::toggler(self.settings.share_view).label("Gäste sehen, wo ich hinschaue").on_toggle(Message::ShareView).size(16).text_size(12).spacing(8).style(theme::switch),
+                iced::widget::toggler(self.settings.share_view).label(tr("Gäste sehen, wo ich hinschaue")).on_toggle(Message::ShareView).size(16).text_size(12).spacing(8).style(theme::switch),
             ]
             .align_y(Alignment::Center),
         );
@@ -3452,36 +3452,36 @@ impl App {
 
     fn help_view(&self) -> Element<'_, Message> {
         let keys = [
-            ("Strg K", "Befehle, Seiten, Notizbücher suchen"),
-            ("Strg F", "Im Notizbuch suchen: Handschrift, Text, Überschriften, PDF"),
-            ("Rechtsklick", "Bibliothek: Menü für Notizbuch, Ordner, Tag"),
-            ("Karte ziehen", "Auf einen Ordner links: dorthin verschieben"),
-            ("Esc", "Zurück · Bearbeiten beenden · zweites Notizbuch schließen · Bibliothek"),
-            ("⧉ in der Leiste", "Daneben öffnen: dieses Notizbuch nochmal oder ein anderes"),
-            ("Strich zwischen zweien", "Ziehen: Breite (⅓, ½, ⅔) · an den Rand: schließen"),
-            ("Bild ↑ / ↓, ← / →", "Vorige / nächste Seite"),
-            ("Pos1 / Ende", "Erste / letzte Seite"),
-            ("Mausrad · Ziehen", "Verschieben"),
-            ("Touchpad: zwei Finger", "Verschieben, auseinander / zusammen: zoomen"),
-            ("Strg + Mausrad, Strg + / −", "Zoomen, Strg 0: 100 %"),
-            ("Strg R", "Seite drehen (hoch ↔ quer)"),
-            ("Doppelklick · Strg T", "Textfeld"),
-            ("Klick auf ein Koordinatensystem", "Funktionen und Bereich ändern (Strg K: einfügen)"),
-            ("Strg N", "Neue Textseite (Bibliothek: neues Notizbuch)"),
-            ("Strg M", "Notizen neben der Seite"),
-            ("Strg O", "PDF einfügen / importieren (oder Datei ins Fenster ziehen)"),
-            ("Strg E", "PDF exportieren"),
-            ("Strg B", "Gliederung ein/aus"),
-            ("Strg H", "Verlauf: frühere Stände wiederherstellen"),
-            ("Strg I", "Vom Tablet übernehmen (.n0te)"),
-            ("Strg ,", "Einstellungen"),
-            ("F1", "Diese Übersicht"),
+            (tr("Strg K"), tr("Befehle, Seiten, Notizbücher suchen")),
+            (tr("Strg F"), tr("Im Notizbuch suchen: Handschrift, Text, Überschriften, PDF")),
+            (tr("Rechtsklick"), tr("Bibliothek: Menü für Notizbuch, Ordner, Tag")),
+            (tr("Karte ziehen"), tr("Auf einen Ordner links: dorthin verschieben")),
+            ("Esc", tr("Zurück · Bearbeiten beenden · zweites Notizbuch schließen · Bibliothek")),
+            (tr("⧉ in der Leiste"), tr("Daneben öffnen: dieses Notizbuch nochmal oder ein anderes")),
+            (tr("Strich zwischen zweien"), tr("Ziehen: Breite (⅓, ½, ⅔) · an den Rand: schließen")),
+            (tr("Bild ↑ / ↓, ← / →"), tr("Vorige / nächste Seite")),
+            (tr("Pos1 / Ende"), tr("Erste / letzte Seite")),
+            (tr("Mausrad · Ziehen"), tr("Verschieben")),
+            (tr("Touchpad: zwei Finger"), tr("Verschieben, auseinander / zusammen: zoomen")),
+            (tr("Strg + Mausrad, Strg + / −"), tr("Zoomen, Strg 0: 100 %")),
+            (tr("Strg R"), tr("Seite drehen (hoch ↔ quer)")),
+            (tr("Doppelklick · Strg T"), tr("Textfeld")),
+            (tr("Klick auf ein Koordinatensystem"), tr("Funktionen und Bereich ändern (Strg K: einfügen)")),
+            (tr("Strg N"), tr("Neue Textseite (Bibliothek: neues Notizbuch)")),
+            (tr("Strg M"), tr("Notizen neben der Seite")),
+            (tr("Strg O"), tr("PDF einfügen / importieren (oder Datei ins Fenster ziehen)")),
+            (tr("Strg E"), tr("PDF exportieren")),
+            (tr("Strg B"), tr("Gliederung ein/aus")),
+            (tr("Strg H"), tr("Verlauf: frühere Stände wiederherstellen")),
+            (tr("Strg I"), tr("Vom Tablet übernehmen (.n0te)")),
+            (tr("Strg ,"), tr("Einstellungen")),
+            ("F1", tr("Diese Übersicht")),
         ];
-        let mut col = column![theme::heading("Tastenkürzel", 22.0)].spacing(9);
+        let mut col = column![theme::heading(tr("Tastenkürzel"), 22.0)].spacing(9);
         for (k, what) in keys {
             col = col.push(row![text(k).font(theme::MONO_BOLD).size(12).width(Length::Fixed(230.0)), text(what).size(14)].align_y(Alignment::Center));
         }
-        col = col.push(button(theme::btn("Schließen")).padding(theme::pad()).on_press(Message::ShowHelp(false)).style(theme::ghost));
+        col = col.push(button(theme::btn(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowHelp(false)).style(theme::ghost));
         container(container(col).padding(20).width(Length::Fixed(640.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
@@ -3492,7 +3492,7 @@ impl App {
             return col.into();
         }
         if self.devices.is_empty() {
-            col = col.push(text("Noch kein Gerät gekoppelt.").size(13).color(theme::p().muted));
+            col = col.push(text(tr("Noch kein Gerät gekoppelt.")).size(13).color(theme::p().muted));
         }
         for d in &self.devices {
             let online = d.online;
@@ -3504,7 +3504,7 @@ impl App {
                         ..Default::default()
                     }),
                     text(d.name.clone()).size(14).color(theme::p().text),
-                    text(if online { "verbunden" } else { "nicht erreichbar" }).size(12).color(theme::p().muted),
+                    text(if online { tr("verbunden") } else { tr("nicht erreichbar") }).size(12).color(theme::p().muted),
                 ]
                 .spacing(10)
                 .align_y(Alignment::Center),
@@ -3514,13 +3514,13 @@ impl App {
         // here — n0te Tablet on Windows pairs with a laptop like this (no camera needed).
         col = col.push(
             row![
-                text_input("Code eines anderen Geräts einfügen (n0te-pair:…)", &self.pair_enter).on_input(Message::PairEnter).on_submit(Message::PairAccept).padding(8).size(13).style(theme::field),
-                button(theme::btn_small("Koppeln")).padding(theme::pad()).on_press_maybe((!self.pair_enter.trim().is_empty()).then_some(Message::PairAccept)).style(theme::secondary),
+                text_input(tr("Code eines anderen Geräts einfügen (n0te-pair:…)"), &self.pair_enter).on_input(Message::PairEnter).on_submit(Message::PairAccept).padding(8).size(13).style(theme::field),
+                button(theme::btn_small(tr("Koppeln"))).padding(theme::pad()).on_press_maybe((!self.pair_enter.trim().is_empty()).then_some(Message::PairAccept)).style(theme::secondary),
             ]
             .spacing(8)
             .align_y(Alignment::Center),
         );
-        let pair_label = if crate::mode() == crate::Mode::Tablet { "Gerät koppeln (Code zeigen)" } else { "Tablet koppeln" };
+        let pair_label = if crate::mode() == crate::Mode::Tablet { tr("Gerät koppeln (Code zeigen)") } else { tr("Tablet koppeln") };
         match &self.pair_code {
             None => col = col.push(button(theme::btn(pair_label)).padding(theme::pad()).on_press(Message::PairStart).style(theme::secondary)),
             Some(code) => {
@@ -3531,8 +3531,8 @@ impl App {
                             scannable_qr(data, 4.0),
                             Space::new().width(16),
                             column![
-                                text("Am Tablet scannen").font(theme::title_font()).size(14).color(theme::p().text),
-                                text("n0te → Einstellungen → Laptop → QR scannen. Dafür braucht es kein n0bridge. Der Code gilt 15 Minuten und nur einmal.").size(12).color(theme::p().muted),
+                                text(tr("Am Tablet scannen")).font(theme::title_font()).size(14).color(theme::p().text),
+                                text(tr("n0te → Einstellungen → Laptop → QR scannen. Dafür braucht es kein n0bridge. Der Code gilt 15 Minuten und nur einmal.")).size(12).color(theme::p().muted),
                             ]
                             .spacing(4)
                             .width(Length::Fill),
@@ -3541,10 +3541,10 @@ impl App {
                     );
                 }
                 col = col.push(text_input("", code).size(12).font(theme::MONO).padding(8).style(theme::field));
-                let mut buttons = row![button(theme::btn_small("Kopieren")).padding(theme::pad()).on_press(Message::CopyText(code.clone())).style(theme::secondary)].align_y(Alignment::Center);
+                let mut buttons = row![button(theme::btn_small(tr("Kopieren"))).padding(theme::pad()).on_press(Message::CopyText(code.clone())).style(theme::secondary)].align_y(Alignment::Center);
                 // With n0bridge on both devices the code can go straight to the tablet's clipboard.
                 if n0bridge_installed() {
-                    buttons = buttons.push(Space::new().width(8)).push(button(theme::btn_small("An Tablet schicken (n0bridge)")).padding(theme::pad()).on_press(Message::PairToTablet).style(theme::ghost));
+                    buttons = buttons.push(Space::new().width(8)).push(button(theme::btn_small(tr("An Tablet schicken (n0bridge)"))).padding(theme::pad()).on_press(Message::PairToTablet).style(theme::ghost));
                 }
                 col = col.push(buttons);
             }
@@ -3561,8 +3561,8 @@ impl App {
                 button(
                     column![
                         style_preview(t),
-                        text(t.name).font(theme::title_font()).size(14).color(theme::p().text),
-                        text(t.style.desc).size(11.5).color(theme::p().muted),
+                        text(tr(t.name)).font(theme::title_font()).size(14).color(theme::p().text),
+                        text(tr(t.style.desc)).size(11.5).color(theme::p().muted),
                     ]
                     .spacing(5),
                 )
@@ -3586,15 +3586,15 @@ impl App {
         let section = settings_section;
         let rule = || container(Space::new()).height(1).width(Length::Fill).style(theme::hairline);
         let body = column![
-            section("Design", "Farben, Formen und Schrift. Exportierte PDFs bleiben weiß.", designs.into()),
+            section(tr("Design"), tr("Farben, Formen und Schrift. Exportierte PDFs bleiben weiß."), designs.into()),
             rule(),
-            section("Abstände", "Zwischen den Seiten im Notizbuch.", column![slider("Zwischen Seiten", self.settings.row_gap, Message::SetRowGap), slider("Zu Seitenblättern", self.settings.side_gap, Message::SetSideGap)].spacing(8).into()),
+            section(tr("Abstände"), tr("Zwischen den Seiten im Notizbuch."), column![slider(tr("Zwischen Seiten"), self.settings.row_gap, Message::SetRowGap), slider(tr("Zu Seitenblättern"), self.settings.side_gap, Message::SetSideGap)].spacing(8).into()),
             rule(),
             section(
                 "Touchpad",
-                "Zwei Finger verschieben, auseinander und zusammen zoomt.",
+                tr("Zwei Finger verschieben, auseinander und zusammen zoomt."),
                 iced::widget::toggler(self.settings.momentum)
-                    .label("Schwung: die Seite gleitet nach dem Wischen weiter (Finger auflegen hält sie an)")
+                    .label(tr("Schwung: die Seite gleitet nach dem Wischen weiter (Finger auflegen hält sie an)"))
                     .on_toggle(Message::Momentum)
                     .size(20)
                     .text_size(14)
@@ -3604,27 +3604,27 @@ impl App {
             ),
             rule(),
             section(
-                "Text",
-                "Textseiten und Textfelder.",
-                iced::widget::toggler(self.settings.formula_center).label("Formeln zentrieren ($$…$$ und Formelblöcke)").on_toggle(Message::FormulaCenter).size(20).text_size(14).spacing(12).style(theme::switch).into(),
+                tr("Text"),
+                tr("Textseiten und Textfelder."),
+                iced::widget::toggler(self.settings.formula_center).label(tr("Formeln zentrieren ($$…$$ und Formelblöcke)")).on_toggle(Message::FormulaCenter).size(20).text_size(14).spacing(12).style(theme::switch).into(),
             ),
             rule(),
             section(
-                crate::i18n::tr("Sprache"),
-                crate::i18n::tr("Automatisch: unter Windows die Sprache des Systems."),
+                tr("Sprache"),
+                tr("Automatisch: unter Windows die Sprache des Systems."),
                 {
-                    let opt = |label: &'static str, v: &'static str| button(text(crate::i18n::tr(label)).size(13)).padding([6, 12]).on_press(Message::Language(v.into())).style(theme::option(self.settings.language == v));
-                    row![opt("Automatisch", "auto"), opt("Deutsch", "de"), opt("English", "en")].spacing(6).into()
+                    let opt = |label: &'static str, v: &'static str| button(text(label).size(13)).padding([6, 12]).on_press(Message::Language(v.into())).style(theme::option(self.settings.language == v));
+                    row![opt(tr("Automatisch"), "auto"), opt(tr("Deutsch"), "de"), opt(tr("English"), "en")].spacing(6).into()
                 },
             ),
             rule(),
-            section("Geräte", "Sync mit dem Tablet, direkt und ohne Server.", self.devices_view()),
+            section(tr("Geräte"), tr("Sync mit dem Tablet, direkt und ohne Server."), self.devices_view()),
         ]
         .spacing(18);
         let col = column![
-            row![theme::heading("Einstellungen", 24.0), Space::new().width(Length::Fill), button(theme::btn_small("Schließen")).padding(theme::pad()).on_press(Message::ShowSettings(false)).style(theme::ghost)].align_y(Alignment::Center),
+            row![theme::heading(tr("Einstellungen"), 24.0), Space::new().width(Length::Fill), button(theme::btn_small(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowSettings(false)).style(theme::ghost)].align_y(Alignment::Center),
             iced::widget::scrollable(body).style(theme::scroll_dark).height(Length::Shrink),
-            text("Gespeichert in ~/.config/n0te/laptop.conf").font(theme::meta_font()).size(11.5).color(theme::p().muted),
+            text(tr("Gespeichert in ~/.config/n0te/laptop.conf")).font(theme::meta_font()).size(11.5).color(theme::p().muted),
         ]
         .spacing(20);
         container(container(col).padding(26).width(Length::Fixed(860.0)).max_height(820.0).style(theme::panel)).padding(Padding { top: 40.0, ..Padding::ZERO }).center_x(Length::Fill).into()
@@ -3637,18 +3637,18 @@ impl App {
         let live_bar: Element<'a, Message> = match &self.live_session {
             Some(l) => {
                 // With two panes: live goes with ★.
-                let label = if s.panes.len() > 1 { format!("Live mit {} · ★", l.name) } else { format!("Live mit {}", l.name) };
+                let label = if s.panes.len() > 1 { trf("Live mit {} · ★", &[&l.name]) } else { trf("Live mit {}", &[&l.name]) };
                 container(
                     row![
                         text(theme::cased(&label)).font(theme::label_font()).size(theme::label_size()).color(theme::p().accent),
                         Space::new().width(18),
-                        iced::widget::checkbox(l.follow_them).label("Ansicht folgt dem Tablet").on_toggle(Message::FollowThem).size(14).text_size(12),
+                        iced::widget::checkbox(l.follow_them).label(tr("Ansicht folgt dem Tablet")).on_toggle(Message::FollowThem).size(14).text_size(12),
                         Space::new().width(18),
-                        iced::widget::checkbox(l.they_follow).label("Tablet folgt mir").on_toggle(Message::TheyFollow).size(14).text_size(12),
+                        iced::widget::checkbox(l.they_follow).label(tr("Tablet folgt mir")).on_toggle(Message::TheyFollow).size(14).text_size(12),
                         Space::new().width(18),
-                        iced::widget::checkbox(self.settings.remote_frame).label("Rahmen zeigen").on_toggle(Message::RemoteFrame).size(14).text_size(12),
+                        iced::widget::checkbox(self.settings.remote_frame).label(tr("Rahmen zeigen")).on_toggle(Message::RemoteFrame).size(14).text_size(12),
                         Space::new().width(Length::Fill),
-                        button(theme::btn_small("Beenden")).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
+                        button(theme::btn_small(tr("Beenden"))).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
                     ]
                     .align_y(Alignment::Center),
                 )
@@ -3703,7 +3703,7 @@ impl App {
         } else if let Some(invites) = &self.share {
             Some(self.share_panel(invites))
         } else if self.show_pdf_import {
-            Some(library::pdf_panel(&self.pdfs, "PDF einfügen: nach der aktuellen Seite"))
+            Some(library::pdf_panel(&self.pdfs, tr("PDF einfügen: nach der aktuellen Seite")))
         } else if self.page_panel {
             Some(self.page_panel_view(o))
         } else {
@@ -3731,7 +3731,7 @@ impl App {
         let star = if s.panes.len() > 1 { "★ " } else { "" };
         container(
             row![
-                button(theme::btn("‹ Bibliothek")).padding(theme::pad()).on_press(Message::Back).style(theme::ghost),
+                button(theme::btn(tr("‹ Bibliothek"))).padding(theme::pad()).on_press(Message::Back).style(theme::ghost),
                 Space::new().width(18),
                 text(theme::cased(&o.nb.title())).font(theme::title_font()).size(14).color(theme::p().text),
                 Space::new().width(Length::Fill),
@@ -3745,13 +3745,13 @@ impl App {
                 Space::new().width(6),
                 split::menu_button(s.menu.is_some()),
                 Space::new().width(14),
-                button(theme::btn("+ Textseite")).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
+                button(theme::btn(tr("+ Textseite"))).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
                 Space::new().width(6),
-                button(theme::btn("+ Koordinatensystem")).padding(theme::pad()).on_press(Message::InsertPlot).style(theme::tab(false)),
+                button(theme::btn(tr("+ Koordinatensystem"))).padding(theme::pad()).on_press(Message::InsertPlot).style(theme::tab(false)),
                 Space::new().width(6),
-                button(theme::btn("Notizen")).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(o.text_page.as_ref().is_some_and(|t| t.docked))),
+                button(theme::btn(tr("Notizen"))).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(o.text_page.as_ref().is_some_and(|t| t.docked))),
                 Space::new().width(6),
-                button(theme::btn("PDF einfügen")).padding(theme::pad()).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
+                button(theme::btn(tr("PDF einfügen"))).padding(theme::pad()).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
                 Space::new().width(6),
                 button(theme::btn("Export")).padding(theme::pad()).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
                 Space::new().width(6),
@@ -3774,17 +3774,17 @@ impl App {
 
     fn share_label(&self, nb: &str) -> String {
         if let Some(j) = self.joined.iter().find(|j| j.notebook == nb) {
-            return format!("{} Gast bei {}{}", if j.online { "●" } else { "○" }, j.owner_name, if j.write { "" } else { " · nur lesen" });
+            return trf("{} Gast bei {}{}", &[&if j.online { "●" } else { "○" }, &j.owner_name, &if j.write { "" } else { tr(" · nur lesen") }]);
         }
         let knocking: Vec<&live::Guest> = self.waiting.iter().filter(|g| g.notebook == nb).collect();
         if !knocking.is_empty() {
-            return if knocking.len() == 1 { format!("Teilen · ● {} wartet", knocking[0].name) } else { format!("Teilen · ● {} warten", knocking.len()) };
+            return if knocking.len() == 1 { trf("Teilen · ● {} wartet", &[&knocking[0].name]) } else { trf("Teilen · ● {} warten", &[&knocking.len()]) };
         }
         let here: Vec<&live::Guest> = self.guests.iter().filter(|g| g.notebook == nb).collect();
         match here.len() {
-            0 => "Teilen".into(),
-            1 => format!("Teilen · ● {}", here[0].name),
-            n => format!("Teilen · ● {n} Gäste"),
+            0 => tr("Teilen").into(),
+            1 => trf("Teilen · ● {}", &[&here[0].name]),
+            n => trf("Teilen · ● {} Gäste", &[&n]),
         }
     }
 
@@ -3794,12 +3794,12 @@ impl App {
                 text(s.as_str()).font(theme::meta_font()).size(12).color(theme::p().text),
                 Space::new().width(10),
                 match &self.last_export {
-                    Some(p) => Element::from(button(theme::btn_small("Öffnen")).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
+                    Some(p) => Element::from(button(theme::btn_small(tr("Öffnen"))).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
                     None => Space::new().into(),
                 },
                 Space::new().width(6),
                 if self.undo_delete.as_ref().is_some_and(|nb| matches!(&self.screen, Screen::Notebook(s) if s.shows(nb))) {
-                    Element::from(button(theme::btn_small("Rückgängig")).padding([0, 8]).on_press(Message::Outline(sidebar::Msg::Undo)).style(theme::ghost))
+                    Element::from(button(theme::btn_small(tr("Rückgängig"))).padding([0, 8]).on_press(Message::Outline(sidebar::Msg::Undo)).style(theme::ghost))
                 } else {
                     Space::new().into()
                 },
@@ -3808,7 +3808,7 @@ impl App {
             ]
             .align_y(Alignment::Center)
             .into(),
-            None => text(theme::cased("Strg K: Befehle · F1: Tastenkürzel")).font(theme::meta_font()).size(11.5).color(theme::p().muted).into(),
+            None => text(theme::cased(tr("Strg K: Befehle · F1: Tastenkürzel"))).font(theme::meta_font()).size(11.5).color(theme::p().muted).into(),
         };
         container(row![left, Space::new().width(Length::Fill)].align_y(Alignment::Center))
             .padding([4, 14])
@@ -3823,31 +3823,31 @@ impl App {
         let t = self.creating.as_ref()?;
         let choice = |label: &str, on: bool, m: Message| button(theme::btn_small(label)).padding(theme::pad()).on_press(m).style(theme::tab(on));
         let mut papers = row![].spacing(6);
-        for (b, label) in [(Background::Blank, "Leer"), (Background::Lines, "Linien"), (Background::Grid, "Kästchen"), (Background::Dots, "Punkte"), (Background::Cornell, "Cornell")] {
+        for (b, label) in [(Background::Blank, tr("Leer")), (Background::Lines, tr("Linien")), (Background::Grid, tr("Kästchen")), (Background::Dots, trc("paper", "Punkte")), (Background::Cornell, "Cornell")] {
             papers = papers.push(choice(label, self.new_paper == b, Message::NewPaper(b)));
         }
         let label = |s: &str| container(theme::caption(s)).width(Length::Fixed(130.0));
         let mut col = column![
-            theme::heading("Neues Notizbuch", 20.0),
+            theme::heading(tr("Neues Notizbuch"), 20.0),
             row![
-                text_input("Titel, z. B. Analysis I", t).on_input(Message::NewTitle).on_submit(Message::Create).padding(10).size(15).style(theme::field),
+                text_input(tr("Titel, z. B. Analysis I"), t).on_input(Message::NewTitle).on_submit(Message::Create).padding(10).size(15).style(theme::field),
                 Space::new().width(10),
-                button(theme::btn("Anlegen")).padding(theme::pad()).on_press(Message::Create).style(theme::accent_button),
+                button(theme::btn(tr("Anlegen"))).padding(theme::pad()).on_press(Message::Create).style(theme::accent_button),
                 Space::new().width(6),
-                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(Message::CancelCreate).style(theme::ghost),
+                button(theme::btn(tr("Abbrechen"))).padding(theme::pad()).on_press(Message::CancelCreate).style(theme::ghost),
             ]
             .align_y(Alignment::Center),
-            row![label("Papier"), papers].align_y(Alignment::Center),
+            row![label(tr("Papier")), papers].align_y(Alignment::Center),
         ]
         .spacing(12);
         if self.new_paper != Background::Blank {
             let what = match self.new_paper {
-                Background::Grid => "Kästchengröße",
-                Background::Dots => "Punktabstand",
-                _ => "Linienabstand",
+                Background::Grid => tr("Kästchengröße"),
+                Background::Dots => tr("Punktabstand"),
+                _ => tr("Linienabstand"),
             };
             let mut quick = row![].spacing(6);
-            for (mm, l) in [(4.0f32, "4 mm"), (5.0, "5 mm"), (7.0, "7 mm"), (8.5, "8,5 mm")] {
+            for (mm, l) in [(4.0f32, "4 mm"), (5.0, "5 mm"), (7.0, "7 mm"), (8.5, tr("8,5 mm"))] {
                 let pt = mm / 0.3528;
                 // Units keep their case, also in the mono designs ("5 mm", not "5 MM").
                 let on = (self.new_spacing - pt).abs() < 0.6;
@@ -3859,7 +3859,7 @@ impl App {
                     iced::widget::slider(8.0..=40.0, self.new_spacing, Message::NewSpacing).step(0.5_f32).style(theme::slider_style).width(Length::Fixed(220.0)),
                     Space::new().width(12),
                     // 1 pt = 0.3528 mm: what you'd measure on paper.
-                    text(format!("{:.1} mm", self.new_spacing * 0.3528).replace('.', ",")).font(theme::meta_font()).size(12).width(Length::Fixed(70.0)),
+                    text(format!("{} mm", crate::i18n::number(self.new_spacing * 0.3528, 1))).font(theme::meta_font()).size(12).width(Length::Fixed(70.0)),
                     quick,
                 ]
                 .align_y(Alignment::Center),
@@ -3879,8 +3879,8 @@ impl App {
         let upright = format::oriented(w, h, false);
         let turned = format::oriented(w, h, true);
         let mut turns = row![
-            choice("Hoch", !landscape, (!square && landscape).then(|| on(upright.0, upright.1))),
-            choice("Quer", landscape, (!square && !landscape).then(|| on(turned.0, turned.1))),
+            choice(tr("Hoch"), !landscape, (!square && landscape).then(|| on(upright.0, upright.1))),
+            choice(tr("Quer"), landscape, (!square && !landscape).then(|| on(turned.0, turned.1))),
         ]
         .spacing(6)
         .align_y(Alignment::Center);
@@ -3890,10 +3890,10 @@ impl App {
         for f in format::FORMATS {
             // A slide lies in landscape by nature; the others keep the page's way round.
             let (a, b) = format::oriented(f.width, f.height, f.id == "slide" || landscape);
-            names = names.push(choice(f.name, self.size_text.is_none() && found == Some(f.id), Some(on(a, b))));
+            names = names.push(choice(tr(f.name), self.size_text.is_none() && found == Some(f.id), Some(on(a, b))));
         }
         let custom = self.size_text.is_some() || found.is_none();
-        names = names.push(choice("Eigene …", custom, Some(Message::CustomSize(self.size_text.is_none()))));
+        names = names.push(choice(tr("Eigene …"), custom, Some(Message::CustomSize(self.size_text.is_none()))));
         let mut col = column![turns, names].spacing(8);
         if let Some((tw, th)) = &self.size_text {
             let mm = |t: &str| t.trim().replace(',', ".").parse::<f32>().ok().filter(|v| (25.4..=1400.0).contains(v));
@@ -3904,14 +3904,14 @@ impl App {
             let ok = apply.is_some();
             col = col.push(
                 row![
-                    text_input("Breite", tw).on_input(Message::SizeWidth).padding(8).size(14).width(Length::Fixed(90.0)).style(theme::field),
+                    text_input(tr("Breite"), tw).on_input(Message::SizeWidth).padding(8).size(14).width(Length::Fixed(90.0)).style(theme::field),
                     text("×").size(14).color(theme::p().muted),
-                    text_input("Höhe", th).on_input(Message::SizeHeight).padding(8).size(14).width(Length::Fixed(90.0)).style(theme::field),
+                    text_input(tr("Höhe"), th).on_input(Message::SizeHeight).padding(8).size(14).width(Length::Fixed(90.0)).style(theme::field),
                     text("mm").size(13).color(theme::p().muted),
                     Space::new().width(6),
-                    button(theme::btn_small("Übernehmen")).padding(theme::pad()).on_press_maybe(apply).style(theme::secondary),
+                    button(theme::btn_small(tr("Übernehmen"))).padding(theme::pad()).on_press_maybe(apply).style(theme::secondary),
                     Space::new().width(10),
-                    text(if ok { "" } else { "Jede Seite zwischen 25 mm und 1,4 m" }).size(12).color(theme::p().muted),
+                    text(if ok { "" } else { tr("Jede Seite zwischen 25 mm und 1,4 m") }).size(12).color(theme::p().muted),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -3924,9 +3924,9 @@ impl App {
     fn page_panel_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
         let current = o.pages.current_number(&o.camera);
         let head = row![
-            theme::heading(&format!("Seite {current}"), 20.0),
+            theme::heading(&trf("Seite {}", &[&current]), 20.0),
             Space::new().width(Length::Fill),
-            button(theme::btn_small("Schließen")).padding(theme::pad()).on_press(Message::ShowPage(false)).style(theme::ghost),
+            button(theme::btn_small(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowPage(false)).style(theme::ghost),
         ]
         .align_y(Alignment::Center);
         let label = |s: &str| container(theme::caption(s)).width(Length::Fixed(110.0));
@@ -3934,25 +3934,25 @@ impl App {
         let mut col = column![head].spacing(14);
         match self.page_in_view() {
             None => {}
-            Some(_) if self.read_only() => col = col.push(note("Nur lesen: Papier und Format ändert, wer dich eingeladen hat.".into())),
-            Some((_, spec)) if spec.pdf.is_some() => col = col.push(note(format!("PDF-Seite: Hintergrund und Format ({}) kommen aus der PDF.", format::describe(spec.width, spec.height)))),
-            Some((_, spec)) if spec.is_board() => col = col.push(note("Ein Board ist unendlich groß, mit Punktraster.".into())),
+            Some(_) if self.read_only() => col = col.push(note(tr("Nur lesen: Papier und Format ändert, wer dich eingeladen hat.").into())),
+            Some((_, spec)) if spec.pdf.is_some() => col = col.push(note(trf("PDF-Seite: Hintergrund und Format ({}) kommen aus der PDF.", &[&sidebar::format_name(spec.width, spec.height)]))),
+            Some((_, spec)) if spec.is_board() => col = col.push(note(tr("Ein Board ist unendlich groß, mit Punktraster.").into())),
             Some((_, spec)) => {
                 let text_page = spec.background == Background::Text;
                 if !text_page {
                     let mut papers = row![].spacing(6);
-                    for (b, l) in [(Background::Blank, "Leer"), (Background::Lines, "Linien"), (Background::Grid, "Kästchen"), (Background::Dots, "Punkte"), (Background::Cornell, "Cornell")] {
+                    for (b, l) in [(Background::Blank, tr("Leer")), (Background::Lines, tr("Linien")), (Background::Grid, tr("Kästchen")), (Background::Dots, trc("paper", "Punkte")), (Background::Cornell, "Cornell")] {
                         papers = papers.push(button(theme::btn_small(l)).padding(theme::pad()).on_press(Message::PagePaper(b)).style(theme::tab(spec.background == b)));
                     }
-                    col = col.push(row![label("Papier"), papers].align_y(Alignment::Center));
+                    col = col.push(row![label(tr("Papier")), papers].align_y(Alignment::Center));
                 }
                 col = col.push(row![label("Format"), self.format_picker(spec.width, spec.height, Message::PageSize)].align_y(Alignment::Start));
                 col = col.push(
                     row![
                         Space::new().width(110),
-                        button(theme::btn_small("Für alle Seiten übernehmen")).padding(theme::pad()).on_press(Message::PageToAll).style(theme::secondary),
+                        button(theme::btn_small(tr("Für alle Seiten übernehmen"))).padding(theme::pad()).on_press(Message::PageToAll).style(theme::secondary),
                         Space::new().width(10),
-                        note(if text_page { "Dieses Format für jede Seite (keine PDF-Seiten)".into() } else { "Papier und Format für jede Seite (keine PDF-Seiten)".into() }),
+                        note(if text_page { tr("Dieses Format für jede Seite (keine PDF-Seiten)").into() } else { tr("Papier und Format für jede Seite (keine PDF-Seiten)").into() }),
                     ]
                     .align_y(Alignment::Center),
                 );
@@ -4046,9 +4046,9 @@ fn ticks() -> iced::futures::stream::BoxStream<'static, ()> {
 
 /// Runs the n0bridge CLI.
 async fn n0bridge(args: Vec<String>) -> Result<String, String> {
-    let out = std::process::Command::new("n0bridge").args(&args).output().map_err(|e| format!("n0bridge nicht gefunden ({e})"))?;
+    let out = std::process::Command::new("n0bridge").args(&args).output().map_err(|e| trf("n0bridge nicht gefunden ({})", &[&e]))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
+    if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or(tr("Fehler")).to_string()) }
 }
 
 /// A QR code that scanners read in every design: black cells on white with a white quiet
@@ -4139,9 +4139,9 @@ async fn send_with_n0bridge(path: PathBuf) -> Result<String, String> {
         .args(["send", "--to", &tablet_target()])
         .arg(&path)
         .output()
-        .map_err(|e| format!("n0bridge nicht gefunden ({e})"))?;
+        .map_err(|e| trf("n0bridge nicht gefunden ({})", &[&e]))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
-    if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or("Fehler").to_string()) }
+    if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or(tr("Fehler")).to_string()) }
 }
 
 #[cfg(test)]
@@ -4158,13 +4158,36 @@ fn unix_now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
+/// "3 Striche, 1 Bild und 2 Textfelder" in the app's language (`Outside::describe`, translated;
+/// empty when nothing sticks out).
+fn describe_outside(o: &n0te_core::sheet::Outside) -> String {
+    let n = |k: usize, one: String, many: String| match k {
+        0 => None,
+        1 => Some(one),
+        _ => Some(many),
+    };
+    let parts: Vec<String> = [
+        n(o.strokes, trf("{} Strich", &[&o.strokes]), trf("{} Striche", &[&o.strokes])),
+        n(o.images, trf("{} Bild", &[&o.images]), trf("{} Bilder", &[&o.images])),
+        n(o.texts, trf("{} Textfeld", &[&o.texts]), trf("{} Textfelder", &[&o.texts])),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    match parts.as_slice() {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => trf("{} und {}", &[&rest.join(", "), last]),
+    }
+}
+
 /// "noch 6 Tage", "noch 5 Std.", "noch 20 Min." (no time zone needed).
 fn remaining(secs: u64) -> String {
     match secs {
-        s if s >= 2 * 86_400 => format!("noch {} Tage", s / 86_400),
-        s if s >= 86_400 => "noch 1 Tag".into(),
-        s if s >= 3600 => format!("noch {} Std.", s / 3600),
-        s => format!("noch {} Min.", (s / 60).max(1)),
+        s if s >= 2 * 86_400 => trf("noch {} Tage", &[&(s / 86_400)]),
+        s if s >= 86_400 => tr("noch 1 Tag").into(),
+        s if s >= 3600 => trf("noch {} Std.", &[&(s / 3600)]),
+        s => trf("noch {} Min.", &[&(s / 60).max(1)]),
     }
 }
 

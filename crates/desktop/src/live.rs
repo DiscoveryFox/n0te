@@ -14,6 +14,8 @@ use iced::futures::stream::{self, BoxStream};
 use n0te_platform::ipc::{Endpoint, Stream};
 use serde_json::Value;
 
+use crate::i18n::tr;
+
 /// A connection to the service (fails at once when it isn't running).
 fn connect() -> std::io::Result<Stream> {
     Stream::connect(&Endpoint::service())
@@ -22,9 +24,9 @@ fn connect() -> std::io::Result<Stream> {
 /// What to tell people when the sync service isn't running.
 pub fn service_hint() -> &'static str {
     if cfg!(windows) {
-        "Der Sync-Dienst läuft nicht. n0te startet ihn gleich selbst (n0te-sync.exe im Programmordner)."
+        tr("Der Sync-Dienst läuft nicht. n0te startet ihn gleich selbst (n0te-sync.exe im Programmordner).")
     } else {
-        "Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync"
+        tr("Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync")
     }
 }
 
@@ -195,11 +197,11 @@ impl Session {
 
 /// A one-shot command to the service; its text output or the error.
 pub fn request(args: &[&str]) -> Result<String, String> {
-    let mut s = connect().map_err(|_| "Sync-Dienst läuft nicht".to_string())?;
+    let mut s = connect().map_err(|_| tr("Sync-Dienst läuft nicht").to_string())?;
     writeln!(s, "{}", serde_json::to_string(args).unwrap_or_default()).map_err(|e| e.to_string())?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
-    let v: Value = serde_json::from_str(&line).map_err(|_| "keine Antwort vom Sync-Dienst".to_string())?;
+    let v: Value = serde_json::from_str(&line).map_err(|_| tr("keine Antwort vom Sync-Dienst").to_string())?;
     let out = v["out"].as_str().unwrap_or_default().to_string();
     if v["ok"].as_bool() == Some(true) { Ok(out) } else { Err(out) }
 }

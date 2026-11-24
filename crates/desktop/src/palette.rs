@@ -5,6 +5,7 @@ use iced::widget::{Space, button, column, container, row, text, text_input};
 use iced::{Alignment, Element, Length, Padding};
 
 use crate::app::{App, Message, Screen};
+use crate::i18n::{tr, trf};
 use crate::theme;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,41 +60,41 @@ pub fn items(app: &App) -> Vec<Item> {
     let mut v = Vec::new();
     match &app.screen {
         Screen::Library => {
-            v.push(item("Neues Notizbuch", "Strg N", Command::NewNotebook));
-            v.push(item("PDF importieren", "Strg O · wird ein neues Notizbuch", Command::ImportPdf));
-            v.push(item("Vom Tablet übernehmen (.n0te)", "Strg I", Command::ImportBundle));
+            v.push(item(tr("Neues Notizbuch"), tr("Strg N"), Command::NewNotebook));
+            v.push(item(tr("PDF importieren"), tr("Strg O · wird ein neues Notizbuch"), Command::ImportPdf));
+            v.push(item(tr("Vom Tablet übernehmen (.n0te)"), tr("Strg I"), Command::ImportBundle));
             for e in &app.entries {
                 let folder = if e.folder.is_empty() { String::new() } else { format!(" · {}", e.folder) };
-                v.push(item(format!("Öffnen: {}", e.title), format!("{} Seiten{folder}", e.sheets), Command::OpenNotebook(e.id.clone())));
+                v.push(item(trf("Öffnen: {}", &[&e.title]), format!("{}{folder}", trf("{} Seiten", &[&e.sheets])), Command::OpenNotebook(e.id.clone())));
             }
         }
         Screen::Notebook(o) => {
-            v.push(item("Suchen", "Strg F · Handschrift, Text, Überschriften, PDF", Command::Search));
-            v.push(item("Neue Textseite", "Strg N · nach der aktuellen Seite", Command::NewTextPage));
-            v.push(item("Notizen neben der Seite", "Strg M", Command::Notes));
-            v.push(item("Textfeld", "Strg T · oder Doppelklick auf die Seite", Command::NewTextBox));
-            v.push(item("Koordinatensystem einfügen", "Funktionsgraphen · mitten auf die Seite", Command::InsertPlot));
-            v.push(item("PDF einfügen", "Strg O · nach der aktuellen Seite", Command::InsertPdf));
-            v.push(item("Seite drehen", "Strg R · hoch ↔ quer", Command::RotatePage));
-            v.push(item("Papier und Format der Seite", "A4, A5, eigene Größe · oder oben auf die Seitenzahl", Command::PageSetup));
-            v.push(item("PDF exportieren", "Strg E", Command::Export));
+            v.push(item(tr("Suchen"), tr("Strg F · Handschrift, Text, Überschriften, PDF"), Command::Search));
+            v.push(item(tr("Neue Textseite"), tr("Strg N · nach der aktuellen Seite"), Command::NewTextPage));
+            v.push(item(tr("Notizen neben der Seite"), tr("Strg M"), Command::Notes));
+            v.push(item(tr("Textfeld"), tr("Strg T · oder Doppelklick auf die Seite"), Command::NewTextBox));
+            v.push(item(tr("Koordinatensystem einfügen"), tr("Funktionsgraphen · mitten auf die Seite"), Command::InsertPlot));
+            v.push(item(tr("PDF einfügen"), tr("Strg O · nach der aktuellen Seite"), Command::InsertPdf));
+            v.push(item(tr("Seite drehen"), tr("Strg R · hoch ↔ quer"), Command::RotatePage));
+            v.push(item(tr("Papier und Format der Seite"), tr("A4, A5, eigene Größe · oder oben auf die Seitenzahl"), Command::PageSetup));
+            v.push(item(tr("PDF exportieren"), tr("Strg E"), Command::Export));
             if crate::app::n0bridge_installed() {
-                v.push(item("An das Tablet senden", "über n0bridge (.n0te)", Command::SendToTablet));
+                v.push(item(tr("An das Tablet senden"), tr("über n0bridge (.n0te)"), Command::SendToTablet));
             }
-            v.push(item("Live mit dem Tablet", "es öffnet das Notizbuch, Folgen, Laserpointer", Command::Live));
-            v.push(item("Teilen / Gäste einladen", "nur lesen oder lesen & schreiben", Command::Share));
-            v.push(item("Verlauf: früheren Stand wiederherstellen", "Strg H", Command::History));
-            v.push(item("Gliederung ein/aus", "Strg B", Command::ToggleSidebar));
-            v.push(item("Dieses Notizbuch daneben", "zwei Stellen zugleich · ⧉ in der Leiste", Command::Again));
+            v.push(item(tr("Live mit dem Tablet"), tr("es öffnet das Notizbuch, Folgen, Laserpointer"), Command::Live));
+            v.push(item(tr("Teilen / Gäste einladen"), tr("nur lesen oder lesen & schreiben"), Command::Share));
+            v.push(item(tr("Verlauf: früheren Stand wiederherstellen"), tr("Strg H"), Command::History));
+            v.push(item(tr("Gliederung ein/aus"), tr("Strg B"), Command::ToggleSidebar));
+            v.push(item(tr("Dieses Notizbuch daneben"), tr("zwei Stellen zugleich · ⧉ in der Leiste"), Command::Again));
             if let Screen::Notebook(s) = &app.screen
                 && s.panes.len() > 1
             {
-                v.push(item("Seiten tauschen", "die zwei Notizbücher", Command::Swap));
-                v.push(item("Den anderen schließen", "Esc", Command::CloseOther));
+                v.push(item(tr("Seiten tauschen"), tr("die zwei Notizbücher"), Command::Swap));
+                v.push(item(tr("Den anderen schließen"), "Esc", Command::CloseOther));
             }
-            v.push(item("Zoom 100 %", "Strg 0", Command::Zoom(1.0)));
+            v.push(item("Zoom 100 %", tr("Strg 0"), Command::Zoom(1.0)));
             v.push(item("Zoom 200 %", "", Command::Zoom(2.0)));
-            v.push(item("Bibliothek", "Esc", Command::Library));
+            v.push(item(tr("Bibliothek"), "Esc", Command::Library));
             for p in o.pages.pages.iter().map(|p| &p.placed) {
                 let title = o
                     .rows
@@ -103,16 +104,16 @@ pub fn items(app: &App) -> Vec<Item> {
                         _ => None,
                     })
                     .unwrap_or_default();
-                let kind = if p.spec.pdf.is_some() { "PDF" } else if p.spec.background == n0te_core::notebook::Background::Text { "Text" } else if p.is_board() { "Board" } else { "Seite" };
-                v.push(item(format!("Seite {} {}", p.label(), title).trim().to_string(), kind, Command::GoTo(p.sheet_id.clone())));
+                let kind = if p.spec.pdf.is_some() { "PDF" } else if p.spec.background == n0te_core::notebook::Background::Text { tr("Text") } else if p.is_board() { "Board" } else { tr("Seite") };
+                v.push(item(trf("Seite {} {}", &[&p.label(), &title]).trim().to_string(), kind, Command::GoTo(p.sheet_id.clone())));
             }
         }
     }
     for t in theme::PALETTES {
-        v.push(item(format!("Design: {}", t.name), if t.id == theme::p().id { "aktiv" } else { "" }, Command::Theme(t.id)));
+        v.push(item(trf("Design: {}", &[&tr(t.name)]), if t.id == theme::p().id { tr("aktiv") } else { "" }, Command::Theme(t.id)));
     }
-    v.push(item("Einstellungen", "Strg ,", Command::Settings));
-    v.push(item("Tastenkürzel", "F1", Command::Help));
+    v.push(item(tr("Einstellungen"), tr("Strg ,"), Command::Settings));
+    v.push(item(tr("Tastenkürzel"), "F1", Command::Help));
     v
 }
 
@@ -152,9 +153,9 @@ pub fn view<'a>(query: &'a str, items: &[Item], selected: usize) -> Element<'a, 
         );
     }
     if items.is_empty() {
-        list = list.push(text("Nichts gefunden").size(13).color(theme::p().muted));
+        list = list.push(text(tr("Nichts gefunden")).size(13).color(theme::p().muted));
     }
-    let input = text_input("Befehl, Seite oder Notizbuch …", query).id(input_id()).on_input(Message::PaletteQuery).on_submit(Message::PaletteRun(None)).padding(12).size(16);
+    let input = text_input(tr("Befehl, Seite oder Notizbuch …"), query).id(input_id()).on_input(Message::PaletteQuery).on_submit(Message::PaletteRun(None)).padding(12).size(16);
     let card = container(column![input, list].spacing(8)).padding(10).width(Length::Fixed(640.0)).style(theme::panel);
     container(card).padding(Padding { top: 80.0, ..Padding::ZERO }).center_x(Length::Fill).height(Length::Fill).into()
 }

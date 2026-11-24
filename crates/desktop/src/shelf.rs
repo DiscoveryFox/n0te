@@ -16,6 +16,7 @@ use n0te_core::notebook::{Notebook, folder_path};
 use crate::app::{App, Entry, Message};
 use crate::library::{self, fit};
 use crate::widgets::{self, Drag, pointer};
+use crate::i18n::{tr, trc, trcf, trf};
 use crate::theme;
 
 // --- state -----------------------------------------------------------------------------------
@@ -432,19 +433,19 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
     let lead = |g: &'static [u8], on: bool| icon(g, 15.0, if on { theme::p().text } else { muted });
     let mut list = column![].spacing(1);
     let on = picked(&Pick::Home);
-    list = list.push(container(side_row(lead(HOME, on), "Start", None, on, false, 0.0, Msg::Pick(Pick::Home))).id(side_id("start")));
+    list = list.push(container(side_row(lead(HOME, on), tr("Start"), None, on, false, 0.0, Msg::Pick(Pick::Home))).id(side_id("start")));
     let on = picked(&Pick::All);
-    let all = side_row(lead(GRID, on), "Alle Notizbücher", Some(app.entries.len()), on, over(Drop::Folder(String::new())), 0.0, Msg::Pick(Pick::All));
+    let all = side_row(lead(GRID, on), tr("Alle Notizbücher"), Some(app.entries.len()), on, over(Drop::Folder(String::new())), 0.0, Msg::Pick(Pick::All));
     list = list.push(container(drop_target(all, Some(Target::Folder(String::new())), Drop::Folder(String::new()), dragging.is_some())).id(folder_id("")));
     // While dragging: "Angeheftet" pins what is let go there, "Ohne Ordner" takes it out of its folder.
     let pinned = app.entries.iter().filter(|e| e.pinned).count();
     if pinned > 0 || dragging.is_some() {
         let on = picked(&Pick::Pinned);
-        let b = side_row(lead(PIN, on), "Angeheftet", Some(pinned), on, over(Drop::Pin), 0.0, Msg::Pick(Pick::Pinned));
+        let b = side_row(lead(PIN, on), tr("Angeheftet"), Some(pinned), on, over(Drop::Pin), 0.0, Msg::Pick(Pick::Pinned));
         list = list.push(container(drop_target(b, None, Drop::Pin, dragging.is_some())).id(side_id("pinned")));
     }
     if dragging.is_some_and(|d| d.ids.iter().any(|id| app.entries.iter().any(|e| e.id == *id && !e.folder.is_empty()))) {
-        let b = side_row(lead(UP, false), "Ohne Ordner", None, false, over(Drop::Top), 0.0, Msg::Pick(Pick::Home));
+        let b = side_row(lead(UP, false), tr("Ohne Ordner"), None, false, over(Drop::Top), 0.0, Msg::Pick(Pick::Home));
         list = list.push(container(drop_target(b, None, Drop::Top, true)).id(side_id("top")));
     }
     // "+": a folder in the one open, else at the top.
@@ -453,10 +454,10 @@ pub fn sidebar(app: &App) -> Element<'_, Message> {
         _ => String::new(),
     };
     let plus = button(text("+").size(15).line_height(1.0)).padding([1, 7]).on_press(sm(Msg::Act(Target::Folder(inside), Action::NewFolder))).style(theme::ghost);
-    list = list.push(section("Ordner", Some(plus.into())));
+    list = list.push(section(tr("Ordner"), Some(plus.into())));
     let rows = folder_rows(app.entries.iter().map(|e| e.folder.as_str()), s.empty.iter().map(String::as_str));
     if rows.is_empty() {
-        list = list.push(container(text("Noch keine. Über + anlegen, dann Notizbücher hineinziehen.").size(12).color(muted)).padding(Padding { top: 2.0, bottom: 4.0, left: 10.0, right: 8.0 }));
+        list = list.push(container(text(tr("Noch keine. Über + anlegen, dann Notizbücher hineinziehen.")).size(12).color(muted)).padding(Padding { top: 2.0, bottom: 4.0, left: 10.0, right: 8.0 }));
     }
     for r in visible(&rows, &s.folded) {
         let on = picked(&Pick::Folder(r.path.clone()));
@@ -540,15 +541,15 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
             !v.is_empty() && v.iter().all(|e| sel.contains(&e.id))
         };
         row![
-            text(format!("{n} ausgewählt")).font(theme::title_font()).size(15).color(theme::p().text),
+            text(trf("{} ausgewählt", &[&n])).font(theme::title_font()).size(15).color(theme::p().text),
             Space::new().width(20),
-            button(theme::btn("Verschieben")).padding(theme::pad()).on_press_maybe(act(Action::Move)).style(theme::secondary),
+            button(theme::btn(tr("Verschieben"))).padding(theme::pad()).on_press_maybe(act(Action::Move)).style(theme::secondary),
             button(theme::btn("Tags")).padding(theme::pad()).on_press_maybe(act(Action::Tags)).style(theme::secondary),
-            button(theme::btn(if all_pinned { "Lösen" } else { "Anheften" })).padding(theme::pad()).on_press_maybe(act(Action::Pin)).style(theme::secondary),
-            button(theme::btn(if asked { "Wirklich in den Papierkorb?" } else { "Papierkorb" })).padding(theme::pad()).on_press_maybe(act(Action::Trash)).style(if asked { theme::accent_button } else { theme::secondary }),
+            button(theme::btn(if all_pinned { tr("Lösen") } else { tr("Anheften") })).padding(theme::pad()).on_press_maybe(act(Action::Pin)).style(theme::secondary),
+            button(theme::btn(if asked { tr("Wirklich in den Papierkorb?") } else { tr("Papierkorb") })).padding(theme::pad()).on_press_maybe(act(Action::Trash)).style(if asked { theme::accent_button } else { theme::secondary }),
             Space::new().width(Length::Fill),
-            button(theme::btn(if shown_all { "Keine" } else { "Alle" })).padding(theme::pad()).on_press(sm(Msg::SelectAll)).style(theme::ghost),
-            button(theme::btn("Fertig")).padding(theme::pad()).on_press(sm(Msg::Select(false))).style(theme::accent_button),
+            button(theme::btn(if shown_all { tr("Keine") } else { tr("Alle") })).padding(theme::pad()).on_press(sm(Msg::SelectAll)).style(theme::ghost),
+            button(theme::btn(tr("Fertig"))).padding(theme::pad()).on_press(sm(Msg::Select(false))).style(theme::accent_button),
         ]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -561,13 +562,13 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
         row![
             search_field(&s.query),
             Space::new().width(Length::Fill),
-            sort("Zuletzt geändert", Sort::Recent),
+            sort(tr("Zuletzt geändert"), Sort::Recent),
             sort("Name", Sort::Name),
             Space::new().width(6),
             view(GRID, !list, "grid"),
             view(LIST, list, "list"),
             Space::new().width(10),
-            button(theme::btn("Auswählen")).padding(theme::pad()).on_press(sm(Msg::Select(true))).style(theme::secondary),
+            button(theme::btn(tr("Auswählen"))).padding(theme::pad()).on_press(sm(Msg::Select(true))).style(theme::secondary),
         ]
         .spacing(6)
         .align_y(Alignment::Center)
@@ -577,7 +578,7 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
 
 /// The search field: a loupe, what is typed, × to empty it (Esc does too; Ctrl+F gets there).
 fn search_field(query: &str) -> Element<'_, Message> {
-    let input = text_input("Notizbücher suchen …", query)
+    let input = text_input(tr("Notizbücher suchen …"), query)
         .id(search_id())
         .on_input(|q| sm(Msg::Query(q)))
         .padding(Padding { top: 7.0, bottom: 7.0, left: 30.0, right: 28.0 })
@@ -599,18 +600,18 @@ fn search_field(query: &str) -> Element<'_, Message> {
 /// many notebooks.
 pub fn header<'a>(app: &'a App, count: usize, folders: usize) -> Element<'a, Message> {
     let s = &app.shelf;
-    let mut facts = format!("{count} {}", if count == 1 { "Notizbuch" } else { "Notizbücher" });
+    let mut facts = if count == 1 { trf("{} Notizbuch", &[&count]) } else { trf("{} Notizbücher", &[&count]) };
     if folders > 0 {
-        facts += &format!(" · {folders} Ordner");
+        facts += &format!(" · {}", if folders == 1 { trcf("one", "{} Ordner", &[&folders]) } else { trf("{} Ordner", &[&folders]) });
     }
     let facts = text(theme::cased(&facts)).font(theme::meta_font()).size(13).color(theme::p().muted);
     if !s.query.trim().is_empty() {
-        return column![theme::heading("Suche", 30.0), facts].spacing(2).into();
+        return column![theme::heading(tr("Suche"), 30.0), facts].spacing(2).into();
     }
     match &s.pick {
-        Pick::Home => column![theme::heading("Bibliothek", 30.0), facts].spacing(2).into(),
-        Pick::All => column![theme::heading("Alle Notizbücher", 30.0), facts].spacing(2).into(),
-        Pick::Pinned => column![theme::heading("Angeheftet", 30.0), facts].spacing(2).into(),
+        Pick::Home => column![theme::heading(tr("Bibliothek"), 30.0), facts].spacing(2).into(),
+        Pick::All => column![theme::heading(tr("Alle Notizbücher"), 30.0), facts].spacing(2).into(),
+        Pick::Pinned => column![theme::heading(tr("Angeheftet"), 30.0), facts].spacing(2).into(),
         Pick::Tag(t) => column![row![dot(tag_colour(t), 12.0), theme::heading(t, 30.0)].spacing(12).align_y(Alignment::Center), facts].spacing(2).into(),
         Pick::Folder(f) => {
             // "Start › Uni › WS26": every part but the last opens.
@@ -618,7 +619,7 @@ pub fn header<'a>(app: &'a App, count: usize, folders: usize) -> Element<'a, Mes
                 let to = if path.is_empty() { Pick::Home } else { Pick::Folder(path.clone()) };
                 container(button(text(label).font(theme::meta_font()).size(12.5)).padding([2, 0]).on_press(sm(Msg::Pick(to))).style(theme::link)).id(crumb_id(&path))
             };
-            let mut way = row![crumb("Start".into(), String::new())].spacing(7).align_y(Alignment::Center);
+            let mut way = row![crumb(tr("Start").into(), String::new())].spacing(7).align_y(Alignment::Center);
             let parts: Vec<&str> = f.split('/').collect();
             for (i, part) in parts.iter().enumerate() {
                 way = way.push(text("›").size(12.5).color(theme::p().muted));
@@ -636,7 +637,7 @@ pub fn header<'a>(app: &'a App, count: usize, folders: usize) -> Element<'a, Mes
 /// A subfolder before the cards: opens on a click, takes dropped cards, has the folder menu.
 pub fn folder_tile<'a>(app: &'a App, r: &FolderRow) -> Element<'a, Message> {
     let over = app.shelf.drag.as_ref().is_some_and(|d| d.over == Some(Drop::Folder(r.path.clone())));
-    let count = format!("{} {}", r.count, if r.count == 1 { "Notizbuch" } else { "Notizbücher" });
+    let count = if r.count == 1 { trf("{} Notizbuch", &[&r.count]) } else { trf("{} Notizbücher", &[&r.count]) };
     let content = row![
         icon(FOLDER, 22.0, theme::p().accent),
         column![
@@ -653,12 +654,12 @@ pub fn folder_tile<'a>(app: &'a App, r: &FolderRow) -> Element<'a, Message> {
 
 /// "Neuer Ordner" on the start, after the folders.
 pub fn new_folder_tile<'a>() -> Element<'a, Message> {
-    let content = row![icon(FOLDER_PLUS, 22.0, theme::p().muted), text("Neuer Ordner").font(theme::title_font()).size(14.5).color(theme::p().muted)].spacing(12).align_y(Alignment::Center);
+    let content = row![icon(FOLDER_PLUS, 22.0, theme::p().muted), text(tr("Neuer Ordner")).font(theme::title_font()).size(14.5).color(theme::p().muted)].spacing(12).align_y(Alignment::Center);
     container(button(content).padding([20, 14]).width(library::COVER.0 + 20.0).on_press(sm(Msg::Act(Target::Folder(String::new()), Action::NewFolder))).style(theme::card_ticked(false))).id(new_folder_id()).into()
 }
 
 /// A section of the start: its caption, how many, a hairline.
-pub fn section_head<'a>(title: &str, count: Option<usize>) -> Element<'a, Message> {
+pub fn section_head<'a>(key: &str, title: &str, count: Option<usize>) -> Element<'a, Message> {
     let mut r = row![theme::caption(title)].align_y(Alignment::Center);
     if let Some(n) = count {
         r = r.push(Space::new().width(10));
@@ -666,7 +667,7 @@ pub fn section_head<'a>(title: &str, count: Option<usize>) -> Element<'a, Messag
     }
     r = r.push(Space::new().width(14));
     r = r.push(container(Space::new()).height(1).width(Length::Fill).style(theme::hairline));
-    container(r).id(section_id(title)).into()
+    container(r).id(section_id(key)).into()
 }
 
 /// Up to three tags under a card's title: a dot in the tag's colour and its name, shorter the
@@ -693,29 +694,29 @@ pub fn tag_chips<'a>(tags: &[String]) -> Element<'a, Message> {
 fn menu_rows(app: &App, target: &Target) -> Vec<(Action, &'static [u8], &'static str, bool)> {
     let asked = |a: Action| app.shelf.asked.as_ref().is_some_and(|(t, b)| t == target && *b == a);
     match target {
-        Target::Folder(f) if f.is_empty() => vec![(Action::NewFolder, FOLDER_PLUS, "Neuer Ordner", false)],
+        Target::Folder(f) if f.is_empty() => vec![(Action::NewFolder, FOLDER_PLUS, tr("Neuer Ordner"), false)],
         Target::Folder(_) => vec![
-            (Action::Rename, PEN, "Umbenennen", false),
-            (Action::NewFolder, FOLDER_PLUS, "Neuer Unterordner", false),
-            (Action::Dissolve, DISSOLVE, if asked(Action::Dissolve) { "Wirklich auflösen?" } else { "Auflösen" }, true),
+            (Action::Rename, PEN, tr("Umbenennen"), false),
+            (Action::NewFolder, FOLDER_PLUS, tr("Neuer Unterordner"), false),
+            (Action::Dissolve, DISSOLVE, if asked(Action::Dissolve) { tr("Wirklich auflösen?") } else { tr("Auflösen") }, true),
         ],
-        Target::Tag(_) => vec![(Action::Rename, PEN, "Umbenennen", false), (Action::Remove, TAG, if asked(Action::Remove) { "Wirklich von allen entfernen?" } else { "Von allen entfernen" }, true)],
+        Target::Tag(_) => vec![(Action::Rename, PEN, tr("Umbenennen"), false), (Action::Remove, TAG, if asked(Action::Remove) { tr("Wirklich von allen entfernen?") } else { tr("Von allen entfernen") }, true)],
         Target::Notebooks(ids) => {
             let pinned = !ids.is_empty() && ids.iter().all(|id| app.entries.iter().any(|e| e.id == *id && e.pinned));
-            let pin = if pinned { (Action::Pin, UNPIN, "Lösen", false) } else { (Action::Pin, PIN, "Anheften", false) };
-            let trash = (Action::Trash, TRASH, if asked(Action::Trash) { "Wirklich in den Papierkorb?" } else { "In den Papierkorb" }, true);
+            let pin = if pinned { (Action::Pin, UNPIN, tr("Lösen"), false) } else { (Action::Pin, PIN, tr("Anheften"), false) };
+            let trash = (Action::Trash, TRASH, if asked(Action::Trash) { tr("Wirklich in den Papierkorb?") } else { tr("In den Papierkorb") }, true);
             if ids.len() == 1 {
                 vec![
-                    (Action::Open, OPEN, "Öffnen", false),
-                    (Action::Rename, PEN, "Umbenennen", false),
-                    (Action::Move, MOVE, "Verschieben nach …", false),
-                    (Action::Tags, TAG, "Tags …", false),
+                    (Action::Open, OPEN, tr("Öffnen"), false),
+                    (Action::Rename, PEN, tr("Umbenennen"), false),
+                    (Action::Move, MOVE, tr("Verschieben nach …"), false),
+                    (Action::Tags, TAG, tr("Tags …"), false),
                     pin,
-                    (Action::Cover, COVER, "Cover …", false),
+                    (Action::Cover, COVER, tr("Cover …"), false),
                     trash,
                 ]
             } else {
-                vec![(Action::Move, MOVE, "Verschieben nach …", false), (Action::Tags, TAG, "Tags …", false), pin, trash]
+                vec![(Action::Move, MOVE, tr("Verschieben nach …"), false), (Action::Tags, TAG, tr("Tags …"), false), pin, trash]
             }
         }
     }
@@ -794,7 +795,7 @@ pub fn layers<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Messa
         Some(d) => {
             let label = match d.ids.as_slice() {
                 [one] => app.entries.iter().find(|e| e.id == *one).map(|e| fit(&e.title, 28)).unwrap_or_default(),
-                many => format!("{} Notizbücher", many.len()),
+                many => trf("{} Notizbücher", &[&many.len()]),
             };
             let chip = container(row![icon(MOVE, 14.0, theme::p().accent), text(label).font(theme::SANS_MEDIUM).size(13).color(theme::p().text)].spacing(8).align_y(Alignment::Center))
                 .padding([7, 12])
@@ -820,8 +821,8 @@ fn dialog_view<'a>(app: &'a App, d: &'a Dialog) -> Element<'a, Message> {
 /// What a dialog is about: "„Analysis I“", "3 Notizbücher".
 fn about(app: &App, ids: &[String]) -> String {
     match ids {
-        [one] => app.entries.iter().find(|e| e.id == *one).map(|e| format!("„{}“", fit(&e.title, 40))).unwrap_or_default(),
-        many => format!("{} Notizbücher", many.len()),
+        [one] => app.entries.iter().find(|e| e.id == *one).map(|e| trf("„{}“", &[&fit(&e.title, 40)])).unwrap_or_default(),
+        many => trf("{} Notizbücher", &[&many.len()]),
     }
 }
 
@@ -845,7 +846,7 @@ fn field<'a>(placeholder: &str, value: &str, on_submit: Msg) -> Element<'a, Mess
 fn foot<'a>(label: &str, ready: bool) -> Element<'a, Message> {
     row![
         Space::new().width(Length::Fill),
-        button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(sm(Msg::CloseDialog)).style(theme::ghost),
+        button(theme::btn(tr("Abbrechen"))).padding(theme::pad()).on_press(sm(Msg::CloseDialog)).style(theme::ghost),
         button(theme::btn(label)).padding(theme::pad()).on_press_maybe(ready.then(|| sm(Msg::Confirm))).style(theme::accent_button),
     ]
     .spacing(8)
@@ -859,15 +860,15 @@ fn name_dialog<'a>(app: &'a App, what: &'a Naming, value: &'a str) -> Element<'a
         _ => !value.trim().is_empty(),
     };
     let (title, sub, placeholder, ok) = match what {
-        Naming::Notebook(id) => ("Umbenennen", about(app, std::slice::from_ref(id)), "Titel", "Umbenennen"),
-        Naming::Folder(f) => ("Ordner umbenennen", format!("„{f}“"), "Name", "Umbenennen"),
-        Naming::Tag(t) => ("Tag umbenennen", format!("„{t}“, bei jedem Notizbuch"), "Name", "Umbenennen"),
-        Naming::NewFolder(p) if p.is_empty() => ("Neuer Ordner", String::new(), "Name, z. B. Uni", "Anlegen"),
-        Naming::NewFolder(p) => ("Neuer Unterordner", format!("in „{p}“"), "Name, z. B. WS26", "Anlegen"),
+        Naming::Notebook(id) => (tr("Umbenennen"), about(app, std::slice::from_ref(id)), tr("Titel"), tr("Umbenennen")),
+        Naming::Folder(f) => (tr("Ordner umbenennen"), trf("„{}“", &[&f]), "Name", tr("Umbenennen")),
+        Naming::Tag(t) => (tr("Tag umbenennen"), trf("„{}“, bei jedem Notizbuch", &[&t]), "Name", tr("Umbenennen")),
+        Naming::NewFolder(p) if p.is_empty() => (tr("Neuer Ordner"), String::new(), tr("Name, z. B. Uni"), tr("Anlegen")),
+        Naming::NewFolder(p) => (tr("Neuer Unterordner"), trf("in „{}“", &[&p]), tr("Name, z. B. WS26"), tr("Anlegen")),
     };
     let mut body = column![field(placeholder, value, Msg::Confirm)].spacing(8);
     if matches!(what, Naming::NewFolder(_)) {
-        body = body.push(text("Auch leer bleibt er auf diesem Laptop.").size(12).color(theme::p().muted));
+        body = body.push(text(tr("Auch leer bleibt er auf diesem Laptop.")).size(12).color(theme::p().muted));
     }
     frame(title, sub, body.into(), foot(ok, ready), 440.0)
 }
@@ -879,7 +880,7 @@ fn move_dialog<'a>(app: &'a App, ids: &'a [String], to: &'a str, new_folder: Opt
         let content = row![icon(glyph, 15.0, if on { theme::p().accent } else { theme::p().muted }), text(fit(&label, 36)).font(if on { theme::SANS_MEDIUM } else { theme::SANS }).size(13.5)].spacing(10).align_y(Alignment::Center);
         container(button(content).padding(Padding { top: 7.0, bottom: 7.0, left: 10.0 + depth as f32 * 18.0, right: 10.0 }).width(Length::Fill).on_press(sm(Msg::To(path.clone()))).style(theme::row(on))).id(pick_id(&path))
     };
-    let mut list = column![pick_row(GRID, "Oberste Ebene".into(), String::new(), 0)].spacing(1);
+    let mut list = column![pick_row(GRID, tr("Oberste Ebene").into(), String::new(), 0)].spacing(1);
     for r in &rows {
         list = list.push(pick_row(FOLDER, r.name.clone(), r.path.clone(), r.depth + 1));
     }
@@ -889,23 +890,23 @@ fn move_dialog<'a>(app: &'a App, ids: &'a [String], to: &'a str, new_folder: Opt
             let ready = !folder_path(n).is_empty();
             column![
                 row![
-                    field("Name des neuen Ordners", n, Msg::MakeFolder),
-                    button(theme::btn_small("Anlegen")).padding(theme::pad()).on_press_maybe(ready.then(|| sm(Msg::MakeFolder))).style(theme::secondary),
+                    field(tr("Name des neuen Ordners"), n, Msg::MakeFolder),
+                    button(theme::btn_small(tr("Anlegen"))).padding(theme::pad()).on_press_maybe(ready.then(|| sm(Msg::MakeFolder))).style(theme::secondary),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),
-                text(if to.is_empty() { "ganz oben".to_string() } else { format!("in „{to}“") }).size(12).color(theme::p().muted),
+                text(if to.is_empty() { tr("ganz oben").to_string() } else { trf("in „{}“", &[&to]) }).size(12).color(theme::p().muted),
             ]
             .spacing(6)
             .into()
         }
-        None => button(row![icon(FOLDER_PLUS, 14.0, theme::p().text), theme::btn_small("Neuer Ordner")].spacing(8).align_y(Alignment::Center))
+        None => button(row![icon(FOLDER_PLUS, 14.0, theme::p().text), theme::btn_small(tr("Neuer Ordner"))].spacing(8).align_y(Alignment::Center))
             .padding(theme::pad())
             .on_press(sm(Msg::NewFolder))
             .style(theme::ghost)
             .into(),
     };
-    frame("Verschieben nach", about(app, ids), column![list, new].spacing(12).into(), foot("Verschieben", true), 460.0)
+    frame(tr("Verschieben nach"), about(app, ids), column![list, new].spacing(12).into(), foot(tr("Verschieben"), true), 460.0)
 }
 
 fn tags_dialog<'a>(app: &'a App, ids: &'a [String], new_tag: &'a str) -> Element<'a, Message> {
@@ -918,38 +919,39 @@ fn tags_dialog<'a>(app: &'a App, ids: &'a [String], new_tag: &'a str) -> Element
     }
     let mut body = column![].spacing(14);
     if chips.is_empty() {
-        body = body.push(text("Noch keine Tags.").size(13).color(theme::p().muted));
+        body = body.push(text(tr("Noch keine Tags.")).size(13).color(theme::p().muted));
     } else {
         body = body.push(iced::widget::Row::with_children(chips).spacing(8).wrap().vertical_spacing(8));
     }
     let ready = !new_tag.trim().is_empty();
     body = body.push(
         row![
-            field("Neuer Tag, z. B. Prüfung", new_tag, Msg::AddTag),
-            button(theme::btn_small("Hinzufügen")).padding(theme::pad()).on_press_maybe(ready.then(|| sm(Msg::AddTag))).style(theme::secondary),
+            field(tr("Neuer Tag, z. B. Prüfung"), new_tag, Msg::AddTag),
+            button(theme::btn_small(tr("Hinzufügen"))).padding(theme::pad()).on_press_maybe(ready.then(|| sm(Msg::AddTag))).style(theme::secondary),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
     );
-    let done = row![Space::new().width(Length::Fill), button(theme::btn("Fertig")).padding(theme::pad()).on_press(sm(Msg::Confirm)).style(theme::accent_button)];
+    let done = row![Space::new().width(Length::Fill), button(theme::btn(tr("Fertig"))).padding(theme::pad()).on_press(sm(Msg::Confirm)).style(theme::accent_button)];
     frame("Tags", about(app, ids), body.into(), done.into(), 480.0)
 }
 
 /// The covers to choose from (the tablet's, in its order).
-pub const COVERS: [(&str, &str); 10] =
-    [("page", "Erste Seite"), ("initial", "Initiale"), ("dots", "Punkte"), ("stripes", "Streifen"), ("black", "Schwarz"), ("red", "Rot"), ("blue", "Blau"), ("green", "Grün"), ("orange", "Orange"), ("purple", "Lila")];
+pub fn covers() -> [(&'static str, &'static str); 10] {
+    [("page", tr("Erste Seite")), ("initial", tr("Initiale")), ("dots", trc("paper", "Punkte")), ("stripes", tr("Streifen")), ("black", tr("Schwarz")), ("red", tr("Rot")), ("blue", tr("Blau")), ("green", tr("Grün")), ("orange", tr("Orange")), ("purple", tr("Lila"))]
+}
 
 fn cover_dialog<'a>(app: &'a App, ids: &'a [String]) -> Element<'a, Message> {
     let first = app.entries.iter().find(|e| ids.first() == Some(&e.id));
     let current = first.map(|e| if e.cover.is_empty() { "page" } else { e.cover.as_str() }).unwrap_or("page");
     let title = first.map(|e| e.title.clone()).unwrap_or_default();
     let mut tiles = Vec::new();
-    for (kind, label) in COVERS {
+    for (kind, label) in covers() {
         let content = column![library::cover_preview(kind, &title, 60.0, 78.0), text(label).size(12).color(theme::p().text)].spacing(6).align_x(Alignment::Center);
         tiles.push(button(content).padding(8).width(84).on_press(sm(Msg::Cover(kind.to_string()))).style(theme::option(current == kind)).into());
     }
     let body = iced::widget::Row::with_children(tiles).spacing(8).wrap().vertical_spacing(8);
-    let close = row![Space::new().width(Length::Fill), button(theme::btn("Schließen")).padding(theme::pad()).on_press(sm(Msg::CloseDialog)).style(theme::ghost)];
+    let close = row![Space::new().width(Length::Fill), button(theme::btn(tr("Schließen"))).padding(theme::pad()).on_press(sm(Msg::CloseDialog)).style(theme::ghost)];
     frame("Cover", about(app, ids), body.into(), close.into(), 504.0)
 }
 
@@ -1207,7 +1209,7 @@ impl App {
                 for id in &ids {
                     match self.lib.trash_notebook(id) {
                         Ok(()) => gone += 1,
-                        Err(e) => self.say(format!("Nicht in den Papierkorb gelegt: {e}")),
+                        Err(e) => self.say(trf("Nicht in den Papierkorb gelegt: {}", &[&e])),
                     }
                 }
                 self.refresh();
@@ -1216,7 +1218,7 @@ impl App {
                     sel.retain(|id| !ids.contains(id));
                 }
                 if gone > 0 {
-                    self.say(format!("{what} {} im Papierkorb", if gone == 1 { "liegt" } else { "liegen" }));
+                    self.say(if gone == 1 { trf("{} liegt im Papierkorb", &[&what]) } else { trf("{} liegen im Papierkorb", &[&what]) });
                 }
                 self.tidy();
             }
@@ -1231,7 +1233,7 @@ impl App {
             (Target::Folder(f), Action::Dissolve) if !f.is_empty() => {
                 let up = parent(&f).to_string();
                 self.move_folder(&f, &up);
-                self.say(format!("Ordner „{}“ aufgelöst", name(&f)));
+                self.say(trf("Ordner „{}“ aufgelöst", &[&name(&f)]));
             }
             (Target::Tag(t), Action::Rename) => {
                 self.shelf.dialog = Some(Dialog::Name { text: t.clone(), what: Naming::Tag(t) });
@@ -1241,7 +1243,7 @@ impl App {
                 let ids: Vec<String> = self.entries.iter().filter(|e| has_tag(e, &t)).map(|e| e.id.clone()).collect();
                 let n = self.organize(&ids, |nb| nb.set_tags(&nb.tags().into_iter().filter(|x| x.to_lowercase() != t.to_lowercase()).collect::<Vec<_>>()));
                 self.tidy();
-                self.say(format!("Tag „{t}“ von {n} {} entfernt", if n == 1 { "Notizbuch" } else { "Notizbüchern" }));
+                self.say(if n == 1 { trf("Tag „{}“ von {} Notizbuch entfernt", &[&t, &n]) } else { trf("Tag „{}“ von {} Notizbüchern entfernt", &[&t, &n]) });
             }
             _ => {}
         }
@@ -1337,8 +1339,13 @@ impl App {
         self.keep_emptied(before);
         self.keep_made();
         if moved > 0 {
-            let verb = if moved == 1 { "liegt" } else { "liegen" };
-            self.say(if to.is_empty() { format!("{what} {verb} jetzt ganz oben") } else { format!("{what} {verb} jetzt in {to}") });
+            let one = moved == 1;
+            self.say(match (to.is_empty(), one) {
+                (true, true) => trf("{} liegt jetzt ganz oben", &[&what]),
+                (true, false) => trf("{} liegen jetzt ganz oben", &[&what]),
+                (false, true) => trf("{} liegt jetzt in {}", &[&what, &to]),
+                (false, false) => trf("{} liegen jetzt in {}", &[&what, &to]),
+            });
         }
     }
 
@@ -1373,7 +1380,7 @@ impl App {
                 let n = self.organize(&ids, |nb| nb.set_pinned(true));
                 if n > 0 {
                     let what = about(self, &ids);
-                    self.say(format!("{what} angeheftet"));
+                    self.say(trf("{} angeheftet", &[&what]));
                 }
             }
             Drop::Tag(t) => {
@@ -1385,7 +1392,7 @@ impl App {
                 });
                 if n > 0 {
                     let what = about(self, &ids);
-                    self.say(format!("{what}: Tag „{t}“"));
+                    self.say(trf("{}: Tag „{}“", &[&what, &t]));
                 }
             }
         }
@@ -1431,7 +1438,7 @@ impl App {
                 true
             }
             Err(e) => {
-                self.say(format!("Nicht geändert: {e}"));
+                self.say(trf("Nicht geändert: {}", &[&e]));
                 false
             }
         }

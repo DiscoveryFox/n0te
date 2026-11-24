@@ -18,6 +18,7 @@ use iced::widget::text_editor::{Action, Binding, Content, Cursor, Edit, KeyPress
 use iced::widget::{Space, column, container, mouse_area, row, text};
 use iced::{Alignment, Element, Font, Length, Padding, Task, font, widget};
 
+use crate::i18n::tr;
 use crate::theme;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -608,12 +609,12 @@ impl Doc {
         let only_empty = self.blocks.len() == 1 && b.content.is_empty();
         let focused_empty = self.focus == Some(id) && b.content.is_empty();
         let placeholder = match &b.kind {
-            Kind::Paragraph if only_empty || focused_empty => "Schreiben … ( # Überschrift   - Liste   ``` Code   $$ Formel )",
-            Kind::Heading(_) => "Überschrift",
-            Kind::Bullet | Kind::Numbered => "Listenpunkt",
-            Kind::Todo(_) => "Aufgabe",
-            Kind::Quote => "Zitat",
-            Kind::Formula => "LaTeX, z. B. \\int_a^b f(x)\\,dx",
+            Kind::Paragraph if only_empty || focused_empty => tr("Schreiben … ( # Überschrift   - Liste   ``` Code   $$ Formel )"),
+            Kind::Heading(_) => tr("Überschrift"),
+            Kind::Bullet | Kind::Numbered => tr("Listenpunkt"),
+            Kind::Todo(_) => tr("Aufgabe"),
+            Kind::Quote => tr("Zitat"),
+            Kind::Formula => tr("LaTeX, z. B. \\int_a^b f(x)\\,dx"),
             Kind::Code { .. } => "Code",
             _ => "",
         };
@@ -674,7 +675,7 @@ impl Doc {
                 row![
                     text("$$").font(theme::MONO_BOLD).size(10).color(theme::p().accent),
                     Space::new().width(Length::Fill),
-                    text("FORMEL · LaTeX").font(theme::MONO).size(10).color(theme::PAPER_MUTED)
+                    text(tr("FORMEL · LaTeX")).font(theme::MONO).size(10).color(theme::PAPER_MUTED)
                 ],
                 editor,
                 container(formula_view(&b.text(), true, 17.0)).center_x(Length::Fill).padding(Padding { top: 8.0, ..Padding::ZERO }),

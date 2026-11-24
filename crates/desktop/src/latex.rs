@@ -17,6 +17,8 @@ use std::time::{Duration, Instant};
 
 use iced::widget::svg;
 
+use crate::i18n::{tr, trf};
+
 #[derive(Debug, Clone)]
 pub enum Formula {
     Pending,
@@ -98,7 +100,7 @@ fn state() -> &'static Mutex<State> {
 pub fn formula(latex: &str, display: bool) -> Formula {
     let latex = latex.trim();
     if latex.is_empty() {
-        return Formula::Failed("leer".into());
+        return Formula::Failed(tr("leer").into());
     }
     let key = format!("{}|{latex}", display as u8);
     let mut st = state().lock().expect("tex");
@@ -133,7 +135,7 @@ fn cache_dir() -> PathBuf {
 fn render(latex: &str, display: bool) -> Formula {
     let dir = cache_dir();
     if std::fs::create_dir_all(&dir).is_err() {
-        return Formula::Failed("Cache-Ordner nicht beschreibbar".into());
+        return Formula::Failed(tr("Cache-Ordner nicht beschreibbar").into());
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (latex, display, 2u8).hash(&mut h);
@@ -148,18 +150,18 @@ fn render(latex: &str, display: bool) -> Formula {
         latex
     );
     if std::fs::write(dir.join(format!("{name}.tex")), tex).is_err() {
-        return Formula::Failed("Schreiben fehlgeschlagen".into());
+        return Formula::Failed(tr("Schreiben fehlgeschlagen").into());
     }
     let result = (|| {
         run(Command::new("latex").args(["-interaction=nonstopmode", "-halt-on-error", "-no-shell-escape", &format!("{name}.tex")]), &dir)
-            .map_err(|e| if e.contains("not found") || e.contains("No such file") { "LaTeX ist nicht installiert (texlive)".to_string() } else { first_error(&dir.join(format!("{name}.log"))).unwrap_or(e) })?;
+            .map_err(|e| if e.contains("not found") || e.contains("No such file") { tr("LaTeX ist nicht installiert (texlive)").to_string() } else { first_error(&dir.join(format!("{name}.log"))).unwrap_or(e) })?;
         run(Command::new("dvisvgm").args(["--no-fonts", "--exact-bbox", "-o", &format!("{name}.svg"), &format!("{name}.dvi")]), &dir)?;
         // A hairline outline on every glyph: TeX's thin rules (minus, fraction bars, the bar of
         // ϵ) are ~0.4 pt and would vanish below a pixel on screen.
         let svg = std::fs::read_to_string(&svg_path).map_err(|e| e.to_string())?;
         let svg = svg.replacen("<g id='page1'>", "<g id='page1' stroke='#000' stroke-width='0.14' stroke-linejoin='round'>", 1);
         std::fs::write(&svg_path, svg).map_err(|e| e.to_string())?;
-        load(&svg_path).ok_or_else(|| "keine SVG-Ausgabe".to_string())
+        load(&svg_path).ok_or_else(|| tr("keine SVG-Ausgabe").to_string())
     })();
     for ext in ["tex", "dvi", "aux", "log"] {
         let _ = std::fs::remove_file(dir.join(format!("{name}.{ext}")));
@@ -183,11 +185,11 @@ fn run(cmd: &mut Command, dir: &Path) -> Result<(), String> {
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(status)) => return Err(format!("Fehler ({status})")),
+            Ok(Some(status)) => return Err(trf("Fehler ({})", &[&status])),
             Ok(None) if start.elapsed() > Duration::from_secs(10) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("Zeitüberschreitung".into());
+                return Err(tr("Zeitüberschreitung").into());
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
             Err(e) => return Err(e.to_string()),

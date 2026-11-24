@@ -103,7 +103,7 @@ pub fn find_pdfium() -> Option<PathBuf> {
 impl Pdf {
     /// Loads pdfium and starts the worker; documents are the library's blobs.
     pub fn start(library_root: &Path) -> Result<Arc<Pdf>, String> {
-        let lib_path = find_pdfium().ok_or(format!("{PDFIUM} nicht gefunden"))?;
+        let lib_path = find_pdfium().ok_or(crate::i18n::trf("{} nicht gefunden", &[&PDFIUM]))?;
         // Fonts a PDF doesn't embed: pdfium on Windows asks the system itself.
         let font_dirs: &[&str] = if cfg!(windows) { &[] } else { &["/usr/share/fonts"] };
         let engine = PdfEngine::load_with_font_dirs(&lib_path, font_dirs).map_err(|e| e.to_string())?;
@@ -211,7 +211,7 @@ impl Pdf {
         )
         .map_err(|e| e.to_string())?;
         if pages.is_empty() {
-            return Err("nichts zu exportieren".into());
+            return Err(crate::i18n::tr("nichts zu exportieren").into());
         }
         let bytes = self.worker.export(priority::INTERACTIVE, &pages).map_err(|e| e.to_string())?;
         Ok((bytes, pages.len()))

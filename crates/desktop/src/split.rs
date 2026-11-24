@@ -13,6 +13,7 @@ use iced::{Alignment, Color, Element, Length, Point, Size, Task};
 
 use crate::app::{App, Message, Open, Screen};
 use crate::library::fit;
+use crate::i18n::{tr, trf};
 use crate::{shelf, theme, widgets};
 
 /// Names a pane for as long as it is open: messages from its view (and from tasks it started)
@@ -336,7 +337,7 @@ fn room<'a>(app: &'a App, s: &'a Split, size: Size) -> Element<'a, Message> {
     let divider: Element<'a, Message> = if both { widgets::divider(across, fraction.clamp(0.1, 0.9), |f| sm(Msg::Drag(f)), |f| sm(Msg::Release(f))).into() } else { Space::new().into() };
     let hint: Element<'a, Message> = match (both, s.dragging.and_then(closing).and_then(|i| rects.get(i))) {
         (true, Some(r)) => {
-            let chip = container(text(theme::cased("Loslassen schließt")).font(theme::label_font()).size(14).color(Color::WHITE))
+            let chip = container(text(theme::cased(tr("Loslassen schließt"))).font(theme::label_font()).size(14).color(Color::WHITE))
                 .padding([8, 14])
                 .style(|_| container::Style { background: Some(theme::p().accent.into()), border: iced::Border { radius: 14.0.into(), ..Default::default() }, ..Default::default() });
             pin(container(chip).center(Length::Fill).width(r.w).height(r.h).style(theme::scrim)).x(r.x).y(r.y).into()
@@ -384,18 +385,18 @@ fn head<'a>(s: &'a Split, p: &'a Open, index: usize, width: f32) -> Element<'a, 
         container(button(shelf::icon(g, 15.0, c)).padding([4, 6]).on_press(sm(m)).style(theme::ghost)).id(head_id(what, index)).into()
     };
     let title = p.nb.title();
-    let title = if title.trim().is_empty() { "Ohne Titel".to_string() } else { title };
+    let title = if title.trim().is_empty() { tr("Ohne Titel").to_string() } else { title };
     let current = p.pages.current_number(&p.camera);
     // The title gets what room the buttons leave (about 7 px a character).
     let room = ((width - 190.0) / 7.5).max(6.0) as usize;
     let content = row![
-        tip(glyph(STAR, if main { theme::p().accent } else { theme::p().muted }, Msg::Main(p.key), "main"), if main { "Hauptbereich: Live, Folgen, Herbeirufen" } else { "Zum Hauptbereich machen" }),
+        tip(glyph(STAR, if main { theme::p().accent } else { theme::p().muted }, Msg::Main(p.key), "main"), if main { tr("Hauptbereich: Live, Folgen, Herbeirufen") } else { tr("Zum Hauptbereich machen") }),
         Space::new().width(4),
         text(fit(&title, room)).font(theme::SANS_MEDIUM).size(13).color(theme::p().text).wrapping(text::Wrapping::None),
         text(theme::cased(&format!(" · {current}/{}", p.pages.total_pages))).font(theme::meta_font()).size(11).color(theme::p().muted).wrapping(text::Wrapping::None),
         Space::new().width(Length::Fill),
-        tip(glyph(if alone { RESTORE } else { MAXIMIZE }, theme::p().text, Msg::Alone(if alone { None } else { Some(p.key) }), "alone"), if alone { "Beide zeigen" } else { "Nur diesen zeigen" }),
-        tip(glyph(CLOSE, theme::p().text, Msg::Close(p.key), "close"), "Schließen"),
+        tip(glyph(if alone { RESTORE } else { MAXIMIZE }, theme::p().text, Msg::Alone(if alone { None } else { Some(p.key) }), "alone"), if alone { tr("Beide zeigen") } else { tr("Nur diesen zeigen") }),
+        tip(glyph(CLOSE, theme::p().text, Msg::Close(p.key), "close"), tr("Schließen")),
     ]
     .align_y(Alignment::Center);
     container(content).padding([0, 6]).height(32).width(Length::Fill).center_y(32).style(theme::chrome).into()
@@ -405,7 +406,7 @@ fn head<'a>(s: &'a Split, p: &'a Open, index: usize, width: f32) -> Element<'a, 
 pub fn menu_button<'a>(open: bool) -> Element<'a, Message> {
     let b = button(shelf::icon(SPLIT, 16.0, if open { theme::p().chrome } else { theme::p().text })).padding([5, 8]).style(theme::tab(open));
     let b = container(widgets::pointer(b).on_left(|at| sm(Msg::Menu(Some(at))))).id(button_id());
-    tooltip(b, container(text("Daneben öffnen").size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Bottom).gap(4).into()
+    tooltip(b, container(text(tr("Daneben öffnen")).size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Bottom).gap(4).into()
 }
 
 /// Width of the ⧉ menu.
@@ -417,7 +418,7 @@ pub fn layers<'a>(app: &'a App, s: &'a Split, base: Element<'a, Message>) -> Ele
     let drag: Element<'a, Message> = match (&s.drag, s.drag.as_ref().and_then(|d| s.drop_zone(d.from))) {
         (Some(d), Some(zone)) => {
             let hot = zone.contains(d.at);
-            let label = container(text(theme::cased(if s.is_split() { "Hier öffnen" } else { "Daneben öffnen" })).font(theme::label_font()).size(14).color(if hot { Color::WHITE } else { theme::p().text }))
+            let label = container(text(theme::cased(if s.is_split() { tr("Hier öffnen") } else { tr("Daneben öffnen") })).font(theme::label_font()).size(14).color(if hot { Color::WHITE } else { theme::p().text }))
                 .padding([9, 16])
                 .style(move |_| container::Style {
                     background: Some((if hot { theme::p().accent } else { theme::p().chrome }).into()),
@@ -468,31 +469,31 @@ fn menu_sheet<'a>(app: &'a App, s: &'a Split, m: &'a Menu) -> Element<'a, Messag
     let mut col = column![].spacing(1);
     match other {
         Some(o) => {
-            col = col.push(section("Zwei nebeneinander"));
-            col = col.push(item(SPLIT, "Seiten tauschen".into(), None, sm(Msg::Swap), menu_id("swap")));
+            col = col.push(section(tr("Zwei nebeneinander")));
+            col = col.push(item(SPLIT, tr("Seiten tauschen").into(), None, sm(Msg::Swap), menu_id("swap")));
             col = col.push(match s.maxed {
-                None => item(MAXIMIZE, "Nur diesen zeigen".into(), None, sm(Msg::Alone(Some(me.key))), menu_id("alone")),
-                Some(_) => item(RESTORE, "Beide zeigen".into(), None, sm(Msg::Alone(None)), menu_id("alone")),
+                None => item(MAXIMIZE, tr("Nur diesen zeigen").into(), None, sm(Msg::Alone(Some(me.key))), menu_id("alone")),
+                Some(_) => item(RESTORE, tr("Beide zeigen").into(), None, sm(Msg::Alone(None)), menu_id("alone")),
             });
-            col = col.push(item(CLOSE, "Den anderen schließen".into(), None, sm(Msg::Close(o.key)), menu_id("close-other")));
+            col = col.push(item(CLOSE, tr("Den anderen schließen").into(), None, sm(Msg::Close(o.key)), menu_id("close-other")));
             col = col.push(rule());
-            col = col.push(section("Im anderen Bereich öffnen"));
+            col = col.push(section(tr("Im anderen Bereich öffnen")));
         }
-        None => col = col.push(section("Daneben öffnen")),
+        None => col = col.push(section(tr("Daneben öffnen"))),
     }
-    col = col.push(item(COPY, "Dieses Notizbuch nochmal".into(), Some("Zwei Stellen zugleich"), sm(Msg::Again), menu_id("again")));
+    col = col.push(item(COPY, tr("Dieses Notizbuch nochmal").into(), Some(tr("Zwei Stellen zugleich")), sm(Msg::Again), menu_id("again")));
     let others: Vec<&crate::app::Entry> = notebooks(app).into_iter().filter(|e| e.id != me.id && other.is_none_or(|o| o.id != e.id)).collect();
-    let name = |e: &crate::app::Entry| if e.title.trim().is_empty() { "Ohne Titel".to_string() } else { fit(&e.title, 34) };
+    let name = |e: &crate::app::Entry| if e.title.trim().is_empty() { tr("Ohne Titel").to_string() } else { fit(&e.title, 34) };
     if !m.all {
         for e in others.iter().take(5) {
             col = col.push(item(PAGE, name(e), None, sm(Msg::Beside(e.id.clone(), None)), menu_id(&format!("nb-{}", e.id))));
         }
         if others.len() > 5 {
-            col = col.push(item(LOUPE, "Alle Notizbücher …".into(), None, sm(Msg::All), menu_id("all")));
+            col = col.push(item(LOUPE, tr("Alle Notizbücher …").into(), None, sm(Msg::All), menu_id("all")));
         }
     } else {
         let field = widgets::on_escape(
-            text_input("Suchen", &m.query).id(find_id()).on_input(|q| sm(Msg::Query(q))).padding([8, 10]).size(14).style(theme::field),
+            text_input(tr("Suchen"), &m.query).id(find_id()).on_input(|q| sm(Msg::Query(q))).padding([8, 10]).size(14).style(theme::field),
             sm(Msg::Menu(None)),
         );
         col = col.push(container(field).padding([6, 6]));
@@ -502,7 +503,7 @@ fn menu_sheet<'a>(app: &'a App, s: &'a Split, m: &'a Menu) -> Element<'a, Messag
             list = list.push(item(PAGE, name(e), None, sm(Msg::Beside(e.id.clone(), None)), menu_id(&format!("nb-{}", e.id))));
         }
         if shown.is_empty() {
-            list = list.push(container(text("Nichts gefunden").size(13).color(theme::p().muted)).padding([8, 10]));
+            list = list.push(container(text(tr("Nichts gefunden")).size(13).color(theme::p().muted)).padding([8, 10]));
         }
         col = col.push(container(scrollable(list).style(theme::scroll_dark)).max_height(360.0));
     }
@@ -616,7 +617,7 @@ impl App {
                         self.send_presence_all();
                     }
                     Ok(()) => {}
-                    Err(e) => self.say(format!("Notizbuch nicht lesbar: {e}")),
+                    Err(e) => self.say(trf("Notizbuch nicht lesbar: {}", &[&e])),
                 }
             }
             self.opened(id);
@@ -639,10 +640,10 @@ impl App {
                     if self.persist_settings {
                         self.settings.save();
                     }
-                    self.say("Zwei nebeneinander: der Strich in der Mitte ändert die Breite, ★ ist für Live und Gäste");
+                    self.say(tr("Zwei nebeneinander: der Strich in der Mitte ändert die Breite, ★ ist für Live und Gäste"));
                 }
             }
-            Err(e) => self.say(format!("Notizbuch nicht lesbar: {e}")),
+            Err(e) => self.say(trf("Notizbuch nicht lesbar: {}", &[&e])),
         }
         Task::none()
     }
@@ -753,7 +754,7 @@ impl App {
             return;
         }
         if s.main == key {
-            self.say("★ Hauptbereich: Live, Folgen und Herbeirufen gehören hierher");
+            self.say(tr("★ Hauptbereich: Live, Folgen und Herbeirufen gehören hierher"));
             return;
         }
         let before = s.pane(s.main).map(|p| p.id.clone());
@@ -762,7 +763,7 @@ impl App {
             self.live_follows_main();
         }
         self.send_presence_all();
-        self.say("★ Live und Gäste sehen jetzt diesen Bereich");
+        self.say(tr("★ Live und Gäste sehen jetzt diesen Bereich"));
     }
 
     /// Pane `key` is the active one now: the toolbar works on it. Typing in a text box ends in

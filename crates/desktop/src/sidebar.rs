@@ -19,6 +19,7 @@ use crate::app::{App, Message, Open, Screen};
 use crate::library::fit;
 use crate::search::{self, Search};
 use crate::shelf::{self, MenuRow};
+use crate::i18n::{tr, trf};
 use crate::{pages, pdf, split, theme, widgets};
 
 pub const WIDTH: f32 = 272.0;
@@ -165,8 +166,8 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Element<'a
     };
     let n = o.pages.total_pages;
     let head = row![
-        theme::caption("Gliederung"),
-        text(theme::cased(&format!(" · {n} {}", if n == 1 { "Seite" } else { "Seiten" }))).font(theme::meta_font()).size(11).color(theme::p().muted),
+        theme::caption(tr("Gliederung")),
+        text(theme::cased(&format!(" · {}", if n == 1 { trf("{} Seite", &[&n]) } else { trf("{} Seiten", &[&n]) }))).font(theme::meta_font()).size(11).color(theme::p().muted),
         Space::new().width(Length::Fill),
         view_pick(shelf::LIST, !pictures, "outline-list"),
         view_pick(shelf::GRID, pictures, "pictures"),
@@ -187,7 +188,7 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Element<'a
     if !o.marked.is_empty() {
         let pick = |label: String, on: bool, m: Msg| button(theme::btn_small(&label)).padding([4, 10]).on_press(om(m)).style(theme::tab(on));
         body = body.push(
-            container(row![pick("Alle".into(), !only, Msg::OnlyMarked(false)), pick(format!("Gemerkt · {}", o.marked.len()), only, Msg::OnlyMarked(true))].spacing(6))
+            container(row![pick(tr("Alle").into(), !only, Msg::OnlyMarked(false)), pick(trf("Gemerkt · {}", &[&o.marked.len()]), only, Msg::OnlyMarked(true))].spacing(6))
                 .padding(Padding { top: 6.0, right: 10.0, bottom: 0.0, left: 10.0 }),
         );
     }
@@ -208,11 +209,11 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Element<'a
 /// "+ Seite", "+ Gruppe", and every group folded or open.
 fn footer(o: &Open, ids: Ids) -> Element<'_, Message> {
     let small = |label: &str, m: Msg, id: &'static str| container(button(theme::btn_small(label)).padding([4, 9]).on_press(om(m)).style(theme::ghost)).id(ids.named(id));
-    let mut r = row![small("+ Seite", Msg::AddPage, "add-page"), small("+ Gruppe", Msg::AddGroup, "add-group"), Space::new().width(Length::Fill)].spacing(4).align_y(Alignment::Center);
+    let mut r = row![small(tr("+ Seite"), Msg::AddPage, "add-page"), small(tr("+ Gruppe"), Msg::AddGroup, "add-group"), Space::new().width(Length::Fill)].spacing(4).align_y(Alignment::Center);
     let groups: Vec<bool> = o.rows.iter().filter_map(|r| if let OutlineRow::Group { collapsed, .. } = r { Some(*collapsed) } else { None }).collect();
     if !groups.is_empty() {
         let open = groups.iter().any(|c| !c);
-        r = r.push(small(if open { "Zuklappen" } else { "Aufklappen" }, Msg::FoldAll(open), "fold-all"));
+        r = r.push(small(if open { tr("Zuklappen") } else { tr("Aufklappen") }, Msg::FoldAll(open), "fold-all"));
     }
     column![container(Space::new()).height(1).width(Length::Fill).style(theme::hairline), container(r).padding([6, 8])].into()
 }
@@ -232,10 +233,10 @@ pub fn page_name(title: &str, spec: &SheetSpec, first_heading: Option<&str>, fir
         return l.to_string();
     }
     match spec.pdf {
-        Some((_, page)) => format!("PDF-Seite {}", page + 1),
+        Some((_, page)) => trf("PDF-Seite {}", &[&(page + 1)]),
         None if spec.is_board() => "Board".into(),
-        None if spec.background == Background::Text => "Textseite".into(),
-        None => "Seite".into(),
+        None if spec.background == Background::Text => tr("Textseite").into(),
+        None => tr("Seite").into(),
     }
 }
 
@@ -249,7 +250,7 @@ fn name_of(o: &Open, headings: &HashMap<String, Vec<Heading>>, title: &str, shee
 
 /// The search field: a loupe, the query, × to empty it (Escape does too).
 fn field(query: &str, ids: Ids) -> Element<'_, Message> {
-    let input = text_input("Suchen …", query)
+    let input = text_input(tr("Suchen …"), query)
         .id(ids.input())
         .on_input(Message::SearchQuery)
         .on_submit(Message::SearchSubmit)
@@ -292,7 +293,7 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Column<'a, 
             OutlineRow::Group { node, depth, title, collapsed, count } => {
                 let content = row![
                     text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::p().accent).width(18),
-                    text(fit(if title.trim().is_empty() { "Gruppe" } else { title }, 24)).font(theme::SANS_MEDIUM).size(13.5).wrapping(text::Wrapping::None),
+                    text(fit(if title.trim().is_empty() { tr("Gruppe") } else { title }, 24)).font(theme::SANS_MEDIUM).size(13.5).wrapping(text::Wrapping::None),
                     Space::new().width(Length::Fill),
                     text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted),
                 ]
@@ -340,7 +341,7 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Column<'a, 
                 list = list.push(page_row(b, node, sheet_id, &name, ids));
                 // The page's headings, under its name: a click shows the heading on the page.
                 for (_, h) in heads.iter().enumerate().filter(|(i, _)| Some(*i) != named_by) {
-                    let label = if h.text.trim().is_empty() { "Überschrift" } else { h.text.trim() };
+                    let label = if h.text.trim().is_empty() { tr("Überschrift") } else { h.text.trim() };
                     let content = row![
                         text("—").size(11).color(theme::p().muted).width(16),
                         text(fit(label, 24)).size(12).color(theme::alpha(theme::p().text, 0.78)).wrapping(text::Wrapping::None),
@@ -381,7 +382,7 @@ fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, curr
                 list = flush(list, &mut pair);
                 let content = row![
                     text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::p().accent).width(18),
-                    text(fit(if title.trim().is_empty() { "Gruppe" } else { title }, 26)).font(theme::SANS_BOLD).size(13.5).wrapping(text::Wrapping::None),
+                    text(fit(if title.trim().is_empty() { tr("Gruppe") } else { title }, 26)).font(theme::SANS_BOLD).size(13.5).wrapping(text::Wrapping::None),
                     Space::new().width(Length::Fill),
                     text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted),
                 ]
@@ -419,7 +420,7 @@ fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, curr
 fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marked: &[&'a String], current: u32, ids: Ids) -> Column<'a, Message> {
     let mut list = column![].spacing(2);
     if marked.is_empty() {
-        return list.push(container(text("Die gemerkten Seiten liegen in zugeklappten Gruppen.").size(12).color(theme::p().muted)).padding([8, 10]));
+        return list.push(container(text(tr("Die gemerkten Seiten liegen in zugeklappten Gruppen.")).size(12).color(theme::p().muted)).padding([8, 10]));
     }
     let titles: HashMap<&str, (&str, &SheetSpec)> = o.rows.iter().filter_map(|r| if let OutlineRow::Sheet { node, title, spec, .. } = r { Some((node.as_str(), (title.as_str(), spec))) } else { None }).collect();
     for node in marked {
@@ -430,8 +431,8 @@ fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marke
             name_of(o, headings, t, &sheet, spec)
         });
         let name = match p.side {
-            0 => main_name.unwrap_or_else(|| "Seite".into()),
-            s => format!("{} · {}", if s < 0 { format!("L{}", -s) } else { format!("R{s}") }, main_name.unwrap_or_else(|| "Seite".into())),
+            0 => main_name.unwrap_or_else(|| tr("Seite").into()),
+            s => format!("{} · {}", if s < 0 { format!("L{}", -s) } else { format!("R{s}") }, main_name.unwrap_or_else(|| tr("Seite").into())),
         };
         let on = p.side == 0 && p.number == current;
         let unmark = button(shelf::icon(shelf::RIBBON, 14.0, theme::p().accent)).padding([4, 6]).on_press(om(Msg::Mark((*node).clone(), false))).style(theme::ghost);
@@ -458,18 +459,18 @@ pub fn layers<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Messa
         Some((o, (node, value))) => {
             let group = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if n == node));
             let input = widgets::on_escape(
-                text_input(if group { "Name der Gruppe" } else { "Name der Seite" }, value).id(rename_id()).on_input(|t| om(Msg::RenameText(t))).on_submit(om(Msg::RenameDone)).padding(10).size(15).style(theme::field),
+                text_input(if group { tr("Name der Gruppe") } else { tr("Name der Seite") }, value).id(rename_id()).on_input(|t| om(Msg::RenameText(t))).on_submit(om(Msg::RenameDone)).padding(10).size(15).style(theme::field),
                 om(Msg::CloseRename),
             );
             let foot = row![
                 Space::new().width(Length::Fill),
-                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(om(Msg::CloseRename)).style(theme::ghost),
-                button(theme::btn("Umbenennen")).padding(theme::pad()).on_press(om(Msg::RenameDone)).style(theme::accent_button),
+                button(theme::btn(tr("Abbrechen"))).padding(theme::pad()).on_press(om(Msg::CloseRename)).style(theme::ghost),
+                button(theme::btn(tr("Umbenennen"))).padding(theme::pad()).on_press(om(Msg::RenameDone)).style(theme::accent_button),
             ]
             .spacing(8);
-            let sub = if group { String::new() } else { "Leer: die erste Überschrift benennt sie".into() };
+            let sub = if group { String::new() } else { tr("Leer: die erste Überschrift benennt sie").into() };
             let key = o.key;
-            shelf::dialog_layer(shelf::frame(if group { "Gruppe umbenennen" } else { "Seite umbenennen" }, sub, input.into(), foot.into(), 420.0), om(Msg::CloseRename)).map(move |m| split::route(key, m))
+            shelf::dialog_layer(shelf::frame(if group { tr("Gruppe umbenennen") } else { tr("Seite umbenennen") }, sub, input.into(), foot.into(), 420.0), om(Msg::CloseRename)).map(move |m| split::route(key, m))
         }
         None => Space::new().into(),
     };
@@ -486,15 +487,15 @@ pub fn layers<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Messa
 /// A page's menu: rename, mark, open beside, delete; a group's: rename, fold, delete.
 fn menu_rows(o: &Open, node: &str) -> Vec<MenuRow> {
     let asked = o.outline.asked.as_deref() == Some(node);
-    let delete = MenuRow { id: menu_id("delete"), glyph: shelf::TRASH, label: if asked { "Wirklich löschen?" } else { "Löschen" }, danger: true, on: om(Msg::Delete(node.to_string())) };
-    let rename = MenuRow { id: menu_id("rename"), glyph: shelf::PEN, label: "Umbenennen", danger: false, on: om(Msg::Rename(node.to_string())) };
+    let delete = MenuRow { id: menu_id("delete"), glyph: shelf::TRASH, label: if asked { tr("Wirklich löschen?") } else { tr("Löschen") }, danger: true, on: om(Msg::Delete(node.to_string())) };
+    let rename = MenuRow { id: menu_id("rename"), glyph: shelf::PEN, label: tr("Umbenennen"), danger: false, on: om(Msg::Rename(node.to_string())) };
     match o.rows.iter().find_map(|r| if let OutlineRow::Group { node: n, collapsed, .. } = r { (n == node).then_some(*collapsed) } else { None }) {
         Some(collapsed) => vec![
             rename,
             MenuRow {
                 id: menu_id("fold"),
                 glyph: if collapsed { shelf::FOLD_DOWN } else { shelf::FOLD_UP },
-                label: if collapsed { "Aufklappen" } else { "Zuklappen" },
+                label: if collapsed { tr("Aufklappen") } else { tr("Zuklappen") },
                 danger: false,
                 on: om(Msg::Fold(node.to_string(), !collapsed)),
             },
@@ -504,8 +505,8 @@ fn menu_rows(o: &Open, node: &str) -> Vec<MenuRow> {
             let marked = o.marked.iter().any(|m| m == node);
             vec![
                 rename,
-                MenuRow { id: menu_id("mark"), glyph: shelf::RIBBON, label: if marked { "Nicht mehr merken" } else { "Merken" }, danger: false, on: om(Msg::Mark(node.to_string(), !marked)) },
-                MenuRow { id: menu_id("beside"), glyph: split::SPLIT, label: "Daneben öffnen", danger: false, on: om(Msg::Beside(node.to_string())) },
+                MenuRow { id: menu_id("mark"), glyph: shelf::RIBBON, label: if marked { tr("Nicht mehr merken") } else { tr("Merken") }, danger: false, on: om(Msg::Mark(node.to_string(), !marked)) },
+                MenuRow { id: menu_id("beside"), glyph: split::SPLIT, label: tr("Daneben öffnen"), danger: false, on: om(Msg::Beside(node.to_string())) },
                 delete,
             ]
         }
@@ -660,13 +661,13 @@ impl App {
                 self.edit_notebook(|nb| nb.delete_undoable(&node));
                 // One history per notebook: "Rückgängig" undoes it whichever pane shows it.
                 self.undo_delete = Some(id);
-                self.say(if group { "Gruppe gelöscht" } else { "Seite gelöscht" });
+                self.say(if group { tr("Gruppe gelöscht") } else { tr("Seite gelöscht") });
             }
             Msg::Undo => {
                 let Some(nb) = self.undo_delete.take() else { return Task::none() };
                 let Some(key) = self.pane_showing(&nb) else { return Task::none() };
                 self.in_pane(key, |app| app.edit_notebook(|nb| nb.undo_delete().map(|_| ())));
-                self.say("Wiederhergestellt");
+                self.say(tr("Wiederhergestellt"));
             }
             Msg::Fold(node, fold) => {
                 if let Some(s) = self.outline_mut() {
@@ -687,13 +688,13 @@ impl App {
                 let (parent, index) = pdf::position_after(&o.nb, after.as_deref());
                 let mut made = None;
                 self.edit_notebook(|nb| {
-                    made = Some(nb.add_group(parent.as_deref(), index, "Neue Gruppe")?);
+                    made = Some(nb.add_group(parent.as_deref(), index, tr("Neue Gruppe"))?);
                     Ok(())
                 });
                 if let Some(node) = made
                     && let Some(s) = self.outline_mut()
                 {
-                    s.renaming = Some((node, "Neue Gruppe".into()));
+                    s.renaming = Some((node, tr("Neue Gruppe").into()));
                     return iced::widget::operation::focus(rename_id()).chain(iced::widget::operation::select_all(rename_id()));
                 }
             }
@@ -732,15 +733,15 @@ fn results(s: &Search, ids: Ids) -> Column<'_, Message> {
     let mut list = column![].spacing(1);
     let count: usize = s.found.as_ref().map(|(_, pages)| pages.iter().map(|p| p.hits.len()).sum()).unwrap_or(0);
     let head: Element<'_, Message> = match &s.found {
-        None => theme::caption("Sucht …").into(),
-        Some(_) => row![theme::caption("Treffer"), Space::new().width(Length::Fill), text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted)].align_y(Alignment::Center).into(),
+        None => theme::caption(tr("Sucht …")).into(),
+        Some(_) => row![theme::caption(tr("Treffer")), Space::new().width(Length::Fill), text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted)].align_y(Alignment::Center).into(),
     };
     list = list.push(container(head).padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, right: 10.0 }));
     let Some((query, pages)) = &s.found else { return list };
     if pages.is_empty() {
         let none = column![
-            text("Nichts gefunden").size(13).color(theme::p().text),
-            text("Handschrift findet die Suche, sobald das Tablet sie gelesen hat.").size(12).color(theme::p().muted),
+            text(tr("Nichts gefunden")).size(13).color(theme::p().text),
+            text(tr("Handschrift findet die Suche, sobald das Tablet sie gelesen hat.")).size(12).color(theme::p().muted),
         ]
         .spacing(4);
         return list.push(container(none).padding([2, 10]));
@@ -786,7 +787,7 @@ fn results(s: &Search, ids: Ids) -> Column<'_, Message> {
         }
     }
     if count > n {
-        list = list.push(container(text(format!("… und {} weitere — genauer suchen", count - n)).size(12).color(theme::p().muted)).padding(Padding { top: 8.0, left: 10.0, right: 10.0, bottom: 0.0 }));
+        list = list.push(container(text(trf("… und {} weitere — genauer suchen", &[&(count - n)])).size(12).color(theme::p().muted)).padding(Padding { top: 8.0, left: 10.0, right: 10.0, bottom: 0.0 }));
     }
     list
 }
@@ -846,7 +847,21 @@ pub fn format_tag(spec: &n0te_core::notebook::SheetSpec) -> String {
     }
     match n0te_core::format::find(spec.width, spec.height) {
         Some((f, false)) if f.id == "a4" => String::new(),
-        _ => n0te_core::format::describe(spec.width, spec.height),
+        _ => format_name(spec.width, spec.height),
+    }
+}
+
+/// A paper format by name in the app's language ("A4 quer", "Folie 16:9 hoch", "Quadrat",
+/// "200 × 300 mm"): `n0te_core::format::describe`, translated.
+pub fn format_name(width: f32, height: f32) -> String {
+    use n0te_core::format;
+    match format::find(width, height) {
+        Some((f, _)) if f.width == f.height => tr(f.name).to_string(),
+        // A slide is landscape by nature: only say so when it stands upright.
+        Some((f, landscape)) if f.id == "slide" => if landscape { tr(f.name).to_string() } else { trf("{} hoch", &[&tr(f.name)]) },
+        Some((f, true)) => trf("{} quer", &[&tr(f.name)]),
+        Some((f, false)) => trf("{} hoch", &[&tr(f.name)]),
+        None => format::describe(width, height),
     }
 }
 
