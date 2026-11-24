@@ -20,7 +20,13 @@ printf '#pragma once\n#include <stddef.h>\nvoid abort(void);void *malloc(size_t)
 printf '#pragma once\n' > "$stub/stdio.h"
 printf '#pragma once\n' > "$stub/errno.h"
 t="${target//-/_}"
-export "CC_$t=clang-cl" "AR_$t=llvm-lib" "CFLAGS_$t=/imsvc$stub"
+if [[ $target == aarch64-* ]]; then
+	# ring compiles its C code for ARM64 Windows with plain clang whatever CC says, and clang
+	# reads GCC-style flags (clang-cl's /imsvc would be taken for a file).
+	export "CC_$t=clang" "AR_$t=llvm-lib" "CFLAGS_$t=-isystem $stub"
+else
+	export "CC_$t=clang-cl" "AR_$t=llvm-lib" "CFLAGS_$t=/imsvc$stub"
+fi
 export CARGO_TARGET_DIR="$here/target/wincheck"
 cd "$here"
 args=("$@")
