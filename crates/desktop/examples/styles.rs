@@ -1,5 +1,8 @@
 //! Headless screenshots of the screens outside the editor in every design (never opens a
-//! window): library, settings, export, the page panel, a turned page, the outline with
+//! window): library (the start, all notebooks as a list, a folder with subfolders, a tag, the
+//! right-click menus, the move, tags and cover dialogs, "Auswählen", a card dragged onto a
+//! folder and onto "Angeheftet"), the outline (list with page pictures, pictures, the marked
+//! pages, a page's menu), settings, export, the page panel, a turned page, the outline with
 //! headings, search results and a found spot lighting up, a page with coordinate systems
 //! (constructions: a triangle with its circumcircle, a function with a tangent and a slider) and
 //! the panel for them, also with commands suggested while one is typed (on the GPU renderer if
@@ -13,9 +16,11 @@ mod harness;
 use std::path::PathBuf;
 
 use harness::Harness;
-use iced::Size;
+use iced::{Point, Size};
 use n0te_core::store::Library;
 use n0te_desktop::app::Message;
+use n0te_desktop::shelf::{self, Action, Pick, Target};
+use n0te_desktop::widgets::Drag;
 use n0te_desktop::{App, demo, theme};
 
 fn main() {
@@ -28,10 +33,27 @@ fn main() {
     let id = demo::save_into(&lib);
     mark_up(&lib, &id);
     let (plot_sheet, plot_id, plot_id2) = plot_page(&lib, &id);
-    for (title, folder, cover) in [("Lineare Algebra", "WS26", "initial"), ("Analysis I", "WS26", "dots"), ("Physik Praktikum", "WS26", "blue"), ("Ideen", "", "stripes")] {
+    // Folders (nested), tags and pins, as the tablet files them.
+    let mut ids = std::collections::HashMap::new();
+    for (title, folder, cover, tags, pinned) in [
+        ("Lineare Algebra", "Uni/WS26", "initial", &["Mathe", "Prüfung"][..], true),
+        ("Analysis I", "Uni/WS26", "dots", &["Mathe"][..], false),
+        ("Physik Praktikum", "Uni/SS25", "blue", &["Labor"][..], false),
+        ("Bachelorarbeit", "Uni", "black", &["Prüfung", "Wichtig", "Entwurf", "Literatur"][..], false),
+        ("Ideen", "", "stripes", &["Privat"][..], true),
+        ("Rezepte", "Privat", "orange", &[][..], false),
+    ] {
         let nb = lib.create_notebook(title).unwrap();
         nb.set_cover(cover).unwrap();
         nb.set_folder(folder).unwrap();
+        nb.set_tags(&tags.iter().map(|t| t.to_string()).collect::<Vec<_>>()).unwrap();
+        nb.set_pinned(pinned).unwrap();
+        lib.save_notebook(&nb).unwrap();
+        ids.insert(title, nb.id());
+    }
+    {
+        let nb = lib.load_notebook(&id).unwrap();
+        nb.set_folder("Uni/WS26").unwrap();
         lib.save_notebook(&nb).unwrap();
     }
     let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1440.0, 900.0), 1.0).expect("renderer");
@@ -42,8 +64,22 @@ fn main() {
         }
         h.message(Message::SetTheme(t.id));
         h.message(Message::Back);
+        // Opened lately (the start's first row): these, the last one first.
+        for t in ["Ideen", "Physik Praktikum", "Analysis I", "Lineare Algebra"] {
+            h.message(Message::Open(ids[t].clone()));
+            h.message(Message::Back);
+        }
+        h.message(Message::Shelf(shelf::Msg::Pick(Pick::Home)));
         h.events(&[]);
         h.screenshot(out.join(format!("{}-1-library.png", t.id)));
+        h.message(Message::Shelf(shelf::Msg::ListView(true)));
+        h.events(&[]);
+        h.screenshot(out.join(format!("{}-1a-start-list.png", t.id)));
+        h.message(Message::Shelf(shelf::Msg::Pick(Pick::All)));
+        h.events(&[]);
+        h.screenshot(out.join(format!("{}-1a2-all-list.png", t.id)));
+        h.message(Message::Shelf(shelf::Msg::ListView(false)));
+        library_screens(&mut h, &out, t.id, &ids);
         h.message(Message::StartCreate);
         h.message(Message::NewTitle("Analysis II".into()));
         h.events(&[]);
@@ -90,6 +126,7 @@ fn main() {
         g.message(Message::SetTheme(t.id));
         g.message(Message::Open(id.clone()));
         g.events(&[]);
+        outline_screens(g, &out, t.id);
         g.message(Message::Jump(plot_sheet.clone()));
         g.events(&[]);
         g.screenshot(out.join(format!("{}-8-plots.png", t.id)));
@@ -149,6 +186,113 @@ fn main() {
         g.message(Message::Plot(Msg::Cancel));
     }
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// The library's organising: a folder with its subfolders and the way to it, a tag, the
+/// right-click menus (a notebook, a folder), the dialogs (move with a new folder being named,
+/// tags, cover), "Auswählen" with two ticked, a card dragged onto a folder in the sidebar.
+fn library_screens(h: &mut Harness, out: &std::path::Path, theme: &str, ids: &std::collections::HashMap<&str, String>) {
+    let shot = |h: &mut Harness, name: &str| {
+        h.events(&[]);
+        h.screenshot(out.join(format!("{theme}-1{name}.png")));
+    };
+    let la = ids["Lineare Algebra"].clone();
+    let ba = ids["Bachelorarbeit"].clone();
+    h.message(Message::Shelf(shelf::Msg::Pick(Pick::Folder("Uni".into()))));
+    shot(h, "c-folder");
+    h.message(Message::Shelf(shelf::Msg::Pick(Pick::Tag("Prüfung".into()))));
+    shot(h, "d-tag");
+    h.message(Message::Shelf(shelf::Msg::Pick(Pick::All)));
+    h.message(Message::Shelf(shelf::Msg::Query("prüfung".into())));
+    shot(h, "d2-search");
+    h.message(Message::Shelf(shelf::Msg::ClearQuery));
+    // The menu where a right click on a card would open it; then the one of a folder.
+    h.events(&[]);
+    let card = h.bounds_of(shelf::card_id(&la)).expect("card");
+    h.move_to(Point::new(card.x + 60.0, card.y + 90.0));
+    h.message(Message::Shelf(shelf::Msg::Menu(Target::Notebooks(vec![la.clone()]), Point::new(card.x + 60.0, card.y + 90.0))));
+    shot(h, "e-menu");
+    h.message(Message::Shelf(shelf::Msg::CloseMenu));
+    let row = h.bounds_of(shelf::folder_id("Uni/WS26")).expect("folder row");
+    h.message(Message::Shelf(shelf::Msg::Menu(Target::Folder("Uni/WS26".into()), Point::new(row.x + 90.0, row.center_y()))));
+    shot(h, "f-folder-menu");
+    h.message(Message::Shelf(shelf::Msg::CloseMenu));
+    h.move_to(Point::new(5.0, 890.0));
+    h.message(Message::Shelf(shelf::Msg::Act(Target::Notebooks(vec![ba.clone()]), Action::Move)));
+    h.message(Message::Shelf(shelf::Msg::To("Uni/WS26".into())));
+    h.message(Message::Shelf(shelf::Msg::NewFolder));
+    h.message(Message::Shelf(shelf::Msg::Text("Klausuren".into())));
+    shot(h, "g-move");
+    h.message(Message::Shelf(shelf::Msg::CloseDialog));
+    h.message(Message::Shelf(shelf::Msg::Act(Target::Notebooks(vec![la.clone()]), Action::Tags)));
+    h.message(Message::Shelf(shelf::Msg::Text("Klau".into())));
+    shot(h, "h-tags");
+    h.message(Message::Shelf(shelf::Msg::CloseDialog));
+    h.message(Message::Shelf(shelf::Msg::Act(Target::Notebooks(vec![la.clone()]), Action::Cover)));
+    shot(h, "i-cover");
+    h.message(Message::Shelf(shelf::Msg::CloseDialog));
+    h.message(Message::Shelf(shelf::Msg::Select(true)));
+    h.message(Message::Shelf(shelf::Msg::Tick(la.clone())));
+    h.message(Message::Shelf(shelf::Msg::Tick(ba.clone())));
+    shot(h, "j-select");
+    // Both ticked cards dragged onto a folder in the sidebar.
+    let card = h.bounds_of(shelf::card_id(&ba)).expect("card");
+    let row = h.bounds_of(shelf::folder_id("Uni/SS25")).expect("folder row");
+    h.message(Message::Shelf(shelf::Msg::Drag(ba.clone(), Drag::Start(card.center()))));
+    h.message(Message::Shelf(shelf::Msg::Drag(ba.clone(), Drag::Move(Point::new(row.x + 120.0, row.center_y())))));
+    h.message(Message::Shelf(shelf::Msg::Over(shelf::Drop::Folder("Uni/SS25".into()), true)));
+    shot(h, "k-drag");
+    // Onto "Angeheftet" (shown while dragging), "Ohne Ordner" there too.
+    h.message(Message::Shelf(shelf::Msg::Over(shelf::Drop::Folder("Uni/SS25".into()), false)));
+    if let Some(pin) = h.bounds_of(shelf::side_id("pinned")) {
+        h.message(Message::Shelf(shelf::Msg::Drag(ba.clone(), Drag::Move(Point::new(pin.x + 120.0, pin.center_y())))));
+        h.message(Message::Shelf(shelf::Msg::Over(shelf::Drop::Pin, true)));
+    }
+    shot(h, "l-drag-pin");
+    h.app.shelf.drag = None;
+    h.message(Message::Shelf(shelf::Msg::Select(false)));
+}
+
+/// The outline: the list with page pictures and marked pages (the page in view further down),
+/// the pictures, only the marked pages, a page's right-click menu.
+fn outline_screens(g: &mut Harness, out: &std::path::Path, theme: &str) {
+    use n0te_desktop::sidebar::{self, Msg};
+    let shot = |g: &mut Harness, name: &str| {
+        g.events(&[]);
+        g.screenshot(out.join(format!("{theme}-9{name}.png")));
+    };
+    let Some(sheet) = (match &g.app.screen {
+        n0te_desktop::app::Screen::Notebook(o) => o.pages.index_of_number(9).map(|i| o.pages.pages[i].placed.sheet_id.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+    g.message(Message::Jump(sheet));
+    g.events(&[]);
+    let reveal = sidebar::reveal_current(&g.app);
+    g.task(reveal);
+    shot(g, "-outline-list");
+    g.message(Message::Outline(Msg::Pictures(true)));
+    shot(g, "b-outline-pictures");
+    g.message(Message::Outline(Msg::OnlyMarked(true)));
+    shot(g, "c-outline-marked");
+    g.message(Message::Outline(Msg::OnlyMarked(false)));
+    g.message(Message::Outline(Msg::Pictures(false)));
+    let node = match &g.app.screen {
+        n0te_desktop::app::Screen::Notebook(o) => o.pages.index_of_number(9).map(|i| o.pages.pages[i].placed.node.clone()),
+        _ => None,
+    };
+    if let Some(node) = node {
+        g.events(&[]);
+        let reveal = sidebar::reveal_current(&g.app);
+        g.task(reveal);
+        // Where a right click on the page's row would be: the row sits a third down the list.
+        if let Some(list) = g.bounds_of(sidebar::list_id()) {
+            g.message(Message::Outline(Msg::Menu(node, Point::new(list.x + 150.0, list.y + list.height / 3.0 + 14.0))));
+            shot(g, "d-page-menu");
+            g.message(Message::Outline(Msg::CloseMenu));
+        }
+    }
 }
 
 /// A page of squared paper at the end with two coordinate systems, made as the tablet makes
@@ -237,5 +381,11 @@ fn mark_up(lib: &Library, id: &str) {
     mark("Deckblatt", &["Analysis I"], &[], None);
     mark("V01", &["Abbildungen", "Injektiv und surjektiv"], &["Eine Abbildung ordnet jedem Element genau eines zu"], None);
     mark("V04", &["Satz 4.1: Grenzwerte sind eindeutig", "Beweis"], &["Der Grenzwert einer Folge ist eindeutig", "Grenzwert und Teilfolgen"], Some("Übung: Grenzwert von (1 + 1/n)^n berechnen"));
+    // Pages marked to find again.
+    for (node, _, title) in &pages {
+        if ["V04", "V07", "Probeklausur 2"].iter().any(|t| title.starts_with(t)) {
+            nb.set_marked(node, true).unwrap();
+        }
+    }
     lib.save_notebook(&nb).unwrap();
 }

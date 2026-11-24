@@ -164,9 +164,10 @@ impl Harness {
     }
 
     fn run_task(&mut self, task: iced::Task<Message>) {
-        let Some(stream) = runtime::task::into_stream(task) else { return };
-        let actions: Vec<runtime::Action<Message>> = executor::block_on(stream.collect());
-        for action in actions {
+        let Some(mut stream) = runtime::task::into_stream(task) else { return };
+        // One action at a time, like the runtime: a task that waits for what its widget
+        // operation finds only ends once that operation has run.
+        while let Some(action) = executor::block_on(stream.next()) {
             match action {
                 runtime::Action::Output(m) => self.message(m),
                 runtime::Action::Widget(op) => {
@@ -232,6 +233,21 @@ impl Harness {
     pub fn click(&mut self, p: Point) {
         self.move_to(p);
         self.events(&[Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)), Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))]);
+    }
+
+    pub fn right_click(&mut self, p: Point) {
+        self.move_to(p);
+        self.events(&[Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)), Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Right))]);
+    }
+
+    /// Holds the left button down at `p` (a drag follows with `move_to`, then `release`).
+    pub fn press_at(&mut self, p: Point) {
+        self.move_to(p);
+        self.events(&[Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))]);
+    }
+
+    pub fn release(&mut self) {
+        self.events(&[Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))]);
     }
 
     pub fn set_modifiers(&mut self, m: keyboard::Modifiers) {

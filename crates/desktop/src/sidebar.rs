@@ -1,33 +1,40 @@
-//! Left sidebar: the search field, then the notebook outline (groups fold, pages jump, the
-//! headings marked on a page under it), numbered like the pages — or, while there is text in
-//! the field, what the search found, page by page.
+//! Left sidebar of a notebook: "Gliederung · 12 Seiten" with a switch between the list and
+//! page pictures, the search field, then the outline — groups fold, pages jump, the headings
+//! marked on a page under it, a red ribbon on pages marked to find again (only those: "Gemerkt"),
+//! a right click renames, marks or deletes — numbered like the pages; below it new pages and
+//! groups, and folding every group. While there is text in the field: what the search found,
+//! page by page.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::text::Span;
 use iced::widget::{Column, Space, button, column, container, rich_text, row, scrollable, span, stack, svg, text, text_input};
-use iced::{Alignment, Color, Element, Font, Length, Padding};
+use iced::{Alignment, Color, Element, Font, Length, Padding, Point, Task};
 
 use n0te_core::notebook::{Background, OutlineRow, SheetSpec};
 use n0te_core::search::{HitKind, words};
 use n0te_core::sheet::Heading;
 
-use crate::app::Message;
+use crate::app::{App, Message, Open, Screen};
 use crate::library::fit;
-use crate::pages::Pages;
 use crate::search::{self, Search};
-use crate::{theme, widgets};
+use crate::shelf::{self, MenuRow};
+use crate::{pages, pdf, theme, widgets};
 
 pub const WIDTH: f32 = 272.0;
 /// Hits listed at most (a common word in a long notebook would make thousands of rows).
 pub const MAX_ROWS: usize = 200;
+/// Page pictures: two to a row in the pictures view, small in the list and the marked pages.
+const PICTURE_W: f32 = 112.0;
+const ROW_PICTURE_W: f32 = 18.0;
+const MARKED_PICTURE_W: f32 = 30.0;
 
 /// The search field (Ctrl+F focuses it).
 pub fn input_id() -> iced::widget::Id {
     iced::widget::Id::new("n0te-search")
 }
 
-/// The scrolling list (outline or results).
+/// The scrolling list (outline, pictures, marked pages or results).
 pub fn list_id() -> iced::widget::Id {
     iced::widget::Id::new("n0te-sidebar-list")
 }
@@ -42,23 +49,138 @@ pub fn heading_id(id: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("n0te-heading-{id}"))
 }
 
-/// `headings`: each main sheet's headings by sheet id, top to bottom.
-pub fn view<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32, headings: &'a HashMap<String, Vec<Heading>>, search: &'a Search) -> Element<'a, Message> {
-    let list = if search.active() { results(search) } else { outline(rows, pages, current, headings) };
-    let body = column![
-        container(field(&search.query)).padding(Padding { top: 10.0, right: 10.0, bottom: 2.0, left: 10.0 }),
-        scrollable(list.padding(Padding { top: 6.0, right: 8.0, bottom: 10.0, left: 8.0 })).id(list_id()).style(theme::scroll_dark).height(Length::Fill),
+/// A page's or group's row (list), picture (pictures) or entry (marked pages).
+pub fn page_id(node: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("n0te-page-{node}"))
+}
+
+/// A row of the page menu: "rename", "mark", "delete", "fold".
+pub fn menu_id(what: &str) -> iced::widget::Id {
+    iced::widget::Id::from(format!("n0te-page-menu-{what}"))
+}
+
+/// The rename dialog's field.
+pub fn rename_id() -> iced::widget::Id {
+    iced::widget::Id::new("n0te-page-rename")
+}
+
+/// The outline's own state: only the marked pages, the page menu, the rename dialog, whether
+/// the last delete can be undone.
+#[derive(Debug, Default)]
+pub struct Outline {
+    pub only_marked: bool,
+    /// The menu of a page or group (node) at a window position.
+    pub menu: Option<(String, Point)>,
+    /// The node whose "Löschen" was clicked once.
+    pub asked: Option<String>,
+    /// Renaming a page or group: (node, the name typed).
+    pub renaming: Option<(String, String)>,
+    /// A page or group was deleted: "Rückgängig" in the status bar.
+    pub undo: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum Msg {
+    /// Page pictures (else the list); kept in the settings.
+    Pictures(bool),
+    OnlyMarked(bool),
+    Menu(String, Point),
+    CloseMenu,
+    Rename(String),
+    RenameText(String),
+    RenameDone,
+    CloseRename,
+    Mark(String, bool),
+    /// The first click asks, the second deletes (undoable).
+    Delete(String),
+    Undo,
+    /// Fold or unfold one group (from its menu).
+    Fold(String, bool),
+    /// "+ Seite" after the page in view (its paper and size), "+ Gruppe" (named right away).
+    AddPage,
+    AddGroup,
+    /// Every group shown: folded (true) or open.
+    FoldAll(bool),
+}
+
+fn om(m: Msg) -> Message {
+    Message::Outline(m)
+}
+
+pub fn view<'a>(app: &'a App, o: &'a Open, current: u32) -> Element<'a, Message> {
+    let search = &app.search;
+    let pictures = app.settings.outline_pictures;
+    let view_pick = |glyph: &'static [u8], on: bool, id: &'static str| {
+        container(button(shelf::icon(glyph, 14.0, if on { theme::p().chrome } else { theme::p().muted })).padding([4, 7]).on_press(om(Msg::Pictures(id == "pictures"))).style(theme::tab(on)))
+            .id(iced::widget::Id::new(id))
+    };
+    let n = o.pages.total_pages;
+    let head = row![
+        theme::caption("Gliederung"),
+        text(theme::cased(&format!(" · {n} {}", if n == 1 { "Seite" } else { "Seiten" }))).font(theme::meta_font()).size(11).color(theme::p().muted),
+        Space::new().width(Length::Fill),
+        view_pick(shelf::LIST, !pictures, "outline-list"),
+        view_pick(shelf::GRID, pictures, "pictures"),
+    ]
+    .spacing(4)
+    .align_y(Alignment::Center);
+    let mut body = column![
+        container(head).padding(Padding { top: 10.0, right: 10.0, bottom: 2.0, left: 18.0 }),
+        container(field(&search.query)).padding(Padding { top: 6.0, right: 10.0, bottom: 2.0, left: 10.0 }),
     ];
+    let pad = Padding { top: 6.0, right: 8.0, bottom: 10.0, left: 8.0 };
+    if search.active() {
+        body = body.push(scrollable(results(search).padding(pad)).id(list_id()).style(theme::scroll_dark).height(Length::Fill));
+        return container(body).width(WIDTH).height(Length::Fill).style(theme::surface).into();
+    }
+    let marked: Vec<&String> = o.marked.iter().filter(|m| o.pages.pages.iter().any(|p| p.placed.node == **m)).collect();
+    let only = app.outline.only_marked && !o.marked.is_empty();
+    if !o.marked.is_empty() {
+        let pick = |label: String, on: bool, m: Msg| button(theme::btn_small(&label)).padding([4, 10]).on_press(om(m)).style(theme::tab(on));
+        body = body.push(
+            container(row![pick("Alle".into(), !only, Msg::OnlyMarked(false)), pick(format!("Gemerkt · {}", o.marked.len()), only, Msg::OnlyMarked(true))].spacing(6))
+                .padding(Padding { top: 6.0, right: 10.0, bottom: 0.0, left: 10.0 }),
+        );
+    }
+    let list = if only {
+        marked_pages(o, &app.headings, &marked, current)
+    } else if pictures {
+        pictures_view(o, &app.headings, current)
+    } else {
+        outline(app, o, current)
+    };
+    body = body.push(scrollable(list.padding(pad)).id(list_id()).style(theme::scroll_dark).height(Length::Fill));
+    if !app.read_only() {
+        body = body.push(footer(o));
+    }
     container(body).width(WIDTH).height(Length::Fill).style(theme::surface).into()
 }
 
-/// What a page is called in the outline: its title, else its first heading, else what it is.
-pub fn page_name(title: &str, spec: &SheetSpec, first_heading: Option<&str>) -> String {
+/// "+ Seite", "+ Gruppe", and every group folded or open.
+fn footer(o: &Open) -> Element<'_, Message> {
+    let small = |label: &str, m: Msg, id: &'static str| container(button(theme::btn_small(label)).padding([4, 9]).on_press(om(m)).style(theme::ghost)).id(iced::widget::Id::new(id));
+    let mut r = row![small("+ Seite", Msg::AddPage, "add-page"), small("+ Gruppe", Msg::AddGroup, "add-group"), Space::new().width(Length::Fill)].spacing(4).align_y(Alignment::Center);
+    let groups: Vec<bool> = o.rows.iter().filter_map(|r| if let OutlineRow::Group { collapsed, .. } = r { Some(*collapsed) } else { None }).collect();
+    if !groups.is_empty() {
+        let open = groups.iter().any(|c| !c);
+        r = r.push(small(if open { "Zuklappen" } else { "Aufklappen" }, Msg::FoldAll(open), "fold-all"));
+    }
+    column![container(Space::new()).height(1).width(Length::Fill).style(theme::hairline), container(r).padding([6, 8])].into()
+}
+
+/// What a page is called in the outline: its title, else its first heading, else a text
+/// page's first line, else what it is.
+pub fn page_name(title: &str, spec: &SheetSpec, first_heading: Option<&str>, first_line: Option<&str>) -> String {
     if !title.trim().is_empty() {
         return title.to_string();
     }
     if let Some(h) = first_heading.map(str::trim).filter(|h| !h.is_empty()) {
         return h.to_string();
+    }
+    if spec.background == Background::Text
+        && let Some(l) = first_line.map(str::trim).filter(|l| !l.is_empty())
+    {
+        return l.to_string();
     }
     match spec.pdf {
         Some((_, page)) => format!("PDF-Seite {}", page + 1),
@@ -66,6 +188,14 @@ pub fn page_name(title: &str, spec: &SheetSpec, first_heading: Option<&str>) -> 
         None if spec.background == Background::Text => "Textseite".into(),
         None => "Seite".into(),
     }
+}
+
+/// A page's name as the outline shows it (title, heading, a text page's first line, kind).
+fn name_of(o: &Open, headings: &HashMap<String, Vec<Heading>>, title: &str, sheet_id: &str, spec: &SheetSpec) -> String {
+    let heads: &[Heading] = headings.get(sheet_id).map(Vec::as_slice).unwrap_or(&[]);
+    let first = heads.iter().find(|h| !h.text.trim().is_empty()).map(|h| h.text.as_str());
+    let line = if title.trim().is_empty() && first.is_none() && spec.background == Background::Text { o.pages.first_line(sheet_id) } else { None };
+    page_name(title, spec, first, line.as_deref())
 }
 
 /// The search field: a loupe, the query, × to empty it (Escape does too).
@@ -89,9 +219,17 @@ fn field(query: &str) -> Element<'_, Message> {
     layers.into()
 }
 
-fn outline<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32, headings: &'a HashMap<String, Vec<Heading>>) -> Column<'a, Message> {
+/// A page or group row with its right-click menu.
+fn with_menu<'a>(content: impl Into<Element<'a, Message>>, node: &str) -> Element<'a, Message> {
+    let n = node.to_string();
+    container(widgets::pointer(content).on_right(move |at| om(Msg::Menu(n.clone(), at)))).id(page_id(node)).into()
+}
+
+fn outline<'a>(app: &'a App, o: &'a Open, current: u32) -> Column<'a, Message> {
+    let (rows, pages, headings) = (&o.rows, &o.pages, &app.headings);
     let numbers: HashMap<&str, u32> = pages.pages.iter().filter(|p| p.placed.side == 0).map(|p| (p.placed.node.as_str(), p.placed.number)).collect();
-    let mut list = column![container(theme::caption("Gliederung")).padding(Padding { top: 4.0, bottom: 6.0, left: 10.0, ..Padding::ZERO })].spacing(1);
+    let marked: HashSet<&str> = o.marked.iter().map(String::as_str).collect();
+    let mut list = column![].spacing(1);
     for r in rows {
         match r {
             OutlineRow::Group { node, depth, title, collapsed, count } => {
@@ -102,52 +240,60 @@ fn outline<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32, headings:
                     text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted),
                 ]
                 .align_y(Alignment::Center);
-                list = list.push(
-                    button(content)
-                        .on_press(Message::Fold(node.clone()))
-                        .padding(Padding { top: 7.0, bottom: 7.0, left: 10.0 + *depth as f32 * 14.0, right: 10.0 })
-                        .width(Length::Fill)
-                        .style(theme::row(false)),
-                );
+                let b = button(content)
+                    .on_press(Message::Fold(node.clone()))
+                    .padding(Padding { top: 7.0, bottom: 7.0, left: 10.0 + *depth as f32 * 14.0, right: 10.0 })
+                    .width(Length::Fill)
+                    .style(theme::row(false));
+                list = list.push(with_menu(b, node));
             }
             OutlineRow::Sheet { node, depth, sheet_id, title, spec, left, right } => {
                 let n = numbers.get(node.as_str()).copied().unwrap_or(0);
                 let heads: &[Heading] = headings.get(sheet_id).map(Vec::as_slice).unwrap_or(&[]);
                 // Untitled: the first heading names the page (and isn't listed again under it).
                 let named_by = (title.trim().is_empty()).then(|| heads.iter().position(|h| !h.text.trim().is_empty())).flatten();
-                let name = page_name(title, spec, named_by.map(|i| heads[i].text.as_str()));
+                let name = name_of(o, headings, title, sheet_id, spec);
                 let sides = format!("{}{}", if left.is_empty() { String::new() } else { format!("‹{} ", left.len()) }, if right.is_empty() { String::new() } else { format!("{}›", right.len()) });
-                let content = row![
+                let picture: Element<'a, Message> = match pages.page_of_sheet(sheet_id) {
+                    Some(i) => pages::thumb(pages, i, ROW_PICTURE_W, false).into(),
+                    None => Space::new().width(ROW_PICTURE_W).into(),
+                };
+                let mut content = row![
                     text(format!("{n:02}")).font(theme::meta_font()).size(11.5).color(if n == current { theme::p().accent } else { theme::p().muted }).width(28),
-                    text(fit(&name, 22)).font(theme::SANS).size(13).wrapping(text::Wrapping::None),
+                    picture,
+                    Space::new().width(8),
+                    text(fit(&name, 20)).font(theme::SANS).size(13).wrapping(text::Wrapping::None),
                     Space::new().width(Length::Fill),
-                    text(sides).font(theme::meta_font()).size(11).color(theme::p().accent),
-                    Space::new().width(6),
-                    // Only a page that differs from the usual A4 says its format ("A4 quer", "A5 hoch").
-                    text(format_tag(spec)).font(theme::meta_font()).size(11).color(theme::p().muted),
                 ]
                 .align_y(Alignment::Center);
+                if marked.contains(node.as_str()) {
+                    content = content.push(shelf::icon(shelf::RIBBON, 12.0, theme::p().accent));
+                    content = content.push(Space::new().width(4));
+                }
+                content = content.push(text(sides).font(theme::meta_font()).size(11).color(theme::p().accent));
+                content = content.push(Space::new().width(6));
+                // Only a page that differs from the usual A4 says its format ("A4 quer", "A5 hoch").
+                content = content.push(text(format_tag(spec)).font(theme::meta_font()).size(11).color(theme::p().muted));
                 let indent = 10.0 + *depth as f32 * 14.0;
-                list = list.push(
-                    button(content)
-                        .on_press(Message::Jump(sheet_id.clone()))
-                        .padding(Padding { top: 6.0, bottom: 6.0, left: indent, right: 10.0 })
-                        .width(Length::Fill)
-                        .style(theme::row(n == current)),
-                );
+                let b = button(content)
+                    .on_press(Message::Jump(sheet_id.clone()))
+                    .padding(Padding { top: 4.0, bottom: 4.0, left: indent, right: 10.0 })
+                    .width(Length::Fill)
+                    .style(theme::row(n == current));
+                list = list.push(with_menu(b, node));
                 // The page's headings, under its name: a click shows the heading on the page.
                 for (_, h) in heads.iter().enumerate().filter(|(i, _)| Some(*i) != named_by) {
                     let label = if h.text.trim().is_empty() { "Überschrift" } else { h.text.trim() };
                     let content = row![
                         text("—").size(11).color(theme::p().muted).width(16),
-                        text(fit(label, 26)).size(12).color(theme::alpha(theme::p().text, 0.78)).wrapping(text::Wrapping::None),
+                        text(fit(label, 24)).size(12).color(theme::alpha(theme::p().text, 0.78)).wrapping(text::Wrapping::None),
                     ]
                     .align_y(Alignment::Center);
                     list = list.push(
                         container(
                             button(content)
                                 .on_press(Message::Reveal(sheet_id.clone(), [h.x0, h.y0, h.x1, h.y1]))
-                                .padding(Padding { top: 3.0, bottom: 4.0, left: indent + 28.0, right: 10.0 })
+                                .padding(Padding { top: 3.0, bottom: 4.0, left: indent + 46.0, right: 10.0 })
                                 .width(Length::Fill)
                                 .style(theme::row(false)),
                         )
@@ -158,6 +304,331 @@ fn outline<'a>(rows: &'a [OutlineRow], pages: &'a Pages, current: u32, headings:
         }
     }
     list
+}
+
+/// The outline as page pictures, two to a row, "01 Name" under each; groups as headings
+/// across that fold; the page in view outlined in the accent, marked ones with a ribbon.
+fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, current: u32) -> Column<'a, Message> {
+    let marked: HashSet<&str> = o.marked.iter().map(String::as_str).collect();
+    let mut list = column![].spacing(12);
+    let mut pair: Vec<Element<'a, Message>> = Vec::new();
+    let flush = |list: Column<'a, Message>, pair: &mut Vec<Element<'a, Message>>| {
+        if pair.is_empty() {
+            return list;
+        }
+        list.push(iced::widget::Row::with_children(std::mem::take(pair)).spacing(10))
+    };
+    for r in &o.rows {
+        match r {
+            OutlineRow::Group { node, depth, title, collapsed, count } => {
+                list = flush(list, &mut pair);
+                let content = row![
+                    text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::p().accent).width(18),
+                    text(fit(if title.trim().is_empty() { "Gruppe" } else { title }, 26)).font(theme::SANS_BOLD).size(13.5).wrapping(text::Wrapping::None),
+                    Space::new().width(Length::Fill),
+                    text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted),
+                ]
+                .align_y(Alignment::Center);
+                let b = button(content).on_press(Message::Fold(node.clone())).padding(Padding { top: 6.0, bottom: 4.0, left: 4.0 + *depth as f32 * 12.0, right: 6.0 }).width(Length::Fill).style(theme::row(false));
+                list = list.push(with_menu(b, node));
+            }
+            OutlineRow::Sheet { node, sheet_id, title, spec, .. } => {
+                let Some(i) = o.pages.page_of_sheet(sheet_id) else { continue };
+                let n = o.pages.pages[i].placed.number;
+                let mut picture = stack![pages::thumb(&o.pages, i, PICTURE_W, n == current)];
+                if marked.contains(node.as_str()) {
+                    picture = picture.push(container(shelf::icon(shelf::RIBBON, 16.0, theme::p().accent)).padding(Padding { top: 3.0, right: 4.0, ..Padding::ZERO }).align_right(Length::Fill));
+                }
+                let name = name_of(o, headings, title, sheet_id, spec);
+                let label = row![
+                    text(format!("{n:02}")).font(theme::meta_font()).size(11).color(if n == current { theme::p().accent } else { theme::p().muted }),
+                    text(fit(&name, 14)).size(12).color(theme::p().text).wrapping(text::Wrapping::None),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center);
+                let b = button(column![picture, label].spacing(5)).on_press(Message::Jump(sheet_id.clone())).padding(3).style(theme::row(false));
+                pair.push(with_menu(b, node));
+                if pair.len() == 2 {
+                    list = flush(list, &mut pair);
+                }
+            }
+        }
+    }
+    flush(list, &mut pair)
+}
+
+/// The marked pages wherever they are (in folded groups they don't show): picture, number,
+/// name, a ribbon that unmarks; a click shows the page.
+fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marked: &[&'a String], current: u32) -> Column<'a, Message> {
+    let mut list = column![].spacing(2);
+    if marked.is_empty() {
+        return list.push(container(text("Die gemerkten Seiten liegen in zugeklappten Gruppen.").size(12).color(theme::p().muted)).padding([8, 10]));
+    }
+    let titles: HashMap<&str, (&str, &SheetSpec)> = o.rows.iter().filter_map(|r| if let OutlineRow::Sheet { node, title, spec, .. } = r { Some((node.as_str(), (title.as_str(), spec))) } else { None }).collect();
+    for node in marked {
+        let Some(i) = o.pages.pages.iter().position(|p| p.placed.node == **node) else { continue };
+        let p = &o.pages.pages[i].placed;
+        let main_name = titles.get(p.main_node.as_str()).map(|(t, spec)| {
+            let sheet = o.pages.pages.iter().find(|q| q.placed.node == p.main_node).map(|q| q.placed.sheet_id.clone()).unwrap_or_default();
+            name_of(o, headings, t, &sheet, spec)
+        });
+        let name = match p.side {
+            0 => main_name.unwrap_or_else(|| "Seite".into()),
+            s => format!("{} · {}", if s < 0 { format!("L{}", -s) } else { format!("R{s}") }, main_name.unwrap_or_else(|| "Seite".into())),
+        };
+        let on = p.side == 0 && p.number == current;
+        let unmark = button(shelf::icon(shelf::RIBBON, 14.0, theme::p().accent)).padding([4, 6]).on_press(om(Msg::Mark((*node).clone(), false))).style(theme::ghost);
+        let content = row![
+            pages::thumb(&o.pages, i, MARKED_PICTURE_W, on),
+            text(format!("{:02}", p.number)).font(theme::meta_font()).size(11.5).color(if on { theme::p().accent } else { theme::p().muted }).width(26),
+            text(fit(&name, 17)).size(13).wrapping(text::Wrapping::None),
+            Space::new().width(Length::Fill),
+            unmark,
+        ]
+        .spacing(10)
+        .align_y(Alignment::Center);
+        let b = button(content).on_press(Message::Jump(p.sheet_id.clone())).padding([5, 8]).width(Length::Fill).style(theme::row(on));
+        list = list.push(with_menu(b, node));
+    }
+    list
+}
+
+/// The notebook under its page menu and the rename dialog (always these layers, so the page
+/// view keeps its state when one shows).
+pub fn layers<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Message> {
+    let Screen::Notebook(o) = &app.screen else { return base };
+    let s = &app.outline;
+    let dialog: Element<'a, Message> = match &s.renaming {
+        Some((node, value)) => {
+            let group = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if n == node));
+            let input = widgets::on_escape(
+                text_input(if group { "Name der Gruppe" } else { "Name der Seite" }, value).id(rename_id()).on_input(|t| om(Msg::RenameText(t))).on_submit(om(Msg::RenameDone)).padding(10).size(15).style(theme::field),
+                om(Msg::CloseRename),
+            );
+            let foot = row![
+                Space::new().width(Length::Fill),
+                button(theme::btn("Abbrechen")).padding(theme::pad()).on_press(om(Msg::CloseRename)).style(theme::ghost),
+                button(theme::btn("Umbenennen")).padding(theme::pad()).on_press(om(Msg::RenameDone)).style(theme::accent_button),
+            ]
+            .spacing(8);
+            let sub = if group { String::new() } else { "Leer: die erste Überschrift benennt sie".into() };
+            shelf::dialog_layer(shelf::frame(if group { "Gruppe umbenennen" } else { "Seite umbenennen" }, sub, input.into(), foot.into(), 420.0), om(Msg::CloseRename))
+        }
+        None => Space::new().into(),
+    };
+    let menu: Element<'a, Message> = match &s.menu {
+        Some((node, at)) => shelf::float_menu(*at, move || menu_rows(app, o, node), om(Msg::CloseMenu)),
+        None => Space::new().into(),
+    };
+    stack![base, dialog, menu].into()
+}
+
+/// A page's menu: rename, mark, delete; a group's: rename, fold, delete.
+fn menu_rows(app: &App, o: &Open, node: &str) -> Vec<MenuRow> {
+    let asked = app.outline.asked.as_deref() == Some(node);
+    let delete = MenuRow { id: menu_id("delete"), glyph: shelf::TRASH, label: if asked { "Wirklich löschen?" } else { "Löschen" }, danger: true, on: om(Msg::Delete(node.to_string())) };
+    let rename = MenuRow { id: menu_id("rename"), glyph: shelf::PEN, label: "Umbenennen", danger: false, on: om(Msg::Rename(node.to_string())) };
+    match o.rows.iter().find_map(|r| if let OutlineRow::Group { node: n, collapsed, .. } = r { (n == node).then_some(*collapsed) } else { None }) {
+        Some(collapsed) => vec![
+            rename,
+            MenuRow {
+                id: menu_id("fold"),
+                glyph: if collapsed { shelf::FOLD_DOWN } else { shelf::FOLD_UP },
+                label: if collapsed { "Aufklappen" } else { "Zuklappen" },
+                danger: false,
+                on: om(Msg::Fold(node.to_string(), !collapsed)),
+            },
+            delete,
+        ],
+        None => {
+            let marked = o.marked.iter().any(|m| m == node);
+            vec![
+                rename,
+                MenuRow { id: menu_id("mark"), glyph: shelf::RIBBON, label: if marked { "Nicht mehr merken" } else { "Merken" }, danger: false, on: om(Msg::Mark(node.to_string(), !marked)) },
+                delete,
+            ]
+        }
+    }
+}
+
+/// Brings the page in view into view in the outline too (opening, switching list and
+/// pictures): its row about a third down the list.
+pub fn reveal_current(app: &App) -> Task<Message> {
+    let Screen::Notebook(o) = &app.screen else { return Task::none() };
+    let current = o.pages.current_number(&o.camera);
+    let Some(i) = o.pages.index_of_number(current) else { return Task::none() };
+    iced::advanced::widget::operate(Reveal { list: list_id(), target: page_id(&o.pages.pages[i].placed.node), scroll: None, found: None })
+}
+
+/// Finds a row and the list it is in, then scrolls the list there.
+struct Reveal {
+    list: iced::widget::Id,
+    target: iced::widget::Id,
+    scroll: Option<(iced::Rectangle, iced::Rectangle)>,
+    found: Option<iced::Rectangle>,
+}
+
+impl<T: 'static> iced::advanced::widget::Operation<T> for Reveal {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn iced::advanced::widget::Operation<T>)) {
+        operate(self);
+    }
+    fn container(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle) {
+        if id == Some(&self.target) {
+            self.found = Some(bounds);
+        }
+    }
+    fn scrollable(&mut self, id: Option<&iced::widget::Id>, bounds: iced::Rectangle, content: iced::Rectangle, _translation: iced::Vector, _state: &mut dyn iced::advanced::widget::operation::Scrollable) {
+        if id == Some(&self.list) {
+            self.scroll = Some((bounds, content));
+        }
+    }
+    fn finish(&self) -> iced::advanced::widget::operation::Outcome<T> {
+        use iced::advanced::widget::operation::{Outcome, scrollable::{AbsoluteOffset, scroll_to}};
+        match (self.scroll, self.found) {
+            (Some((bounds, content)), Some(row)) => {
+                let y = (row.y - content.y - bounds.height / 3.0).max(0.0);
+                Outcome::Chain(Box::new(scroll_to(self.list.clone(), AbsoluteOffset { x: None, y: Some(y) })))
+            }
+            _ => Outcome::None,
+        }
+    }
+}
+
+// --- what the outline does -------------------------------------------------------------------
+
+impl App {
+    pub(crate) fn on_outline(&mut self, m: Msg) -> Task<Message> {
+        match m {
+            Msg::Pictures(on) => {
+                self.settings.outline_pictures = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+                return reveal_current(self);
+            }
+            Msg::OnlyMarked(on) => {
+                self.outline.only_marked = on;
+                if !on {
+                    return reveal_current(self);
+                }
+            }
+            Msg::Menu(node, at) => {
+                if !self.read_only() {
+                    self.outline.menu = Some((node, at));
+                    self.outline.asked = None;
+                }
+            }
+            Msg::CloseMenu => {
+                self.outline.menu = None;
+                self.outline.asked = None;
+            }
+            Msg::Rename(node) => {
+                self.outline.menu = None;
+                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let title = o
+                    .rows
+                    .iter()
+                    .find_map(|r| match r {
+                        OutlineRow::Group { node: n, title, .. } | OutlineRow::Sheet { node: n, title, .. } if *n == node => Some(title.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                self.outline.renaming = Some((node, title));
+                return iced::widget::operation::focus(rename_id()).chain(iced::widget::operation::select_all(rename_id()));
+            }
+            Msg::RenameText(t) => {
+                if let Some((_, v)) = &mut self.outline.renaming {
+                    *v = t;
+                }
+            }
+            Msg::RenameDone => {
+                if let Some((node, v)) = self.outline.renaming.take() {
+                    self.edit_notebook(|nb| nb.set_title_of(&node, v.trim()));
+                }
+            }
+            Msg::CloseRename => self.outline.renaming = None,
+            Msg::Mark(node, on) => {
+                self.outline.menu = None;
+                self.edit_notebook(|nb| nb.set_marked(&node, on));
+                if let Screen::Notebook(o) = &self.screen
+                    && o.marked.is_empty()
+                {
+                    self.outline.only_marked = false;
+                }
+            }
+            Msg::Delete(node) => {
+                if self.outline.asked.as_deref() != Some(node.as_str()) {
+                    self.outline.asked = Some(node);
+                    return Task::none();
+                }
+                self.outline.menu = None;
+                self.outline.asked = None;
+                let group = matches!(&self.screen, Screen::Notebook(o) if o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if *n == node)));
+                self.finish_text();
+                if group || self.text_page.as_ref().is_some_and(|t| matches!(&self.screen, Screen::Notebook(o) if o.rows.iter().any(|r| matches!(r, OutlineRow::Sheet { node: n, sheet_id, .. } if *n == node && *sheet_id == t.sheet_id)))) {
+                    self.close_text_page();
+                }
+                self.edit_notebook(|nb| nb.delete_undoable(&node));
+                self.outline.undo = true;
+                self.say(if group { "Gruppe gelöscht" } else { "Seite gelöscht" });
+            }
+            Msg::Undo => {
+                self.outline.undo = false;
+                self.edit_notebook(|nb| nb.undo_delete().map(|_| ()));
+                self.say("Wiederhergestellt");
+            }
+            Msg::Fold(node, fold) => {
+                self.outline.menu = None;
+                self.edit_notebook(|nb| nb.set_collapsed(&node, fold));
+            }
+            Msg::FoldAll(fold) => {
+                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let groups: Vec<String> = o.rows.iter().filter_map(|r| if let OutlineRow::Group { node, collapsed, .. } = r { (*collapsed != fold).then(|| node.clone()) } else { None }).collect();
+                self.edit_notebook(|nb| groups.iter().try_for_each(|g| nb.set_collapsed(g, fold)));
+            }
+            Msg::AddPage => return self.add_page(),
+            Msg::AddGroup => {
+                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let current = o.pages.current_number(&o.camera);
+                let after = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone());
+                let (parent, index) = pdf::position_after(&o.nb, after.as_deref());
+                let mut made = None;
+                self.edit_notebook(|nb| {
+                    made = Some(nb.add_group(parent.as_deref(), index, "Neue Gruppe")?);
+                    Ok(())
+                });
+                if let Some(node) = made {
+                    self.outline.renaming = Some((node, "Neue Gruppe".into()));
+                    return iced::widget::operation::focus(rename_id()).chain(iced::widget::operation::select_all(rename_id()));
+                }
+            }
+        }
+        Task::none()
+    }
+
+    /// A page after the one in view, with its paper and size (after a PDF page, a board or a
+    /// text page: the paper of new notebooks), then shown.
+    fn add_page(&mut self) -> Task<Message> {
+        let Screen::Notebook(o) = &self.screen else { return Task::none() };
+        let current = o.pages.current_number(&o.camera);
+        let at = o.pages.index_of_number(current).map(|i| &o.pages.pages[i].placed);
+        let spec = match at.map(|p| &p.spec) {
+            Some(s) if s.pdf.is_none() && !s.is_board() && s.background != Background::Text => SheetSpec { gaps: Vec::new(), ..s.clone() },
+            _ => SheetSpec { width: self.settings.new_w, height: self.settings.new_h, background: self.new_paper, spacing: self.new_spacing, pdf: None, gaps: Vec::new() },
+        };
+        let (parent, index) = pdf::position_after(&o.nb, at.map(|p| p.node.as_str()));
+        let mut made = None;
+        self.edit_notebook(|nb| {
+            made = Some(nb.add_sheet(parent.as_deref(), index, &spec)?.1);
+            Ok(())
+        });
+        if let (Some(sheet), Screen::Notebook(o)) = (made, &mut self.screen)
+            && let Some(i) = o.pages.page_of_sheet(&sheet)
+        {
+            o.camera = o.pages.camera_for(i, &o.camera);
+        }
+        Task::none()
+    }
 }
 
 /// What the search found: page by page in outline order (number and name), each hit with its
@@ -298,11 +769,17 @@ mod tests {
     #[test]
     fn an_untitled_page_is_named_by_its_first_heading() {
         let grid = SheetSpec::a4(Background::Grid);
-        assert_eq!(super::page_name("Analysis", &grid, Some("Satz 3")), "Analysis");
-        assert_eq!(super::page_name("", &grid, Some("  Satz 3 ")), "Satz 3");
-        assert_eq!(super::page_name(" ", &grid, None), "Seite");
-        assert_eq!(super::page_name("", &grid, Some(" ")), "Seite");
-        assert_eq!(super::page_name("", &SheetSpec { pdf: Some(("b".into(), 2)), ..grid.clone() }, None), "PDF-Seite 3");
-        assert_eq!(super::page_name("", &SheetSpec::a4(Background::Text), None), "Textseite");
+        assert_eq!(super::page_name("Analysis", &grid, Some("Satz 3"), None), "Analysis");
+        assert_eq!(super::page_name("", &grid, Some("  Satz 3 "), None), "Satz 3");
+        assert_eq!(super::page_name(" ", &grid, None, None), "Seite");
+        assert_eq!(super::page_name("", &grid, Some(" "), None), "Seite");
+        assert_eq!(super::page_name("", &SheetSpec { pdf: Some(("b".into(), 2)), ..grid.clone() }, None, None), "PDF-Seite 3");
+        assert_eq!(super::page_name("", &SheetSpec::board(), None, None), "Board");
+        let text = SheetSpec::a4(Background::Text);
+        assert_eq!(super::page_name("", &text, None, None), "Textseite");
+        // A text page without a name or heading: its first line.
+        assert_eq!(super::page_name("", &text, None, Some(" Einkaufsliste ")), "Einkaufsliste");
+        assert_eq!(super::page_name("", &text, Some("Satz 3"), Some("Einkaufsliste")), "Satz 3");
+        assert_eq!(super::page_name("", &grid, None, Some("not a text page")), "Seite");
     }
 }

@@ -1,5 +1,6 @@
 //! Small custom widgets: a drag grip (move / resize text boxes), Escape on a text field, room
-//! left below a part of a column (a dialog's buttons under a scrolling body).
+//! left below a part of a column (a dialog's buttons under a scrolling body), the pointer on a
+//! library card (right click, drag, drop) and the layer that closes a menu.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
@@ -204,6 +205,205 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for LeaveRoom<'a, Messa
 
 impl<'a, Message: 'a> From<LeaveRoom<'a, Message>> for Element<'a, Message> {
     fn from(w: LeaveRoom<'a, Message>) -> Self {
+        Element::new(w)
+    }
+}
+
+/// What dragging a library card reports: it started (past a few pixels), the pointer moved,
+/// it ended (positions in the window).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Drag {
+    Start(Point),
+    Move(Point),
+    End,
+}
+
+/// How far the pointer moves with the button held before a press becomes a drag.
+const DRAG_START: f32 = 6.0;
+
+/// A card or a row in the library. A right click (and, with `on_left`, a left one) reports
+/// where it happened in the window; with `on_drag`, holding the button and moving reports a
+/// drag; as a drop target (`drop`, while something is dragged) it says when the pointer comes
+/// over it and when it leaves. Plain clicks go on to the content (a button).
+pub struct Pointer<'a, Message> {
+    content: Element<'a, Message>,
+    on_right: Option<Box<dyn Fn(Point) -> Message + 'a>>,
+    on_left: Option<Box<dyn Fn(Point) -> Message + 'a>>,
+    on_drag: Option<Box<dyn Fn(Drag) -> Message + 'a>>,
+    drop: Option<(Message, Message)>,
+}
+
+pub fn pointer<'a, Message>(content: impl Into<Element<'a, Message>>) -> Pointer<'a, Message> {
+    Pointer { content: content.into(), on_right: None, on_left: None, on_drag: None, drop: None }
+}
+
+impl<'a, Message> Pointer<'a, Message> {
+    pub fn on_right(mut self, f: impl Fn(Point) -> Message + 'a) -> Self {
+        self.on_right = Some(Box::new(f));
+        self
+    }
+    pub fn on_left(mut self, f: impl Fn(Point) -> Message + 'a) -> Self {
+        self.on_left = Some(Box::new(f));
+        self
+    }
+    pub fn on_drag(mut self, f: impl Fn(Drag) -> Message + 'a) -> Self {
+        self.on_drag = Some(Box::new(f));
+        self
+    }
+    /// A drop target while `active`: `over` when the pointer comes over it, `left` when it goes.
+    pub fn drop_target(mut self, active: bool, over: Message, left: Message) -> Self {
+        self.drop = active.then_some((over, left));
+        self
+    }
+}
+
+#[derive(Default)]
+struct PointerState {
+    /// The pointer in the window: the events carry it (inside a scrolling list the cursor is
+    /// shifted by the scrolling, a menu wants the real spot).
+    at: Option<Point>,
+    pressed: Option<Point>,
+    dragging: bool,
+    over: bool,
+}
+
+impl<'a, Message: Clone> Widget<Message, Theme, iced::Renderer> for Pointer<'a, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<PointerState>()
+    }
+    fn state(&self) -> tree::State {
+        tree::State::new(PointerState::default())
+    }
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+    fn update(&mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor, renderer: &iced::Renderer, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, viewport: &Rectangle) {
+        let bounds = layout.bounds();
+        let state = tree.state.downcast_mut::<PointerState>();
+        let at = |state: &PointerState| state.at.or(cursor.position()).unwrap_or(Point::ORIGIN);
+        match event {
+            Event::Mouse(mouse::Event::CursorMoved { position }) => {
+                state.at = Some(*position);
+                if let (Some(start), Some(on_drag)) = (state.pressed, &self.on_drag) {
+                    if state.dragging {
+                        shell.publish(on_drag(Drag::Move(*position)));
+                    } else if start.distance(*position) > DRAG_START {
+                        state.dragging = true;
+                        shell.publish(on_drag(Drag::Start(*position)));
+                    }
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Right)) if cursor.is_over(bounds) => {
+                if let Some(on_right) = &self.on_right {
+                    shell.publish(on_right(at(state)));
+                    shell.capture_event();
+                    return;
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) if cursor.is_over(bounds) => {
+                if let Some(on_left) = &self.on_left {
+                    shell.publish(on_left(at(state)));
+                    shell.capture_event();
+                    return;
+                }
+                if self.on_drag.is_some() {
+                    state.pressed = Some(at(state));
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                state.pressed = None;
+                if std::mem::take(&mut state.dragging) {
+                    if let Some(on_drag) = &self.on_drag {
+                        shell.publish(on_drag(Drag::End));
+                    }
+                    // The button under it lets go without a click.
+                    self.content.as_widget_mut().update(&mut tree.children[0], event, layout, mouse::Cursor::Unavailable, renderer, clipboard, shell, viewport);
+                    shell.capture_event();
+                    return;
+                }
+            }
+            _ => {}
+        }
+        // A drop target follows the pointer while something is dragged.
+        match &self.drop {
+            Some((over, left)) => {
+                let now = cursor.is_over(bounds);
+                if now != state.over {
+                    state.over = now;
+                    shell.publish(if now { over.clone() } else { left.clone() });
+                }
+            }
+            None => state.over = false,
+        }
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
+    }
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &iced::Renderer) -> mouse::Interaction {
+        if tree.state.downcast_ref::<PointerState>().dragging {
+            return mouse::Interaction::Grabbing;
+        }
+        self.content.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+    }
+    fn draw(&self, tree: &Tree, renderer: &mut iced::Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+    }
+    fn overlay<'b>(&'b mut self, tree: &'b mut Tree, layout: Layout<'b>, renderer: &iced::Renderer, viewport: &Rectangle, translation: Vector) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: Clone + 'a> From<Pointer<'a, Message>> for Element<'a, Message> {
+    fn from(w: Pointer<'a, Message>) -> Self {
+        Element::new(w)
+    }
+}
+
+/// An invisible layer over everything under a menu: a press anywhere closes the menu. A left
+/// press stops there (it only closes); a right press goes on, so right-clicking another card
+/// opens its menu at once. Scrolling closes the menu too.
+pub struct Dismiss<Message> {
+    on_dismiss: Message,
+}
+
+pub fn dismiss<Message>(on_dismiss: Message) -> Dismiss<Message> {
+    Dismiss { on_dismiss }
+}
+
+impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for Dismiss<Message> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+    fn layout(&mut self, _tree: &mut Tree, _renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+    fn update(&mut self, _tree: &mut Tree, event: &Event, _layout: Layout<'_>, _cursor: mouse::Cursor, _renderer: &iced::Renderer, _clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, _viewport: &Rectangle) {
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(button)) => {
+                shell.publish(self.on_dismiss.clone());
+                if *button != mouse::Button::Right {
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::WheelScrolled { .. }) => shell.publish(self.on_dismiss.clone()),
+            _ => {}
+        }
+    }
+    fn draw(&self, _tree: &Tree, _renderer: &mut iced::Renderer, _theme: &Theme, _style: &renderer::Style, _layout: Layout<'_>, _cursor: mouse::Cursor, _viewport: &Rectangle) {}
+}
+
+impl<'a, Message: Clone + 'a> From<Dismiss<Message>> for Element<'a, Message> {
+    fn from(w: Dismiss<Message>) -> Self {
         Element::new(w)
     }
 }

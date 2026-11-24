@@ -16,6 +16,7 @@ pub mod pdf;
 pub mod plots;
 pub mod search;
 pub mod settings;
+pub mod shelf;
 pub mod sidebar;
 pub mod theme;
 pub mod widgets;

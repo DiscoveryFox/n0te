@@ -1,17 +1,19 @@
-//! The library screen: notebooks grouped by folder as cards with their cover, `.n0te` bundles
-//! waiting in Downloads (from the tablet), a new notebook.
+//! The library screen: a sidebar with folders and tags (see `shelf`), the notebooks of what is
+//! picked there as cards with their cover, `.n0te` bundles waiting in Downloads (from the
+//! tablet), a new notebook.
 
 use std::time::SystemTime;
 
 use iced::widget::canvas::{self, Path, Stroke};
-use iced::widget::{Space, button, canvas as canvas_widget, column, container, row, text};
+use iced::widget::{Space, button, canvas as canvas_widget, column, container, hover, mouse_area, row, stack, text};
 use iced::{Alignment, Color, Element, Length, Padding, Point, Rectangle, Renderer, Size, Theme, mouse};
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::app::{App, Bundle, Entry, ExportWhat, Message, Open};
-use crate::theme;
+use crate::shelf::{self, Msg, Pick, Target};
+use crate::{theme, widgets};
 
 pub fn view(app: &App) -> Element<'_, Message> {
     let imports = if app.bundles.is_empty() { "Importieren".to_string() } else { format!("Importieren · {}", app.bundles.len()) };
@@ -36,15 +38,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .width(Length::Fill)
     .style(theme::chrome);
 
-    let folders = app.entries.iter().map(|e| e.folder.as_str()).filter(|f| !f.is_empty()).collect::<HashSet<_>>().len();
-    let n = app.entries.len();
-    let mut facts = format!("{n} {}", if n == 1 { "Notizbuch" } else { "Notizbücher" });
-    if folders > 0 {
-        facts += &format!(" · {folders} {}", if folders == 1 { "Ordner" } else { "Ordner" });
-    }
-    let mut content = column![column![theme::heading("Bibliothek", 30.0), text(facts).font(theme::meta_font()).size(13).color(theme::p().muted)].spacing(2)]
-        .spacing(26)
-        .padding(Padding { top: 26.0, right: 32.0, bottom: 40.0, left: 32.0 });
+    let s = &app.shelf;
+    let shown = shelf::shown(&app.entries, &s.pick, &s.query, s.sort);
+    let rows = shelf::folder_rows(app.entries.iter().map(|e| e.folder.as_str()), s.empty.iter().map(String::as_str));
+    let searching = !s.query.trim().is_empty();
+    // In a folder its subfolders come first, as tiles.
+    let tiles = match &s.pick {
+        Pick::Folder(f) if !searching => shelf::subfolders(&rows, f),
+        _ => Vec::new(),
+    };
+    let home = s.pick == Pick::Home && !searching;
+    let top_folders = shelf::subfolders(&rows, "");
+    let head = if home { shelf::header(app, app.entries.len(), top_folders.len()) } else { shelf::header(app, shown.len(), tiles.len()) };
+    let mut content = column![head].spacing(26).padding(Padding { top: 22.0, right: 32.0, bottom: 40.0, left: 32.0 });
     if let Some(r) = app.create_row() {
         content = content.push(r);
     }
@@ -89,7 +95,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else if app.show_pdf_import {
         content = content.push(pdf_panel(&app.pdfs, "PDF importieren: wird ein neues Notizbuch"));
     }
-    if app.entries.is_empty() {
+    if app.entries.is_empty() && rows.is_empty() {
         content = content.push(
             container(
                 column![
@@ -108,21 +114,35 @@ pub fn view(app: &App) -> Element<'_, Message> {
             .style(theme::group),
         );
     }
-    let mut folder: Option<&str> = None;
-    let mut cards = Vec::new();
-    for e in &app.entries {
-        if folder != Some(e.folder.as_str()) {
-            content = flush(content, folder, &mut cards);
-            folder = Some(e.folder.as_str());
+    if home {
+        if !(app.entries.is_empty() && rows.is_empty()) {
+            content = content.push(start(app, &top_folders));
         }
-        cards.push(card(e));
+    } else if shown.is_empty() && tiles.is_empty() && !app.entries.is_empty() {
+        let hint = if searching {
+            "Nichts gefunden"
+        } else if matches!(s.pick, Pick::Folder(_)) {
+            "Noch leer: zieh ein Notizbuch hierher oder nimm „Verschieben nach …“."
+        } else {
+            "Nichts hier"
+        };
+        content = content.push(text(hint).size(14).color(theme::p().muted));
     }
-    content = flush(content, folder, &mut cards);
+    if !home && !tiles.is_empty() {
+        let tiles: Vec<Element<'_, Message>> = tiles.into_iter().map(|r| shelf::folder_tile(app, r)).collect();
+        content = content.push(iced::widget::Row::with_children(tiles).spacing(20).wrap().vertical_spacing(16));
+    }
+    if !home && !shown.is_empty() {
+        // Where a notebook lies says something only outside its folder.
+        let show_folder = searching || !matches!(s.pick, Pick::Folder(_));
+        content = content.push(notebooks(app, shown, show_folder));
+    }
 
+    let main = column![shelf::toolbar(app), container(App::scroll(content)).height(Length::Fill).style(theme::surface)];
     column![
         top,
         container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
-        container(App::scroll(content)).height(Length::Fill).style(theme::surface),
+        row![shelf::sidebar(app), container(Space::new()).width(1).height(Length::Fill).style(theme::hairline), main].height(Length::Fill),
         container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
         app.status_bar(),
     ]
@@ -153,24 +173,6 @@ fn sync_chip(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Adds a folder's cards (wrapping grid) under its heading and a hairline.
-fn flush<'a>(content: iced::widget::Column<'a, Message>, folder: Option<&str>, cards: &mut Vec<Element<'a, Message>>) -> iced::widget::Column<'a, Message> {
-    if cards.is_empty() {
-        return content;
-    }
-    let label = folder.filter(|f| !f.is_empty()).unwrap_or("Notizbücher").to_string();
-    let head = row![
-        theme::caption(&label),
-        Space::new().width(10),
-        text(cards.len().to_string()).font(theme::meta_font()).size(11.5).color(theme::alpha(theme::p().muted, 0.8)),
-        Space::new().width(14),
-        container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
-    ]
-    .align_y(Alignment::Center);
-    let grid = iced::widget::Row::with_children(std::mem::take(cards)).spacing(20).wrap().vertical_spacing(22);
-    content.push(column![head, grid].spacing(14))
-}
-
 /// "n0te" in the dot face with the red dot.
 pub fn wordmark<'a>() -> Element<'a, Message> {
     row![
@@ -182,27 +184,178 @@ pub fn wordmark<'a>() -> Element<'a, Message> {
     .into()
 }
 
-const COVER: (f32, f32) = (164.0, 212.0);
+pub const COVER: (f32, f32) = (164.0, 212.0);
+/// The covers in the start's "Zuletzt geöffnet".
+const SMALL_COVER: (f32, f32) = (104.0, 135.0);
+/// The covers in the list.
+const ROW_COVER: (f32, f32) = (40.0, 52.0);
 
-fn card(e: &Entry) -> Element<'_, Message> {
+/// The start: what was opened last (a row), the pinned ones, the folders (with "Neuer
+/// Ordner"), the notebooks in no folder. Everything else is a click away in the sidebar.
+fn start<'a>(app: &'a App, folders: &[&shelf::FolderRow]) -> Element<'a, Message> {
+    let s = &app.shelf;
+    let mut col = column![].spacing(16);
+    if app.entries.len() > 3 {
+        let recent: Vec<Element<'a, Message>> = recent(app).into_iter().map(|e| card(app, e, true, true)).collect();
+        col = col.push(shelf::section_head("Zuletzt geöffnet", None));
+        col = col.push(
+            iced::widget::scrollable(container(iced::widget::Row::with_children(recent).spacing(14)).padding(Padding { bottom: 10.0, ..Padding::ZERO }))
+                .direction(iced::widget::scrollable::Direction::Horizontal(iced::widget::scrollable::Scrollbar::new().width(4).scroller_width(4)))
+                .style(theme::scroll_dark),
+        );
+    }
+    let pins = shelf::shown(&app.entries, &Pick::Pinned, "", s.sort);
+    if !pins.is_empty() {
+        col = col.push(container(shelf::section_head("Angeheftet", Some(pins.len()))).padding(Padding { top: 10.0, ..Padding::ZERO }));
+        col = col.push(notebooks(app, pins, true));
+    }
+    col = col.push(container(shelf::section_head("Ordner", Some(folders.len()))).padding(Padding { top: 10.0, ..Padding::ZERO }));
+    let mut tiles: Vec<Element<'a, Message>> = folders.iter().map(|r| shelf::folder_tile(app, r)).collect();
+    tiles.push(shelf::new_folder_tile());
+    col = col.push(iced::widget::Row::with_children(tiles).spacing(20).wrap().vertical_spacing(16));
+    let loose: Vec<&Entry> = shelf::shown(&app.entries, &Pick::All, "", s.sort).into_iter().filter(|e| e.folder.is_empty() && !e.pinned).collect();
+    if !loose.is_empty() {
+        col = col.push(container(shelf::section_head("Ohne Ordner", Some(loose.len()))).padding(Padding { top: 10.0, ..Padding::ZERO }));
+        col = col.push(notebooks(app, loose, false));
+    }
+    col.into()
+}
+
+/// Up to eight notebooks, the one opened last first (never opened here: when it changed).
+pub fn recent(app: &App) -> Vec<&Entry> {
+    let opened: std::collections::HashMap<&str, u64> = app.settings.lib_opened.iter().map(|(id, t)| (id.as_str(), *t)).collect();
+    let ms = |t: Option<SystemTime>| t.and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let mut all: Vec<&Entry> = app.entries.iter().collect();
+    all.sort_by_key(|e| std::cmp::Reverse(opened.get(e.id.as_str()).copied().unwrap_or_else(|| ms(e.modified))));
+    all.truncate(8);
+    all
+}
+
+/// Notebooks as cards (a wrapping grid) or as a list, as chosen.
+fn notebooks<'a>(app: &'a App, es: Vec<&'a Entry>, show_folder: bool) -> Element<'a, Message> {
+    if app.settings.lib_list {
+        iced::widget::Column::with_children(es.into_iter().map(|e| notebook_row(app, e, show_folder))).spacing(6).into()
+    } else {
+        iced::widget::Row::with_children(es.into_iter().map(|e| card(app, e, show_folder, false))).spacing(20).wrap().vertical_spacing(22).into()
+    }
+}
+
+/// What a click, a right click, ⋯ and a drag do with a notebook (card or row): (on press, the
+/// menu's target). The menu is about the ticked notebooks when this is one of them.
+fn handling(app: &App, e: &Entry) -> (Message, Target) {
+    let s = &app.shelf;
+    let press = if s.selected.is_some() { Message::Shelf(Msg::Tick(e.id.clone())) } else { Message::Open(e.id.clone()) };
+    let target = match &s.selected {
+        Some(sel) if sel.len() > 1 && sel.contains(&e.id) => Target::Notebooks(app.entries.iter().filter(|x| sel.contains(&x.id)).map(|x| x.id.clone()).collect()),
+        _ => Target::Notebooks(vec![e.id.clone()]),
+    };
+    (press, target)
+}
+
+/// ⋯: opens the menu where it is.
+fn dots<'a>(target: Target, framed: bool) -> Element<'a, Message> {
+    let mark = container(text("⋯").size(16).line_height(1.0).color(theme::p().text)).padding([2, 8]);
+    let mark = if framed { mark.style(theme::chip) } else { mark };
+    widgets::pointer(mouse_area(mark).interaction(iced::mouse::Interaction::Pointer)).on_left(move |at| Message::Shelf(Msg::Menu(target.clone(), at))).into()
+}
+
+/// "12 Seiten · vor 2 h", with where it lies first when that helps ("WS26 · …"; the whole
+/// way in the list: "Uni › WS26 · …").
+fn meta(e: &Entry, show_folder: bool, whole_way: bool) -> String {
     let mut meta = format!("{} {}", e.sheets, if e.sheets == 1 { "Seite" } else { "Seiten" });
     if let Some(t) = e.modified {
         meta += &format!(" · {}", age(t));
     }
-    button(
-        column![
-            canvas_widget(Cover { kind: e.cover.clone(), title: e.title.clone() }).width(COVER.0).height(COVER.1),
-            Space::new().height(10),
-            text(fit(&e.title, 21)).font(theme::title_font()).size(15).color(theme::p().text),
-            text(theme::cased(&meta)).font(theme::meta_font()).size(if theme::s().label == theme::Label::MonoCaps { theme::LABEL } else { 12.0 }).color(theme::p().muted),
-        ]
-        .spacing(3),
-    )
-    .padding(10)
-    .width(COVER.0 + 20.0)
-    .on_press(Message::Open(e.id.clone()))
-    .style(theme::card)
-    .into()
+    if show_folder && !e.folder.is_empty() {
+        let way = if whole_way { e.folder.replace('/', " › ") } else { shelf::name(&e.folder).to_string() };
+        meta = format!("{way} · {meta}");
+    }
+    theme::cased(&meta)
+}
+
+fn meta_size() -> f32 {
+    if theme::s().label == theme::Label::MonoCaps { theme::LABEL } else { 12.0 }
+}
+
+/// A notebook card: its cover, title (a pin mark when pinned), tags, pages and age. A click
+/// opens it (ticks it in "Auswählen"), a right click or ⋯ (on the cover, under the pointer)
+/// opens its menu, dragging it onto a folder moves it there. Small: in "Zuletzt geöffnet".
+fn card<'a>(app: &'a App, e: &'a Entry, show_folder: bool, small: bool) -> Element<'a, Message> {
+    let ticked = app.shelf.selected.as_ref().map(|sel| sel.contains(&e.id));
+    let (press, target) = handling(app, e);
+    let (w, h) = if small { SMALL_COVER } else { COVER };
+    let cover: Element<'a, Message> = match ticked {
+        Some(on) => stack![cover_preview(&e.cover, &e.title, w, h), container(check(on)).padding(8)].into(),
+        None => cover_preview(&e.cover, &e.title, w, h),
+    };
+    let cover = hover(cover, container(dots(target.clone(), true)).align_right(Length::Fill).padding(if small { 5 } else { 7 }));
+    let chars = if small { 16 } else { 21 };
+    let mut title = row![
+        text(fit(&e.title, if e.pinned { chars - 2 } else { chars })).font(theme::title_font()).size(if small { 13.0 } else { 15.0 }).color(theme::p().text).wrapping(text::Wrapping::None),
+        Space::new().width(Length::Fill)
+    ]
+    .align_y(Alignment::Center);
+    if e.pinned {
+        title = title.push(shelf::icon(shelf::PIN, if small { 12.0 } else { 14.0 }, theme::p().accent));
+    }
+    let mut col = column![cover, Space::new().height(if small { 7 } else { 10 }), title].spacing(3);
+    if !e.tags.is_empty() && !small {
+        col = col.push(container(shelf::tag_chips(&e.tags)).padding([2, 0]));
+    }
+    // Small: where it lies (or how big it is), no more.
+    let facts = if small && !e.folder.is_empty() { theme::cased(shelf::name(&e.folder)) } else if small { theme::cased(&format!("{} {}", e.sheets, if e.sheets == 1 { "Seite" } else { "Seiten" })) } else { meta(e, show_folder, false) };
+    col = col.push(text(fit(&facts, if small { 18 } else { 26 })).font(theme::meta_font()).size(meta_size()).color(theme::p().muted).wrapping(text::Wrapping::None));
+    let pad = if small { 8.0 } else { 10.0 };
+    let b = button(col).padding(pad).width(w + 2.0 * pad).on_press(press).style(theme::card_ticked(ticked == Some(true)));
+    let id = e.id.clone();
+    let card = widgets::pointer(b).on_right(move |at| Message::Shelf(Msg::Menu(target.clone(), at))).on_drag(move |d| Message::Shelf(Msg::Drag(id.clone(), d)));
+    container(card).id(if small { shelf::recent_id(&e.id) } else { shelf::card_id(&e.id) }).into()
+}
+
+/// A notebook as a row of the list: small cover, title (pin before it), where it lies and how
+/// big, up to four tags, ⋯. Clicks, right click, drag and ticking work as on a card.
+fn notebook_row<'a>(app: &'a App, e: &'a Entry, show_folder: bool) -> Element<'a, Message> {
+    let ticked = app.shelf.selected.as_ref().map(|sel| sel.contains(&e.id));
+    let (press, target) = handling(app, e);
+    let mut line = row![].spacing(14).align_y(Alignment::Center);
+    if let Some(on) = ticked {
+        line = line.push(check(on));
+    }
+    line = line.push(cover_preview(&e.cover, &e.title, ROW_COVER.0, ROW_COVER.1));
+    let mut title = row![].spacing(6).align_y(Alignment::Center);
+    if e.pinned {
+        title = title.push(shelf::icon(shelf::PIN, 13.0, theme::p().accent));
+    }
+    title = title.push(text(fit(&e.title, 48)).font(theme::title_font()).size(15).color(theme::p().text).wrapping(text::Wrapping::None));
+    line = line.push(column![title, text(fit(&meta(e, show_folder, true), 64)).font(theme::meta_font()).size(meta_size()).color(theme::p().muted).wrapping(text::Wrapping::None)].spacing(3));
+    line = line.push(Space::new().width(Length::Fill));
+    for t in e.tags.iter().take(4) {
+        line = line.push(row![shelf::dot(shelf::tag_colour(t), 8.0), text(fit(t, 14)).size(12).color(theme::p().muted).wrapping(text::Wrapping::None)].spacing(5).align_y(Alignment::Center));
+    }
+    line = line.push(dots(target.clone(), false));
+    let b = button(line).padding([8, 12]).width(Length::Fill).on_press(press).style(theme::card_ticked(ticked == Some(true)));
+    let id = e.id.clone();
+    let row = widgets::pointer(b).on_right(move |at| Message::Shelf(Msg::Menu(target.clone(), at))).on_drag(move |d| Message::Shelf(Msg::Drag(id.clone(), d)));
+    container(row).id(shelf::card_id(&e.id)).into()
+}
+
+/// The tick box on a card in "Auswählen".
+fn check<'a>(on: bool) -> Element<'a, Message> {
+    let mark: Element<'a, Message> = if on { shelf::icon(shelf::CHECK, 14.0, Color::WHITE) } else { Space::new().into() };
+    container(mark)
+        .center_x(22)
+        .center_y(22)
+        .style(move |_| container::Style {
+            background: Some((if on { theme::p().accent } else { Color { a: 0.88, ..Color::WHITE } }).into()),
+            border: iced::Border { color: if on { theme::p().accent } else { theme::alpha(theme::INK, 0.45) }, width: 1.5, radius: 6.0.into() },
+            ..Default::default()
+        })
+        .into()
+}
+
+/// A notebook's cover at any size (cards, the cover dialog).
+pub fn cover_preview<'a>(kind: &str, title: &str, w: f32, h: f32) -> Element<'a, Message> {
+    canvas_widget(Cover { kind: kind.to_string(), title: title.to_string() }).width(w).height(h).into()
 }
 
 fn imports_panel(bundles: &[Bundle]) -> Element<'_, Message> {

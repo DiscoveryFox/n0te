@@ -377,6 +377,61 @@ pub fn row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
+/// A row in the library's sidebar: like an outline row, framed in the accent while a dragged
+/// card is over it (letting go drops it there).
+pub fn drop_row(selected: bool, over: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        let mut st = row(selected)(t, status);
+        if over {
+            st.background = Some(Background::Color(alpha(p().accent, 0.14)));
+            st.border = border(p().accent, 1.5, 4.0);
+            st.text_color = p().text;
+        }
+        st
+    }
+}
+
+/// A card in "Auswählen": the ticked ones carry the accent.
+pub fn card_ticked(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |t, status| {
+        let mut st = card(t, status);
+        if on {
+            st.border = border(p().accent, 2.0, s().card);
+        }
+        st
+    }
+}
+
+/// A right-click menu: a small floating sheet with a soft shadow in every design.
+pub fn menu(_: &Theme) -> container::Style {
+    let line = match s().fill {
+        Fill::Rule => alpha(p().text, 0.4),
+        Fill::Tonal if !p().dark => Color::TRANSPARENT,
+        _ => p().border,
+    };
+    container::Style {
+        background: Some((if p().dark { p().surface_2 } else { p().surface }).into()),
+        text_color: Some(p().text),
+        border: border(line, if line.a > 0.0 { 1.0 } else { 0.0 }, s().card.min(12.0)),
+        shadow: Shadow { color: Color { a: if p().dark { 0.5 } else { 0.16 }, ..Color::BLACK }, offset: Vector::new(0.0, 4.0), blur_radius: 18.0 },
+        ..Default::default()
+    }
+}
+
+/// A row in a right-click menu: quiet until the pointer is on it; `danger` in the accent.
+pub fn menu_row(danger: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = is_hover(status);
+        let tint = if danger { alpha(p().accent, 0.14) } else if s().fill == Fill::Tonal { tonal() } else { alpha(p().text, if p().dark { 0.09 } else { 0.06 }) };
+        button::Style {
+            background: hovered.then_some(Background::Color(tint)),
+            text_color: if danger { p().accent } else { p().text },
+            border: border(Color::TRANSPARENT, 0.0, s().button.min(8.0)),
+            ..Default::default()
+        }
+    }
+}
+
 /// A notebook card in the library.
 pub fn card(_: &Theme, status: button::Status) -> button::Style {
     let hovered = is_hover(status);
@@ -476,6 +531,11 @@ pub fn ghost(_: &Theme, status: button::Status) -> button::Style {
         border: border(if s().fill == Fill::Outline { p().border } else { Color::TRANSPARENT }, 1.0, s().button),
         ..Default::default()
     }
+}
+
+/// Text that opens something ("Alle › Uni"): quiet, plain on hover, no frame.
+pub fn link(_: &Theme, status: button::Status) -> button::Style {
+    button::Style { text_color: if is_hover(status) { p().text } else { p().muted }, ..Default::default() }
 }
 
 /// Text fields in the chrome.

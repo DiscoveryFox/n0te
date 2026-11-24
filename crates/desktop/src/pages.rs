@@ -75,6 +75,9 @@ pub struct Page {
     /// The plots the mesh shows, and the mesh: kept while the sheet's plots stay the same (a
     /// reload for a new stroke doesn't rebuild it).
     plots: RefCell<Option<(Vec<Plot>, Option<mesh::Cache>)>>,
+    /// The coarse ink mesh of the page's small picture (outline): built when first shown,
+    /// dropped whenever the sheet changes (with its content).
+    thumb: RefCell<Option<mesh::Cache>>,
     last_frame: Cell<u64>,
 }
 
@@ -87,8 +90,21 @@ impl Page {
             lod: Cell::new(0.0),
             ink: RefCell::new(None),
             plots: RefCell::new(None),
+            thumb: RefCell::new(None),
             last_frame: Cell::new(0),
         }
+    }
+
+    /// The strokes for the small picture: every fourth sample is plenty that small.
+    fn thumb_mesh(&self, load: &Loader) -> mesh::Cache {
+        if let Some(cache) = self.thumb.borrow().as_ref() {
+            return cache.clone();
+        }
+        let content = self.content(load);
+        let (w, h) = self.size();
+        let cache = mesh::Cache::new(Arc::from(ink_meshes(&content.strokes, 4, Rectangle::new(Point::ORIGIN, Size::new(w, h)))));
+        *self.thumb.borrow_mut() = Some(cache.clone());
+        cache
     }
 
     pub fn rect(&self) -> Rect {
@@ -492,6 +508,7 @@ impl Pages {
         };
         *p.content.borrow_mut() = None;
         *p.ink.borrow_mut() = None;
+        *p.thumb.borrow_mut() = None;
         // A finished live stroke goes only once the sheet holds it: the save that triggered this
         // reload may predate it (drawn just after), and dropping it then made it blink.
         let content = p.content(&self.load);
@@ -566,6 +583,13 @@ impl Pages {
     /// The sheet under a page point.
     pub fn sheet_at(&self, x: f32, y: f32) -> Option<&Placed> {
         self.pages.iter().map(|p| &p.placed).find(|p| p.rect.contains(x, y))
+    }
+
+    /// A text page's first line (its name in the outline when it has none): Markdown marks
+    /// left out, at most 60 characters.
+    pub fn first_line(&self, sheet_id: &str) -> Option<String> {
+        let page = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id && p.placed.spec.background == Background::Text)?;
+        first_line(&page.content(&self.load).body)
     }
 
     /// The coordinate system under a page point: (sheet id, plot id).
@@ -1140,6 +1164,103 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
 impl<'a, Message: 'a> From<PageView<'a, Message>> for Element<'a, Message> {
     fn from(v: PageView<'a, Message>) -> Self {
         Element::new(v)
+    }
+}
+
+fn at_of(b: Rectangle) -> Point {
+    Point::new(b.x, b.y)
+}
+
+/// A text's first line with something in it, Markdown marks ("# ", "- ", "> ") left out, at
+/// most 60 characters.
+pub fn first_line(body: &str) -> Option<String> {
+    body.lines().map(|l| l.trim().trim_start_matches(['#', '-', '*', '>', ' ']).trim()).find(|l| !l.is_empty()).map(|l| l.chars().take(60).collect())
+}
+
+/// A page as a small picture (the outline): paper, PDF, pictures, coordinate systems and ink,
+/// drawn from the same page data as the canvas (its ink as a coarse mesh of its own, built
+/// once and again only after the sheet changed). Nothing is read or built while it is out of
+/// view. A board is a dotted frame.
+pub struct Thumb<'a> {
+    pages: &'a Pages,
+    index: usize,
+    width: f32,
+    current: bool,
+}
+
+/// Page `index` of the layout `width` wide (as tall as its shape says); `current`: outlined in
+/// the accent.
+pub fn thumb(pages: &Pages, index: usize, width: f32, current: bool) -> Thumb<'_> {
+    Thumb { pages, index, width, current }
+}
+
+impl Thumb<'_> {
+    fn height(&self) -> f32 {
+        let r = self.pages.pages[self.index].rect();
+        let aspect = if self.pages.pages[self.index].placed.is_board() { 0.75 } else { (r.height() / r.width().max(1.0)).clamp(0.3, 1.8) };
+        (self.width * aspect).round()
+    }
+}
+
+impl<Message> Widget<Message, Theme, iced::Renderer> for Thumb<'_> {
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(self.width), Length::Fixed(self.height()))
+    }
+    fn layout(&mut self, _tree: &mut widget::Tree, _renderer: &iced::Renderer, _limits: &layout::Limits) -> layout::Node {
+        layout::Node::new(Size::new(self.width, self.height()))
+    }
+    fn draw(&self, _tree: &widget::Tree, renderer: &mut iced::Renderer, _theme: &Theme, _style: &renderer::Style, layout: Layout<'_>, _cursor: mouse::Cursor, viewport: &Rectangle) {
+        let b = layout.bounds();
+        let Some(clip) = b.intersection(viewport) else { return };
+        let pages = self.pages;
+        let page = &pages.pages[self.index];
+        let rect = page.rect();
+        let board = page.placed.is_board();
+        let zoom = b.width / rect.width().max(1.0);
+        let cam = Camera { x: rect.x0, y: rect.y0, zoom, viewport: b.size(), origin: at_of(b) };
+        let at = at_of(b);
+        renderer.with_layer(clip, |r| {
+            r.fill_quad(renderer::Quad { bounds: b, ..Default::default() }, if board { theme::p().surface_2 } else { theme::p().paper });
+            if board {
+                let dots = 5.0;
+                let mut y = b.y + dots;
+                while y < b.y + b.height {
+                    let mut x = b.x + dots;
+                    while x < b.x + b.width {
+                        r.fill_quad(renderer::Quad { bounds: Rectangle::new(Point::new(x, y), Size::new(1.0, 1.0)), ..Default::default() }, theme::p().muted);
+                        x += dots * 2.0;
+                    }
+                    y += dots * 2.0;
+                }
+            } else {
+                pages.draw_pdf(r, page, at, &cam, &rect, clip);
+                pages.draw_images(r, page, at, &cam, clip);
+            }
+        });
+        if !board {
+            renderer.with_layer(clip, |r| {
+                let plots = page.plot_mesh(&pages.load);
+                let ink = page.thumb_mesh(&pages.load);
+                r.with_translation(Vector::new(at.x, at.y), |r| {
+                    r.with_transformation(Transformation::scale(zoom), |r| {
+                        if let Some(plots) = plots {
+                            r.draw_mesh_cache(plots);
+                        }
+                        r.draw_mesh_cache(ink);
+                    });
+                });
+            });
+        }
+        renderer.with_layer(clip, |r| {
+            let (line, width) = if self.current { (theme::p().accent, 2.0) } else { (theme::p().border, 1.0) };
+            r.fill_quad(renderer::Quad { bounds: b, border: iced::Border { color: line, width, radius: 2.0.into() }, ..Default::default() }, Color::TRANSPARENT);
+        });
+    }
+}
+
+impl<'a, Message: 'a> From<Thumb<'a>> for Element<'a, Message> {
+    fn from(t: Thumb<'a>) -> Self {
+        Element::new(t)
     }
 }
 

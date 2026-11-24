@@ -36,6 +36,9 @@ pub struct Entry {
     pub cover: String,
     /// When the notebook last changed on disk.
     pub modified: Option<std::time::SystemTime>,
+    pub tags: Vec<String>,
+    /// Shown first in the library.
+    pub pinned: bool,
 }
 
 /// A `.n0te` file waiting in Downloads (sent from the tablet through n0bridge).
@@ -199,6 +202,10 @@ pub enum Message {
     EditPlot(String, String),
     InsertPlot,
     Plot(crate::plots::Msg),
+    /// The library's sidebar, search, menus, dialogs, selection and drag and drop.
+    Shelf(crate::shelf::Msg),
+    /// The outline: list or pictures, marked pages, the page menu, new pages and groups.
+    Outline(sidebar::Msg),
 }
 
 /// The text box being edited: its sheet stays open while typing.
@@ -269,6 +276,8 @@ pub struct Open {
     pub id: String,
     pub nb: Notebook,
     pub rows: Vec<OutlineRow>,
+    /// The pages marked to find again (main and side pages, outline order).
+    pub marked: Vec<String>,
     pub pages: Pages,
     pub camera: Camera,
 }
@@ -368,6 +377,10 @@ pub struct App {
     headings_reading: bool,
     /// The "Koordinatensystem" panel, open for one plot.
     pub plot_edit: Option<crate::plots::Editor>,
+    /// How the library is organised and looked at (folder, search, menu, dialog, selection).
+    pub shelf: crate::shelf::Shelf,
+    /// The open notebook's outline: marked pages only, its page menu, renaming.
+    pub outline: sidebar::Outline,
 }
 
 /// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
@@ -476,7 +489,12 @@ impl App {
             headings_check: false,
             headings_reading: false,
             plot_edit: None,
+            shelf: crate::shelf::Shelf::default(),
+            outline: sidebar::Outline::default(),
         };
+        // Folders made here that are still empty (the settings keep them).
+        app.shelf.made = app.settings.lib_folders.iter().cloned().collect();
+        app.shelf.empty = app.shelf.made.clone();
         app.refresh();
         app
     }
@@ -529,7 +547,7 @@ impl App {
         ])
     }
 
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         let lib = &self.lib;
         let mut entries: Vec<Entry> = lib
             .notebook_ids()
@@ -538,7 +556,7 @@ impl App {
             .filter_map(|id| {
                 let nb = lib.load_notebook(&id).ok()?;
                 let modified = std::fs::metadata(lib.root().join("notebooks").join(&id)).and_then(|m| m.modified()).ok();
-                Some(Entry { title: nb.title(), folder: nb.folder(), sheets: nb.sheet_count(), cover: nb.cover(), modified, id })
+                Some(Entry { title: nb.title(), folder: nb.folder(), sheets: nb.sheet_count(), cover: nb.cover(), modified, tags: nb.tags(), pinned: nb.pinned(), id })
             })
             .collect();
         entries.sort_by(|a, b| (a.folder.to_lowercase(), a.title.to_lowercase()).cmp(&(b.folder.to_lowercase(), b.title.to_lowercase())));
@@ -580,11 +598,15 @@ impl App {
         self.search.stale = true;
         self.headings_all = true;
         self.stamp = self.lib.change_stamp(id);
-        self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, pages, camera: Camera::default() }));
+        if self.notebook_id().as_deref() != Some(id) {
+            self.outline = sidebar::Outline::default();
+        }
+        let marked = nb.marked();
+        self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, marked, pages, camera: Camera::default() }));
         Ok(())
     }
 
-    fn say(&mut self, s: impl Into<String>) {
+    pub(crate) fn say(&mut self, s: impl Into<String>) {
         self.status = Some(s.into());
     }
 
@@ -599,8 +621,19 @@ impl App {
     fn handle(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Open(id) => {
-                if let Err(e) = self.open(&id) {
-                    self.say(format!("Notizbuch nicht lesbar: {e}"));
+                self.shelf.menu = None;
+                self.shelf.drag = None;
+                match self.open(&id) {
+                    Ok(()) => {
+                        // For the start's "Zuletzt geöffnet".
+                        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                        self.settings.opened_now(&id, now);
+                        if self.persist_settings {
+                            self.settings.save();
+                        }
+                        return sidebar::reveal_current(self);
+                    }
+                    Err(e) => self.say(format!("Notizbuch nicht lesbar: {e}")),
                 }
             }
             Message::Back => {
@@ -632,6 +665,7 @@ impl App {
                     if o.nb.set_collapsed(&node, !collapsed).is_ok() {
                         let _ = lib.save_notebook(&o.nb);
                         o.rows = o.nb.outline(false);
+                        o.marked = o.nb.marked();
                         o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
                         o.camera = o.pages.clamp(o.camera);
                     }
@@ -652,7 +686,12 @@ impl App {
                     o.camera = o.pages.clamp(Camera { x: cx - c.viewport.width / zoom / 2.0, y: cy - c.viewport.height / zoom / 2.0, zoom, ..c });
                 }
             }
-            Message::ToggleSidebar => self.sidebar = !self.sidebar,
+            Message::ToggleSidebar => {
+                self.sidebar = !self.sidebar;
+                if self.sidebar {
+                    return sidebar::reveal_current(self);
+                }
+            }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => return self.shortcut(key, modifiers),
             Message::Key(_) => {}
             Message::ShowImports(on) => {
@@ -1393,6 +1432,10 @@ impl App {
                     // What was searched before is selected: typing replaces it.
                     return iced::widget::operation::focus(sidebar::input_id()).chain(iced::widget::operation::select_all(sidebar::input_id()));
                 }
+                if self.shelf.selected.is_none() && self.shelf.dialog.is_none() {
+                    let id = crate::shelf::search_id();
+                    return iced::widget::operation::focus(id.clone()).chain(iced::widget::operation::select_all(id));
+                }
             }
             Message::Reveal(sheet, r) => self.reveal(&sheet, r),
             Message::Headings(nb, read) => {
@@ -1410,6 +1453,8 @@ impl App {
             }
             Message::EditPlot(sheet, id) => return self.edit_plot(&sheet, &id),
             Message::InsertPlot => return self.insert_plot(),
+            Message::Shelf(m) => return self.on_shelf(m),
+            Message::Outline(m) => return self.on_outline(m),
             Message::Plot(m) => {
                 use crate::plots::Reply;
                 let Some(e) = &mut self.plot_edit else { return Task::none() };
@@ -1654,6 +1699,7 @@ impl App {
             }
             let _ = lib.save_notebook(&o.nb);
             o.rows = o.nb.outline(false);
+            o.marked = o.nb.marked();
             o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
         }
         let Some(i) = o.pages.page_of_sheet(sheet) else { return };
@@ -1853,6 +1899,7 @@ impl App {
         if index || sheets.is_empty() {
             let _ = lib.refresh_notebook(&o.nb);
             o.rows = o.nb.outline(false);
+            o.marked = o.nb.marked();
             o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
             o.camera = o.pages.clamp(o.camera);
         }
@@ -2109,7 +2156,7 @@ impl App {
         }
     }
 
-    fn close_text_page(&mut self) {
+    pub(crate) fn close_text_page(&mut self) {
         if self.text_page.as_ref().is_some_and(|t| t.dirty) {
             self.save_text_page();
         }
@@ -2197,7 +2244,7 @@ impl App {
     }
 
     /// Changes the open notebook, saves it and lays the pages out again.
-    fn edit_notebook(&mut self, f: impl FnOnce(&Notebook) -> n0te_core::Result<()>) {
+    pub(crate) fn edit_notebook(&mut self, f: impl FnOnce(&Notebook) -> n0te_core::Result<()>) {
         if self.read_only() {
             self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
             return;
@@ -2208,6 +2255,7 @@ impl App {
         let done = f(&o.nb);
         let _ = lib.save_notebook(&o.nb);
         o.rows = o.nb.outline(false);
+        o.marked = o.nb.marked();
         o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
         o.camera = o.pages.clamp(o.camera);
         self.changed(Some(&[]));
@@ -2384,7 +2432,7 @@ impl App {
     }
 
     /// Ends editing: saves; an empty box is removed.
-    fn finish_text(&mut self) {
+    pub(crate) fn finish_text(&mut self) {
         if self.editing.is_none() {
             return;
         }
@@ -2486,6 +2534,7 @@ impl App {
     fn relayout(&mut self) {
         if let Screen::Notebook(o) = &mut self.screen {
             o.rows = o.nb.outline(false);
+            o.marked = o.nb.marked();
             o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
             o.camera = o.pages.clamp(o.camera);
         }
@@ -2595,6 +2644,15 @@ impl App {
                 _ => Task::none(),
             };
         }
+        // The outline's page menu and rename dialog: Esc closes them, the rest waits.
+        if self.outline.menu.is_some() || self.outline.renaming.is_some() {
+            if let Key::Named(Named::Escape) = key.as_ref() {
+                self.outline.menu = None;
+                self.outline.asked = None;
+                self.outline.renaming = None;
+            }
+            return Task::none();
+        }
         if self.show_help || self.show_settings {
             if let Key::Named(Named::Escape | Named::F1) = key.as_ref() {
                 self.show_help = false;
@@ -2628,6 +2686,10 @@ impl App {
                 self.finish_text();
                 return Task::none();
             }
+            // The library: its menu, dialog, a drag, "Auswählen", one at a time.
+            if matches!(self.screen, Screen::Library) && self.shelf.escape() {
+                return Task::none();
+            }
             if self.text_page.is_some() {
                 self.close_text_page();
                 return Task::none();
@@ -2635,6 +2697,10 @@ impl App {
             if self.creating.is_some() || self.show_imports {
                 self.creating = None;
                 self.show_imports = false;
+                return Task::none();
+            }
+            if matches!(self.screen, Screen::Library) && !self.shelf.query.is_empty() {
+                self.shelf.query.clear();
                 return Task::none();
             }
             // Search results in the sidebar: the outline again.
@@ -2692,8 +2758,8 @@ impl App {
 
     pub fn view(&self) -> Element<'_, Message> {
         let base = match &self.screen {
-            Screen::Library => library::view(self),
-            Screen::Notebook(o) => self.notebook_view(o),
+            Screen::Library => crate::shelf::layers(self, library::view(self)),
+            Screen::Notebook(o) => sidebar::layers(self, self.notebook_view(o)),
         };
         let overlay: Option<Element<'_, Message>> = if let Some(w) = &self.size_warning {
             Some(self.size_warning_view(w))
@@ -2927,6 +2993,8 @@ impl App {
         let keys = [
             ("Strg K", "Befehle, Seiten, Notizbücher suchen"),
             ("Strg F", "Im Notizbuch suchen: Handschrift, Text, Überschriften, PDF"),
+            ("Rechtsklick", "Bibliothek: Menü für Notizbuch, Ordner, Tag"),
+            ("Karte ziehen", "Auf einen Ordner links: dorthin verschieben"),
             ("Esc", "Zurück · Bearbeiten beenden · Bibliothek"),
             ("Bild ↑ / ↓, ← / →", "Vorige / nächste Seite"),
             ("Pos1 / Ende", "Erste / letzte Seite"),
@@ -3087,7 +3155,7 @@ impl App {
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
         if self.sidebar {
-            body = body.push(sidebar::view(&o.rows, &o.pages, current, &self.headings, &self.search));
+            body = body.push(sidebar::view(self, o, current));
             body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
         }
         let panel: Option<Element<'a, Message>> = if let Some(h) = &self.history {
@@ -3213,6 +3281,12 @@ impl App {
                 match &self.last_export {
                     Some(p) => Element::from(button(theme::btn_small("Öffnen")).padding([0, 8]).on_press(Message::OpenPath(p.clone())).style(theme::ghost)),
                     None => Space::new().into(),
+                },
+                Space::new().width(6),
+                if self.outline.undo && matches!(self.screen, Screen::Notebook(_)) {
+                    Element::from(button(theme::btn_small("Rückgängig")).padding([0, 8]).on_press(Message::Outline(sidebar::Msg::Undo)).style(theme::ghost))
+                } else {
+                    Space::new().into()
                 },
                 Space::new().width(6),
                 button(text("×").size(12)).padding([0, 6]).on_press(Message::DismissStatus).style(theme::ghost),

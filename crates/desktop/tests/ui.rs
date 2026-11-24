@@ -894,7 +894,7 @@ fn ctrl_f_searches_the_whole_notebook_and_lists_the_hits_by_page() {
         summary,
         vec![
             (1, 0, "Satz 3: Grenzwerte".to_string(), vec![HitKind::Heading, HitKind::Ink]),
-            (1, 1, "Textseite".to_string(), vec![HitKind::Text]),
+            (1, 1, "Notiz zum Grenzwert".to_string(), vec![HitKind::Text]),
             (2, 0, "Übungen".to_string(), vec![HitKind::Text]),
             (3, 0, "Seite".to_string(), vec![HitKind::Ink]),
         ]
@@ -1544,4 +1544,660 @@ fn a_function_of_a_plot_is_found_listed_with_the_plot_icon_and_shown() {
     let c = o.camera;
     let middle = (c.x + c.viewport.width / c.zoom / 2.0 - page.x0, c.y + c.viewport.height / c.zoom / 2.0 - page.y0);
     assert!((middle.0 - 220.0).abs() < 0.5 && (middle.1 - 280.0).abs() < 0.5, "{middle:?}");
+}
+
+// --- organising the library ------------------------------------------------------------------
+
+/// A library filed like the tablet files it: two notebooks in Uni/WS26 (one pinned), one in
+/// Uni/SS25, one at the top; tags. Returns the harness on the library and the ids by title.
+fn organised(tag: &str) -> (Harness, std::path::PathBuf, std::collections::HashMap<&'static str, String>) {
+    let (mut h, root, ids) = organised_start(tag);
+    h.message(Message::Shelf(n0te_desktop::shelf::Msg::Pick(n0te_desktop::shelf::Pick::All)));
+    (h, root, ids)
+}
+
+/// The same library, on the start.
+fn organised_start(tag: &str) -> (Harness, std::path::PathBuf, std::collections::HashMap<&'static str, String>) {
+    let root = temp_root(tag);
+    let lib = Library::open(&root).unwrap();
+    let mut ids = std::collections::HashMap::new();
+    for (title, folder, tags, pinned) in [
+        ("Analysis", "Uni/WS26", &["Mathe"][..], false),
+        ("Algebra", "Uni/WS26", &["Mathe", "Prüfung"][..], true),
+        ("Physik", "Uni/SS25", &[][..], false),
+        ("Ideen", "", &["Privat"][..], false),
+    ] {
+        let nb = lib.create_notebook(title).unwrap();
+        nb.set_folder(folder).unwrap();
+        nb.set_tags(&tags.iter().map(|t| t.to_string()).collect::<Vec<_>>()).unwrap();
+        nb.set_pinned(pinned).unwrap();
+        lib.save_notebook(&nb).unwrap();
+        ids.insert(title, nb.id());
+    }
+    let h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).expect("tiny-skia renderer");
+    assert_eq!(h.app.entries.len(), 4);
+    assert_eq!(h.app.shelf.pick, n0te_desktop::shelf::Pick::Home, "the library starts at the start");
+    (h, root, ids)
+}
+
+/// A notebook as stored: (title, folder, tags, pinned).
+fn filed(root: &std::path::Path, id: &str) -> (String, String, Vec<String>, bool) {
+    let nb = Library::open(root).unwrap().load_notebook(id).unwrap();
+    (nb.title(), nb.folder(), nb.tags(), nb.pinned())
+}
+
+/// Clicks the middle of the widget with `id`.
+fn click_on(h: &mut Harness, id: iced::widget::Id) {
+    let b = h.bounds_of(id.clone()).unwrap_or_else(|| panic!("{id:?} shown"));
+    h.click(b.center());
+}
+
+fn key(h: &Harness, k: Named) -> Message {
+    match h.key_event(iced::keyboard::Key::Named(k), None)[0].clone() {
+        iced::Event::Keyboard(e) => Message::Key(e),
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn the_sidebar_picks_a_folder_a_tag_or_the_pinned_ones_and_the_search_filters() {
+    use n0te_desktop::shelf::{self, Pick};
+    let (mut h, _root, ids) = organised("sidebar");
+    let card = |h: &mut Harness, t: &str| h.bounds_of(shelf::card_id(&ids[t]));
+    for t in ["Analysis", "Algebra", "Physik", "Ideen"] {
+        assert!(card(&mut h, t).is_some(), "all notebooks at first: {t}");
+    }
+    // Pinned first.
+    assert!(card(&mut h, "Algebra").unwrap().x < card(&mut h, "Analysis").unwrap().x);
+    // A folder: its subfolders as tiles, only what lies right in it as cards.
+    let uni = h.bounds_of(shelf::folder_id("Uni")).expect("Uni in the sidebar");
+    h.click(uni.center());
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Uni".into()));
+    assert!(h.bounds_of(shelf::tile_id("Uni/WS26")).is_some() && h.bounds_of(shelf::tile_id("Uni/SS25")).is_some());
+    assert!(card(&mut h, "Ideen").is_none() && card(&mut h, "Analysis").is_none());
+    assert!(h.bounds_of(shelf::crumb_id("")).is_some(), "the way back: Start › Uni");
+    let tile = h.bounds_of(shelf::tile_id("Uni/WS26")).unwrap();
+    h.click(tile.center());
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Uni/WS26".into()));
+    assert!(card(&mut h, "Analysis").is_some() && card(&mut h, "Algebra").is_some() && card(&mut h, "Physik").is_none());
+    // Back by the way at the top: Start › Uni › WS26.
+    click_on(&mut h, shelf::crumb_id("Uni"));
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Uni".into()));
+    click_on(&mut h, shelf::crumb_id(""));
+    assert_eq!(h.app.shelf.pick, Pick::Home);
+    // A tag (its colour is the tablet's), the pinned ones.
+    let mathe = h.bounds_of(shelf::tag_id("Mathe")).expect("the tag in the sidebar");
+    h.click(mathe.center());
+    assert_eq!(h.app.shelf.pick, Pick::Tag("Mathe".into()));
+    assert!(card(&mut h, "Analysis").is_some() && card(&mut h, "Ideen").is_none());
+    let pinned = h.find("Angeheftet").expect("Angeheftet, as one is pinned");
+    h.click(pinned.center());
+    assert!(card(&mut h, "Algebra").is_some() && card(&mut h, "Analysis").is_none());
+    h.message(Message::Shelf(shelf::Msg::Pick(Pick::All)));
+    // The search: title, folder and tags, ignoring case; Esc empties it.
+    let field = h.bounds_of(shelf::search_id()).expect("the search field");
+    h.click(field.center());
+    h.type_text("SS25");
+    assert_eq!(h.app.shelf.query, "SS25");
+    assert!(card(&mut h, "Physik").is_some() && card(&mut h, "Analysis").is_none() && card(&mut h, "Ideen").is_none());
+    h.press(Named::Escape);
+    assert_eq!(h.app.shelf.query, "");
+    assert!(card(&mut h, "Ideen").is_some());
+    // Ctrl+F goes to the field.
+    let m = ctrl_key(&h, "f");
+    h.message(m);
+    assert_eq!(h.find(iced_test::selector::is_focused()), Some(field));
+    // The arrow before a folder folds it.
+    let uni = h.bounds_of(shelf::folder_id("Uni")).unwrap();
+    h.click(Point::new(uni.x + 17.0, uni.center_y()));
+    assert!(h.app.shelf.folded.contains("Uni"));
+    assert!(h.bounds_of(shelf::folder_id("Uni/WS26")).is_none(), "folded away");
+    assert_eq!(h.app.shelf.pick, Pick::All, "the arrow doesn't open the folder");
+}
+
+#[test]
+fn a_right_click_opens_a_small_menu_at_the_pointer_and_its_rows_act() {
+    use n0te_desktop::shelf::{self, Action, Target};
+    let (mut h, root, ids) = organised("menu");
+    let ideen = ids["Ideen"].clone();
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    let was = card.x;
+    let at = Point::new(card.x + 60.0, card.y + 80.0);
+    h.right_click(at);
+    let menu = h.app.shelf.menu.clone().expect("a menu");
+    assert_eq!(menu.target, Target::Notebooks(vec![ideen.clone()]));
+    let first = h.bounds_of(shelf::menu_id(Action::Open)).expect("Öffnen");
+    assert!((first.x - at.x).abs() < 12.0 && (first.y - at.y).abs() < 12.0, "at the pointer: {first:?} {at:?}");
+    for a in [Action::Rename, Action::Move, Action::Tags, Action::Pin, Action::Cover, Action::Trash] {
+        assert!(h.bounds_of(shelf::menu_id(a)).is_some(), "{a:?}");
+    }
+    assert!(h.find("Öffnen").is_some() && h.find("In den Papierkorb").is_some(), "short labels, no more");
+    // Anheften.
+    let pin = h.bounds_of(shelf::menu_id(Action::Pin)).unwrap();
+    h.click(pin.center());
+    assert!(h.app.shelf.menu.is_none());
+    assert!(filed(&root, &ideen).3, "pinned in its document");
+    // Pinned ones come first: the card moved.
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    assert!(card.x < was, "moved to the front");
+    let at = Point::new(card.x + 60.0, card.y + 80.0);
+    // Umbenennen: the title selected in the field, Enter keeps what is typed.
+    h.right_click(at);
+    let rename = h.bounds_of(shelf::menu_id(Action::Rename)).unwrap();
+    h.click(rename.center());
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(shelf::field_id()), "the field has the focus");
+    h.type_text("Einfälle");
+    h.press(Named::Enter);
+    assert!(h.app.shelf.dialog.is_none());
+    assert_eq!(filed(&root, &ideen).0, "Einfälle");
+    // A click beside the menu only closes it (nothing opens); so does Esc.
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    let at = Point::new(card.x + 60.0, card.y + 80.0);
+    h.right_click(at);
+    h.click(Point::new(1500.0, 820.0));
+    assert!(h.app.shelf.menu.is_none() && matches!(h.app.screen, Screen::Library));
+    h.right_click(at);
+    let m = key(&h, Named::Escape);
+    h.message(m);
+    assert!(h.app.shelf.menu.is_none());
+    // Right-clicking another card while a menu is open opens that one's at once.
+    h.right_click(at);
+    let other = h.bounds_of(shelf::card_id(&ids["Physik"])).unwrap();
+    h.right_click(other.center());
+    assert_eq!(h.app.shelf.menu.as_ref().map(|m| m.target.clone()), Some(Target::Notebooks(vec![ids["Physik"].clone()])));
+    h.message(Message::Shelf(shelf::Msg::CloseMenu));
+    // ⋯ on the cover (under the pointer) opens the same menu, without opening the notebook.
+    h.move_to(Point::new(card.x + 80.0, card.y + 100.0));
+    h.click(Point::new(card.x + 10.0 + 164.0 - 7.0 - 14.0, card.y + 10.0 + 7.0 + 10.0));
+    assert_eq!(h.app.shelf.menu.as_ref().map(|m| m.target.clone()), Some(Target::Notebooks(vec![ideen.clone()])));
+    assert!(matches!(h.app.screen, Screen::Library));
+    // In den Papierkorb: the first click asks, the second does it.
+    let trash = h.bounds_of(shelf::menu_id(Action::Trash)).unwrap();
+    h.click(trash.center());
+    assert!(h.app.shelf.menu.is_some() && h.find("Wirklich in den Papierkorb?").is_some(), "asks first");
+    h.click(trash.center());
+    assert!(h.app.shelf.menu.is_none());
+    assert!(Library::open(&root).unwrap().is_trashed(&ideen));
+    assert!(h.app.entries.iter().all(|e| e.id != ideen));
+    assert!(h.app.status.as_deref().is_some_and(|s| s.contains("Papierkorb")));
+    // Öffnen.
+    let card = h.bounds_of(shelf::card_id(&ids["Physik"])).unwrap();
+    h.right_click(card.center());
+    let open_row = h.bounds_of(shelf::menu_id(Action::Open)).unwrap();
+    h.click(open_row.center());
+    assert!(matches!(&h.app.screen, Screen::Notebook(o) if o.id == ids["Physik"]));
+}
+
+#[test]
+fn renaming_a_folder_a_new_subfolder_and_dissolving_carry_the_notebooks_along() {
+    use n0te_desktop::shelf::{self, Action, Pick};
+    let (mut h, root, ids) = organised("folders");
+    h.message(Message::Shelf(shelf::Msg::Pick(Pick::Folder("Uni/WS26".into()))));
+    // Umbenennen: "Uni" becomes "Studium", everything inside goes along (the folder in view too).
+    let uni = h.bounds_of(shelf::folder_id("Uni")).unwrap();
+    h.right_click(uni.center());
+    assert!(h.bounds_of(shelf::menu_id(Action::Dissolve)).is_some() && h.bounds_of(shelf::menu_id(Action::Open)).is_none(), "the folder menu");
+    let rename = h.bounds_of(shelf::menu_id(Action::Rename)).unwrap();
+    h.click(rename.center());
+    h.type_text("Studium");
+    h.press(Named::Enter);
+    assert_eq!(filed(&root, &ids["Analysis"]).1, "Studium/WS26");
+    assert_eq!(filed(&root, &ids["Physik"]).1, "Studium/SS25");
+    assert_eq!(filed(&root, &ids["Ideen"]).1, "");
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Studium/WS26".into()));
+    assert!(h.bounds_of(shelf::folder_id("Uni")).is_none() && h.bounds_of(shelf::folder_id("Studium")).is_some());
+    // Neuer Unterordner: empty, so only for now (nothing on disk).
+    let ws = h.bounds_of(shelf::folder_id("Studium/WS26")).unwrap();
+    h.right_click(ws.center());
+    let new = h.bounds_of(shelf::menu_id(Action::NewFolder)).unwrap();
+    h.click(new.center());
+    h.type_text("Klausuren/2");
+    h.press(Named::Enter);
+    assert!(h.app.shelf.empty.contains("Studium/WS26/Klausuren 2"), "a / in a name doesn't nest: {:?}", h.app.shelf.empty);
+    assert!(h.bounds_of(shelf::folder_id("Studium/WS26/Klausuren 2")).is_some(), "listed in the sidebar");
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Studium/WS26/Klausuren 2".into()), "and opened");
+    assert!(h.find("Noch leer: zieh ein Notizbuch hierher oder nimm „Verschieben nach …“.").is_some());
+    // Auflösen asks first; then what was in it moves one level up, the empty subfolder too.
+    let ws = h.bounds_of(shelf::folder_id("Studium/WS26")).unwrap();
+    h.right_click(ws.center());
+    let dissolve = h.bounds_of(shelf::menu_id(Action::Dissolve)).unwrap();
+    h.click(dissolve.center());
+    assert!(h.find("Wirklich auflösen?").is_some());
+    assert_eq!(filed(&root, &ids["Analysis"]).1, "Studium/WS26", "not yet");
+    h.click(dissolve.center());
+    assert_eq!(filed(&root, &ids["Analysis"]).1, "Studium");
+    assert_eq!(filed(&root, &ids["Algebra"]).1, "Studium");
+    assert_eq!(filed(&root, &ids["Physik"]).1, "Studium/SS25");
+    assert!(h.app.shelf.empty.contains("Studium/Klausuren 2") && !h.app.shelf.empty.iter().any(|f| f.contains("WS26")));
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Studium/Klausuren 2".into()), "the folder in view went along");
+    // A new folder at the top ("+" by "Ordner" or "Alle Notizbücher"'s menu).
+    let all = h.bounds_of(shelf::folder_id("")).unwrap();
+    h.right_click(all.center());
+    let new = h.bounds_of(shelf::menu_id(Action::NewFolder)).unwrap();
+    h.click(new.center());
+    h.type_text("Arbeit");
+    h.press(Named::Enter);
+    assert!(h.bounds_of(shelf::folder_id("Arbeit")).is_some());
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Arbeit".into()));
+}
+
+#[test]
+fn a_tag_is_renamed_or_taken_off_every_notebook_from_its_menu() {
+    use n0te_desktop::shelf::{self, Action, Pick};
+    let (mut h, root, ids) = organised("tags");
+    let mathe = h.bounds_of(shelf::tag_id("Mathe")).unwrap();
+    h.click(mathe.center());
+    h.right_click(mathe.center());
+    assert!(h.bounds_of(shelf::menu_id(Action::Remove)).is_some() && h.bounds_of(shelf::menu_id(Action::Move)).is_none(), "the tag menu");
+    click_on(&mut h, shelf::menu_id(Action::Rename));
+    h.type_text("Mathematik");
+    h.press(Named::Enter);
+    assert_eq!(filed(&root, &ids["Analysis"]).2, vec!["Mathematik".to_string()]);
+    assert_eq!(filed(&root, &ids["Algebra"]).2, vec!["Mathematik".to_string(), "Prüfung".to_string()]);
+    assert_eq!(h.app.shelf.pick, Pick::Tag("Mathematik".into()), "the tag in view went along");
+    // Off every notebook: asks first.
+    let row = h.bounds_of(shelf::tag_id("Mathematik")).unwrap();
+    h.right_click(row.center());
+    click_on(&mut h, shelf::menu_id(Action::Remove));
+    assert!(filed(&root, &ids["Analysis"]).2.len() == 1, "not yet");
+    click_on(&mut h, shelf::menu_id(Action::Remove));
+    assert!(filed(&root, &ids["Analysis"]).2.is_empty());
+    assert_eq!(filed(&root, &ids["Algebra"]).2, vec!["Prüfung".to_string()]);
+    assert_eq!(h.app.shelf.pick, Pick::Home, "nothing has the tag any more: back to the start");
+    assert!(h.bounds_of(shelf::tag_id("Mathematik")).is_none());
+}
+
+#[test]
+fn the_move_dialog_takes_a_folder_or_a_new_one_and_the_tags_dialog_toggles_and_adds() {
+    use n0te_desktop::shelf::{self, Action, Dialog, Msg};
+    let (mut h, root, ids) = organised("dialogs");
+    let ideen = ids["Ideen"].clone();
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    h.right_click(card.center());
+    let mv = h.bounds_of(shelf::menu_id(Action::Move)).unwrap();
+    h.click(mv.center());
+    assert!(matches!(&h.app.shelf.dialog, Some(Dialog::Move { to, .. }) if to.is_empty()), "starts where it lies");
+    let ss25 = h.bounds_of(shelf::pick_id("Uni/SS25")).expect("the folder tree");
+    h.click(ss25.center());
+    assert!(matches!(&h.app.shelf.dialog, Some(Dialog::Move { to, .. }) if to == "Uni/SS25"));
+    // "Neuer Ordner" inside the one picked.
+    h.message(Message::Shelf(Msg::NewFolder));
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(shelf::field_id()));
+    h.type_text("Labor");
+    h.press(Named::Enter);
+    assert!(matches!(&h.app.shelf.dialog, Some(Dialog::Move { to, new_folder: None, .. }) if to == "Uni/SS25/Labor"));
+    assert!(h.bounds_of(shelf::pick_id("Uni/SS25/Labor")).is_some(), "listed, picked");
+    h.message(Message::Shelf(Msg::Confirm));
+    assert!(h.app.shelf.dialog.is_none());
+    assert_eq!(filed(&root, &ideen).1, "Uni/SS25/Labor");
+    assert!(h.app.status.as_deref().is_some_and(|s| s.contains("Uni/SS25/Labor")), "{:?}", h.app.status);
+    // A click beside a dialog closes it.
+    h.right_click(card.center());
+    click_on(&mut h, shelf::menu_id(Action::Move));
+    h.click(Point::new(1580.0, 880.0));
+    assert!(h.app.shelf.dialog.is_none());
+    // Tags: the library's tags as switches, a new one typed.
+    let physik = ids["Physik"].clone();
+    let card = h.bounds_of(shelf::card_id(&physik)).unwrap();
+    h.right_click(card.center());
+    click_on(&mut h, shelf::menu_id(Action::Tags));
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(shelf::field_id()));
+    let mathe = h.bounds_of(shelf::tag_switch_id("mathe")).expect("Mathe to switch on");
+    h.click(mathe.center());
+    assert_eq!(filed(&root, &physik).2, vec!["Mathe".to_string()]);
+    h.click(mathe.center());
+    assert!(filed(&root, &physik).2.is_empty(), "off again");
+    click_on(&mut h, shelf::field_id());
+    h.type_text("Klausur");
+    h.press(Named::Enter);
+    assert_eq!(filed(&root, &physik).2, vec!["Klausur".to_string()]);
+    assert!(h.app.shelf.dialog.is_some(), "stays open for more");
+    h.press(Named::Escape);
+    assert!(h.app.shelf.dialog.is_none(), "Esc in the field closes it");
+    assert!(h.bounds_of(shelf::tag_id("Klausur")).is_some(), "a new tag in the sidebar");
+    // Cover.
+    h.right_click(card.center());
+    click_on(&mut h, shelf::menu_id(Action::Cover));
+    h.message(Message::Shelf(Msg::Cover("purple".into())));
+    assert!(h.app.shelf.dialog.is_none());
+    assert_eq!(Library::open(&root).unwrap().load_notebook(&physik).unwrap().cover(), "purple");
+}
+
+#[test]
+fn auswaehlen_ticks_cards_and_the_bar_acts_on_all_of_them() {
+    use n0te_desktop::shelf::{self, Action, Msg, Target};
+    let (mut h, root, ids) = organised("select");
+    let (a, p) = (ids["Analysis"].clone(), ids["Physik"].clone());
+    h.message(Message::Shelf(Msg::Select(true)));
+    for id in [&a, &p] {
+        let card = h.bounds_of(shelf::card_id(id)).unwrap();
+        h.click(card.center());
+    }
+    assert!(matches!(h.app.screen, Screen::Library), "a click ticks, doesn't open");
+    let picked: Vec<String> = h.app.shelf.selected.clone().unwrap().into_iter().collect();
+    assert_eq!(picked.len(), 2);
+    // The menu of a ticked card is about all of them.
+    let card = h.bounds_of(shelf::card_id(&a)).unwrap();
+    h.right_click(card.center());
+    assert!(matches!(&h.app.shelf.menu, Some(m) if matches!(&m.target, Target::Notebooks(v) if v.len() == 2)));
+    assert!(h.bounds_of(shelf::menu_id(Action::Rename)).is_none(), "nothing for one alone");
+    h.message(Message::Shelf(Msg::CloseMenu));
+    let both = Target::Notebooks(h.app.entries.iter().filter(|e| e.id == a || e.id == p).map(|e| e.id.clone()).collect());
+    h.message(Message::Shelf(Msg::Act(both.clone(), Action::Pin)));
+    assert!(filed(&root, &a).3 && filed(&root, &p).3);
+    h.message(Message::Shelf(Msg::Act(both.clone(), Action::Tags)));
+    h.message(Message::Shelf(Msg::ToggleTag("Prüfung".into())));
+    h.message(Message::Shelf(Msg::CloseDialog));
+    assert_eq!(filed(&root, &a).2, vec!["Mathe".to_string(), "Prüfung".to_string()]);
+    assert_eq!(filed(&root, &p).2, vec!["Prüfung".to_string()]);
+    h.message(Message::Shelf(Msg::Act(both.clone(), Action::Move)));
+    h.message(Message::Shelf(Msg::To("Uni".into())));
+    h.message(Message::Shelf(Msg::Confirm));
+    assert_eq!((filed(&root, &a).1, filed(&root, &p).1), ("Uni".to_string(), "Uni".to_string()));
+    assert!(h.app.shelf.selected.is_none(), "done selecting after a move");
+    assert!(h.app.shelf.empty.contains("Uni/SS25"), "the folder they left stays for now");
+    // Papierkorb for all: asks first.
+    h.message(Message::Shelf(Msg::Select(true)));
+    h.message(Message::Shelf(Msg::SelectAll));
+    assert_eq!(h.app.shelf.selected.as_ref().map(|s| s.len()), Some(4));
+    h.message(Message::Shelf(Msg::SelectAll));
+    assert_eq!(h.app.shelf.selected.as_ref().map(|s| s.len()), Some(0), "all again: none");
+    let ideen = ids["Ideen"].clone();
+    h.message(Message::Shelf(Msg::Tick(ideen.clone())));
+    h.message(Message::Shelf(Msg::Act(Target::Notebooks(vec![ideen.clone()]), Action::Trash)));
+    assert!(!Library::open(&root).unwrap().is_trashed(&ideen));
+    h.message(Message::Shelf(Msg::Act(Target::Notebooks(vec![ideen.clone()]), Action::Trash)));
+    assert!(Library::open(&root).unwrap().is_trashed(&ideen));
+    assert_eq!(h.app.entries.len(), 3);
+    // Esc leaves "Auswählen".
+    let m = key(&h, Named::Escape);
+    h.message(m);
+    assert!(h.app.shelf.selected.is_none());
+}
+
+#[test]
+fn dragging_a_card_onto_a_folder_in_the_sidebar_moves_it_there() {
+    use n0te_desktop::shelf;
+    let (mut h, root, ids) = organised("drag");
+    let ideen = ids["Ideen"].clone();
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    h.press_at(card.center());
+    h.move_to(Point::new(card.center_x() - 30.0, card.center_y()));
+    assert!(h.app.shelf.drag.as_ref().is_some_and(|d| d.ids == vec![ideen.clone()]), "a drag past a few pixels");
+    let ss25 = h.bounds_of(shelf::folder_id("Uni/SS25")).unwrap();
+    h.move_to(Point::new(ss25.x + 50.0, ss25.center_y()));
+    assert_eq!(h.app.shelf.drag.as_ref().and_then(|d| d.over.clone()), Some(shelf::Drop::Folder("Uni/SS25".into())));
+    h.release();
+    assert!(h.app.shelf.drag.is_none());
+    assert_eq!(filed(&root, &ideen).1, "Uni/SS25");
+    assert!(matches!(h.app.screen, Screen::Library), "dropping doesn't open it");
+    // Onto "Alle Notizbücher": back to the top.
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    h.press_at(card.center());
+    h.move_to(Point::new(card.center_x() + 20.0, card.center_y() + 20.0));
+    let all = h.bounds_of(shelf::folder_id("")).unwrap();
+    h.move_to(all.center());
+    h.release();
+    assert_eq!(filed(&root, &ideen).1, "");
+    // Let go over nothing: nothing moves; a short wiggle is still a click.
+    let card = h.bounds_of(shelf::card_id(&ideen)).unwrap();
+    h.press_at(card.center());
+    h.move_to(Point::new(card.center_x() + 40.0, card.center_y()));
+    h.move_to(Point::new(1500.0, 820.0));
+    h.release();
+    assert_eq!(filed(&root, &ideen).1, "");
+    assert!(matches!(h.app.screen, Screen::Library));
+    h.press_at(card.center());
+    h.move_to(Point::new(card.center_x() + 2.0, card.center_y()));
+    h.release();
+    assert!(matches!(&h.app.screen, Screen::Notebook(o) if o.id == ideen));
+}
+
+#[test]
+fn the_start_shows_opened_last_pinned_folders_and_what_lies_in_none() {
+    use n0te_desktop::shelf::{self, Pick};
+    let (mut h, root, ids) = organised_start("start");
+    for t in ["Zuletzt geöffnet", "Angeheftet", "Ordner", "Ohne Ordner"] {
+        assert!(h.bounds_of(shelf::section_id(t)).is_some(), "section {t}");
+    }
+    let top = |h: &mut Harness, id: iced::widget::Id| h.bounds_of(id).map(|b| b.y);
+    let (recent, pinned, folders, loose) = (top(&mut h, shelf::section_id("Zuletzt geöffnet")).unwrap(), top(&mut h, shelf::section_id("Angeheftet")).unwrap(), top(&mut h, shelf::section_id("Ordner")).unwrap(), top(&mut h, shelf::section_id("Ohne Ordner")).unwrap());
+    assert!(recent < pinned && pinned < folders && folders < loose, "in this order");
+    // Every notebook in "Zuletzt geöffnet"; pinned ones and the ones in no folder as cards.
+    for t in ["Analysis", "Algebra", "Physik", "Ideen"] {
+        assert!(h.bounds_of(shelf::recent_id(&ids[t])).is_some(), "{t} opened lately");
+    }
+    assert!(h.bounds_of(shelf::card_id(&ids["Algebra"])).is_some_and(|b| b.y > pinned && b.y < folders), "pinned");
+    assert!(h.bounds_of(shelf::card_id(&ids["Ideen"])).is_some_and(|b| b.y > loose), "in no folder");
+    assert!(h.bounds_of(shelf::card_id(&ids["Analysis"])).is_none(), "in a folder: a click on it away");
+    assert!(h.bounds_of(shelf::tile_id("Uni")).is_some() && h.bounds_of(shelf::tile_id("Uni/WS26")).is_none(), "the top folders");
+    // Opened last comes first (the settings keep when).
+    for t in ["Physik", "Analysis"] {
+        h.message(Message::Open(ids[t].clone()));
+        h.message(Message::Back);
+    }
+    assert_eq!(h.app.shelf.pick, Pick::Home, "back at the start");
+    let order: Vec<String> = n0te_desktop::library::recent(&h.app).iter().map(|e| e.id.clone()).collect();
+    assert_eq!(&order[..2], &[ids["Analysis"].clone(), ids["Physik"].clone()]);
+    assert_eq!(h.app.settings.lib_opened.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>(), vec![ids["Analysis"].clone(), ids["Physik"].clone()]);
+    let x = |h: &mut Harness, t: &str| h.bounds_of(shelf::recent_id(&ids[t])).unwrap().x;
+    assert!(x(&mut h, "Analysis") < x(&mut h, "Physik") && x(&mut h, "Physik") < x(&mut h, "Ideen"));
+    // "Neuer Ordner" (the tile after the folders): opens it; the settings keep it while it is
+    // empty.
+    assert!(h.bounds_of(shelf::new_folder_id()).is_some());
+    h.message(Message::Shelf(shelf::Msg::Act(shelf::Target::Folder(String::new()), shelf::Action::NewFolder)));
+    h.type_text("Projekte");
+    h.press(Named::Enter);
+    assert_eq!(h.app.shelf.pick, Pick::Folder("Projekte".into()));
+    assert_eq!(h.app.settings.lib_folders, vec!["Projekte".to_string()]);
+    h.message(Message::Shelf(shelf::Msg::Act(shelf::Target::Notebooks(vec![ids["Ideen"].clone()]), shelf::Action::Move)));
+    h.message(Message::Shelf(shelf::Msg::To("Projekte".into())));
+    h.message(Message::Shelf(shelf::Msg::Confirm));
+    assert_eq!(filed(&root, &ids["Ideen"]).1, "Projekte");
+    assert!(h.app.settings.lib_folders.is_empty(), "a notebook keeps it now");
+    // Kept folders come back with the settings.
+    let settings = n0te_desktop::settings::Settings { lib_folders: vec!["Archiv/2025".into()], ..Default::default() };
+    let mut again = Harness::new(App::with_settings(&root, settings), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    assert!(again.bounds_of(shelf::folder_id("Archiv")).is_some() && again.bounds_of(shelf::tile_id("Archiv")).is_some());
+    // Three notebooks or fewer: no "Zuletzt geöffnet".
+    let small = temp_root("start-small");
+    let lib = Library::open(&small).unwrap();
+    for t in ["Eins", "Zwei", "Drei"] {
+        lib.create_notebook(t).unwrap();
+    }
+    let mut few = Harness::new(App::new(&small), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    assert!(few.bounds_of(shelf::section_id("Zuletzt geöffnet")).is_none());
+    assert!(few.bounds_of(shelf::section_id("Ohne Ordner")).is_some() && few.bounds_of(shelf::section_id("Angeheftet")).is_none());
+}
+
+#[test]
+fn list_rows_open_tick_show_the_menu_and_drag_like_cards() {
+    use n0te_desktop::shelf::{self, Target};
+    let (mut h, root, ids) = organised("list");
+    click_on(&mut h, iced::widget::Id::new("list"));
+    assert!(h.app.settings.lib_list, "the switch");
+    let row = h.bounds_of(shelf::card_id(&ids["Physik"])).expect("a row");
+    assert!(row.height < 90.0 && row.width > 800.0, "a row across: {row:?}");
+    // A right click: its menu.
+    h.right_click(row.center());
+    assert_eq!(h.app.shelf.menu.as_ref().map(|m| m.target.clone()), Some(Target::Notebooks(vec![ids["Physik"].clone()])));
+    h.message(Message::Shelf(shelf::Msg::CloseMenu));
+    // ⋯ at its end, too.
+    h.click(Point::new(row.x + row.width - 26.0, row.center_y()));
+    assert!(h.app.shelf.menu.is_some() && matches!(h.app.screen, Screen::Library));
+    h.message(Message::Shelf(shelf::Msg::CloseMenu));
+    // Dragged onto a folder.
+    let row = h.bounds_of(shelf::card_id(&ids["Ideen"])).unwrap();
+    h.press_at(row.center());
+    h.move_to(Point::new(row.center_x() - 40.0, row.center_y()));
+    let ws = h.bounds_of(shelf::folder_id("Uni/WS26")).unwrap();
+    h.move_to(ws.center());
+    h.release();
+    assert_eq!(filed(&root, &ids["Ideen"]).1, "Uni/WS26");
+    // Ticked in "Auswählen", opened otherwise.
+    h.message(Message::Shelf(shelf::Msg::Select(true)));
+    let row = h.bounds_of(shelf::card_id(&ids["Physik"])).unwrap();
+    h.click(row.center());
+    assert!(h.app.shelf.selected.as_ref().is_some_and(|s| s.contains(&ids["Physik"])) && matches!(h.app.screen, Screen::Library));
+    h.message(Message::Shelf(shelf::Msg::Select(false)));
+    let row = h.bounds_of(shelf::card_id(&ids["Physik"])).unwrap();
+    h.click(row.center());
+    assert!(matches!(&h.app.screen, Screen::Notebook(o) if o.id == ids["Physik"]));
+    h.message(Message::Back);
+    click_on(&mut h, iced::widget::Id::new("grid"));
+    assert!(!h.app.settings.lib_list);
+}
+
+#[test]
+fn notebooks_dropped_on_angeheftet_ohne_ordner_or_a_tag() {
+    use n0te_desktop::shelf::{self, Action, Msg, Target};
+    let (mut h, root, ids) = organised("drops");
+    // Nothing pinned: "Angeheftet" shows only while dragging.
+    h.message(Message::Shelf(Msg::Act(Target::Notebooks(vec![ids["Algebra"].clone()]), Action::Pin)));
+    assert!(!filed(&root, &ids["Algebra"]).3);
+    assert!(h.bounds_of(shelf::side_id("pinned")).is_none());
+    let drag = |h: &mut Harness, id: &str, onto: iced::widget::Id, check: &dyn Fn(&mut Harness)| {
+        let card = h.bounds_of(shelf::card_id(id)).unwrap();
+        h.press_at(card.center());
+        h.move_to(Point::new(card.center_x() - 30.0, card.center_y()));
+        check(h);
+        let target = h.bounds_of(onto).expect("the target shows while dragging");
+        h.move_to(target.center());
+        h.release();
+    };
+    // In no folder: no "Ohne Ordner" row; onto "Angeheftet": pinned.
+    drag(&mut h, &ids["Ideen"], shelf::side_id("pinned"), &|h| assert!(h.bounds_of(shelf::side_id("top")).is_none(), "nothing to take out of a folder"));
+    assert!(filed(&root, &ids["Ideen"]).3, "pinned");
+    // In a folder: onto "Ohne Ordner": to the top.
+    drag(&mut h, &ids["Physik"], shelf::side_id("top"), &|_| {});
+    assert_eq!(filed(&root, &ids["Physik"]).1, "");
+    assert!(h.bounds_of(shelf::side_id("top")).is_none(), "gone after the drag");
+    // Onto a tag: it is added.
+    drag(&mut h, &ids["Analysis"], shelf::tag_id("Privat"), &|_| {});
+    assert_eq!(filed(&root, &ids["Analysis"]).2, vec!["Mathe".to_string(), "Privat".to_string()]);
+}
+
+/// The demo notebook open, with its library root.
+fn demo_open(tag: &str) -> (Harness, std::path::PathBuf, String) {
+    let root = temp_root(tag);
+    let id = demo::save_into(&Library::open(&root).unwrap());
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).expect("tiny-skia renderer");
+    h.message(Message::Open(id.clone()));
+    h.events(&[]);
+    h.events(&[]);
+    (h, root, id)
+}
+
+fn sheet_nodes(h: &Harness) -> Vec<(String, String, String)> {
+    open(h).rows.iter().filter_map(|r| if let OutlineRow::Sheet { node, sheet_id, title, .. } = r { Some((node.clone(), sheet_id.clone(), title.clone())) } else { None }).collect()
+}
+
+#[test]
+fn outline_pages_are_marked_filtered_renamed_and_deleted_from_their_menu() {
+    use n0te_desktop::sidebar::{self, Msg};
+    let (mut h, root, nb) = demo_open("outline-menu");
+    assert!(h.find("Gliederung").is_some() || h.find("GLIEDERUNG").is_some());
+    let pages = sheet_nodes(&h);
+    let (first, second) = (pages[0].clone(), pages[1].clone());
+    // Merken from the page's right-click menu: a ribbon, the filter.
+    let row = h.bounds_of(sidebar::page_id(&first.0)).expect("its row");
+    h.right_click(row.center());
+    assert!(h.app.outline.menu.is_some());
+    assert!(h.find("Merken").is_some() && h.find("Löschen").is_some());
+    click_on(&mut h, sidebar::menu_id("mark"));
+    assert_eq!(open(&h).marked, vec![first.0.clone()]);
+    assert_eq!(Library::open(&root).unwrap().load_notebook(&nb).unwrap().marked(), vec![first.0.clone()], "saved");
+    h.message(Message::Outline(Msg::OnlyMarked(true)));
+    assert!(h.bounds_of(sidebar::page_id(&first.0)).is_some() && h.bounds_of(sidebar::page_id(&second.0)).is_none(), "only the marked page");
+    h.message(Message::Outline(Msg::Mark(first.0.clone(), false)));
+    assert!(open(&h).marked.is_empty() && !h.app.outline.only_marked, "nothing marked: all again");
+    // Umbenennen: the name selected, Enter keeps what is typed.
+    let row = h.bounds_of(sidebar::page_id(&second.0)).unwrap();
+    h.right_click(row.center());
+    click_on(&mut h, sidebar::menu_id("rename"));
+    assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(sidebar::rename_id()));
+    h.type_text("Einleitung");
+    h.press(Named::Enter);
+    assert!(h.app.outline.renaming.is_none());
+    assert_eq!(sheet_nodes(&h)[1].2, "Einleitung");
+    assert!(h.find("Einleitung").is_some());
+    // Löschen asks once, then deletes; "Rückgängig" brings it back.
+    let count = pages.len();
+    let row = h.bounds_of(sidebar::page_id(&second.0)).unwrap();
+    h.right_click(row.center());
+    click_on(&mut h, sidebar::menu_id("delete"));
+    assert!(h.find("Wirklich löschen?").is_some() && sheet_nodes(&h).len() == count, "asks first");
+    click_on(&mut h, sidebar::menu_id("delete"));
+    assert_eq!(sheet_nodes(&h).len(), count - 1);
+    assert!(h.app.outline.undo && h.app.status.as_deref() == Some("Seite gelöscht"));
+    h.message(Message::Outline(Msg::Undo));
+    assert_eq!(sheet_nodes(&h).len(), count);
+    // A group's menu: rename, fold, delete (no marking).
+    let group = open(&h).rows.iter().find_map(|r| if let OutlineRow::Group { node, .. } = r { Some(node.clone()) } else { None }).unwrap();
+    let row = h.bounds_of(sidebar::page_id(&group)).unwrap();
+    h.right_click(row.center());
+    assert!(h.bounds_of(sidebar::menu_id("fold")).is_some() && h.bounds_of(sidebar::menu_id("mark")).is_none());
+    let m = key(&h, Named::Escape);
+    h.message(m);
+    assert!(h.app.outline.menu.is_none(), "Esc closes it");
+}
+
+#[test]
+fn the_outline_footer_adds_pages_and_groups_and_folds_every_group() {
+    let (mut h, _root, _nb) = demo_open("outline-foot");
+    let mains = |h: &Harness| open(h).pages.mains().len();
+    let before = mains(&h);
+    click_on(&mut h, iced::widget::Id::new("add-page"));
+    assert_eq!(mains(&h), before + 1);
+    let o = open(&h);
+    assert_eq!(o.pages.current_number(&o.camera), 2, "after the page in view, and shown");
+    // A group, named right away.
+    click_on(&mut h, iced::widget::Id::new("add-group"));
+    assert!(h.app.outline.renaming.as_ref().is_some_and(|(_, t)| t == "Neue Gruppe"));
+    h.type_text("Woche 5");
+    h.press(Named::Enter);
+    assert!(open(&h).rows.iter().any(|r| matches!(r, OutlineRow::Group { title, .. } if title == "Woche 5")));
+    // Every group folded, then open again.
+    let groups = |h: &Harness| open(h).rows.iter().filter_map(|r| if let OutlineRow::Group { collapsed, .. } = r { Some(*collapsed) } else { None }).collect::<Vec<_>>();
+    click_on(&mut h, iced::widget::Id::new("fold-all"));
+    assert!(groups(&h).iter().all(|c| *c), "all folded: {:?}", groups(&h));
+    // Open again: the groups shown (inner ones stay folded until they show and are opened).
+    let shown: Vec<String> = open(&h).rows.iter().filter_map(|r| if let OutlineRow::Group { node, .. } = r { Some(node.clone()) } else { None }).collect();
+    click_on(&mut h, iced::widget::Id::new("fold-all"));
+    for g in &shown {
+        assert!(open(&h).rows.iter().any(|r| matches!(r, OutlineRow::Group { node, collapsed: false, .. } if node == g)), "{g} open again");
+    }
+}
+
+#[test]
+fn page_pictures_and_the_outline_follows_the_page_in_view() {
+    use n0te_desktop::sidebar;
+    let (mut h, _root, _nb) = demo_open("outline-pics");
+    click_on(&mut h, iced::widget::Id::new("pictures"));
+    assert!(h.app.settings.outline_pictures);
+    let pages = sheet_nodes(&h);
+    // (The cover, then a group: its pages two to a row.)
+    let pic = h.bounds_of(sidebar::page_id(&pages[1].0)).expect("a picture");
+    assert!(pic.width < 130.0 && pic.height > 120.0, "two to a row, page-shaped: {pic:?}");
+    let next = h.bounds_of(sidebar::page_id(&pages[2].0)).unwrap();
+    assert!((next.y - pic.y).abs() < 1.0 && next.x > pic.x, "side by side");
+    let cover = h.bounds_of(sidebar::page_id(&pages[0].0)).unwrap();
+    assert!(cover.y < pic.y - pic.height, "a group's heading starts a new row");
+    // Further down the notebook: switching the view brings its page into the list's view; a
+    // click a third down the list lands on it.
+    let o = open(&h);
+    let last = *o.pages.mains().last().unwrap();
+    let (sheet, number) = (o.pages.pages[last].placed.sheet_id.clone(), o.pages.pages[last].placed.number);
+    let back = o.pages.mains()[11];
+    let (back_sheet, back_number) = (o.pages.pages[back].placed.sheet_id.clone(), o.pages.pages[back].placed.number);
+    h.message(Message::Jump(back_sheet));
+    click_on(&mut h, iced::widget::Id::new("outline-list"));
+    assert!(!h.app.settings.outline_pictures);
+    let list = h.bounds_of(sidebar::list_id()).expect("the list");
+    h.click(Point::new(list.x + 120.0, list.y + list.height / 3.0 + 12.0));
+    let o = open(&h);
+    assert_eq!(o.pages.current_number(&o.camera), back_number, "the row there is the page in view");
+    h.message(Message::Jump(sheet));
+    let o = open(&h);
+    assert_eq!(o.pages.current_number(&o.camera), number);
 }

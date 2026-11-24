@@ -147,7 +147,8 @@ pub fn run(job: &Job) -> Option<Vec<PageHits>> {
             continue;
         }
         let first = sheet.as_ref().and_then(|s| s.headings().into_iter().map(|h| h.text).find(|t| !t.trim().is_empty()));
-        out.push(PageHits { sheet_id: t.sheet_id.clone(), number: t.number, side: t.side, name: page_name(&t.title, &t.spec, first.as_deref()), hits });
+        let line = sheet.as_ref().and_then(|s| crate::pages::first_line(&s.page_text()));
+        out.push(PageHits { sheet_id: t.sheet_id.clone(), number: t.number, side: t.side, name: page_name(&t.title, &t.spec, first.as_deref(), line.as_deref()), hits });
     }
     Some(out)
 }

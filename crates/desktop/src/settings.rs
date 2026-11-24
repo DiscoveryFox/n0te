@@ -1,4 +1,6 @@
-//! Laptop settings: theme and page gaps, in $XDG_CONFIG_HOME/n0te/laptop.conf (key=value).
+//! Laptop settings: theme and page gaps, how the library and the outline look, folders made
+//! here that are still empty, when notebooks were opened — in
+//! $XDG_CONFIG_HOME/n0te/laptop.conf (key=value).
 
 use std::path::PathBuf;
 
@@ -22,7 +24,21 @@ pub struct Settings {
     /// Page size (pt) for new notebooks.
     pub new_w: f32,
     pub new_h: f32,
+    /// The library as a list (else cards).
+    pub lib_list: bool,
+    /// Folders made with "Neuer Ordner" that hold no notebook yet (they live in no document).
+    pub lib_folders: Vec<String>,
+    /// When notebooks were opened here: (id, unix ms), newest first, at most [`OPENED_KEPT`].
+    pub lib_opened: Vec<(String, u64)>,
+    /// The outline as page pictures (else the list).
+    pub outline_pictures: bool,
 }
+
+/// How many open times the settings keep.
+pub const OPENED_KEPT: usize = 40;
+
+/// Separates folder paths in the settings line (no folder name holds it).
+const FOLDER_SEP: char = '\u{1f}';
 
 /// The current `formula_center` (read while drawing text; set from the settings).
 pub static FORMULA_CENTER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
@@ -45,6 +61,10 @@ impl Default for Settings {
             momentum: true,
             new_w: 595.0,
             new_h: 842.0,
+            lib_list: false,
+            lib_folders: Vec::new(),
+            lib_opened: Vec::new(),
+            outline_pictures: false,
         }
     }
 }
@@ -74,6 +94,15 @@ impl Settings {
                 "momentum" => s.momentum = v != "0",
                 "new_w" => s.new_w = v.parse().unwrap_or(s.new_w).clamp(n0te_core::format::MIN_PT, n0te_core::format::MAX_PT),
                 "new_h" => s.new_h = v.parse().unwrap_or(s.new_h).clamp(n0te_core::format::MIN_PT, n0te_core::format::MAX_PT),
+                "lib_view" => s.lib_list = v == "list",
+                "lib_folders" => s.lib_folders = v.split(FOLDER_SEP).map(n0te_core::notebook::folder_path).filter(|f| !f.is_empty()).collect(),
+                // "id:ms;id:ms", like the tablet keeps them.
+                "lib_opened" => {
+                    s.lib_opened = v.split(';').filter_map(|p| p.split_once(':')).filter_map(|(id, t)| Some((id.to_string(), t.parse().ok()?))).collect();
+                    s.lib_opened.sort_by(|a, b| b.1.cmp(&a.1));
+                    s.lib_opened.truncate(OPENED_KEPT);
+                }
+                "outline_view" => s.outline_pictures = v == "pictures",
                 _ => {}
             }
         }
@@ -92,10 +121,21 @@ impl Settings {
         let _ = std::fs::write(p, self.text());
     }
 
+    /// Notes that notebook `id` was opened now (unix ms `at`): newest first, the oldest beyond
+    /// [`OPENED_KEPT`] forgotten.
+    pub fn opened_now(&mut self, id: &str, at: u64) {
+        self.lib_opened.retain(|(i, _)| i != id);
+        self.lib_opened.insert(0, (id.to_string(), at));
+        self.lib_opened.sort_by(|a, b| b.1.cmp(&a.1));
+        self.lib_opened.truncate(OPENED_KEPT);
+    }
+
     /// The settings file's text (what [`Settings::parse`] reads back).
     pub fn text(&self) -> String {
+        let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
+        let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -105,7 +145,11 @@ impl Settings {
             if self.share_view { 1 } else { 0 },
             if self.momentum { 1 } else { 0 },
             self.new_w,
-            self.new_h
+            self.new_h,
+            if self.lib_list { "list" } else { "grid" },
+            folders.join(&FOLDER_SEP.to_string()),
+            opened.join(";"),
+            if self.outline_pictures { "pictures" } else { "list" },
         )
     }
 
@@ -133,6 +177,23 @@ mod tests {
         let back = Settings::parse(&s.text());
         assert_eq!(back, s);
         assert!(!back.guest_frames && back.share_view);
+    }
+
+    #[test]
+    fn the_library_view_empty_folders_and_open_times_survive_a_save() {
+        let mut s = Settings { lib_list: true, outline_pictures: true, lib_folders: vec!["Uni".into(), "Uni/WS26 = Winter".into()], ..Settings::default() };
+        s.opened_now("a", 10);
+        s.opened_now("b", 30);
+        s.opened_now("a", 50);
+        assert_eq!(s.lib_opened, vec![("a".to_string(), 50), ("b".to_string(), 30)], "newest first, each once");
+        assert_eq!(Settings::parse(&s.text()), s);
+        for i in 0..60 {
+            s.opened_now(&format!("n{i}"), 100 + i);
+        }
+        assert_eq!(s.lib_opened.len(), OPENED_KEPT);
+        assert_eq!(s.lib_opened[0].0, "n59");
+        let d = Settings::default();
+        assert!(!d.lib_list && !d.outline_pictures && d.lib_folders.is_empty());
     }
 
     #[test]
