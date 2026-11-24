@@ -42,6 +42,12 @@ class GraphCanvasView(context: Context, var session: GraphSession, private val f
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
+        // Only the height changed (the graph keyboard came or went): the graph stays where it is.
+        if (w == oldw && oldh > 0 && h > 0 && k > 0f) {
+            session.reframe(0f, 0f, width / k, height / k, keepTop = true)
+            invalidate()
+            return
+        }
         frame()
     }
 

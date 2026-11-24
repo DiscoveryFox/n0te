@@ -185,12 +185,12 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
      * page again after. Its scale and middle stay, so it shows more or less around them; every
      * step to undo moves along.
      */
-    fun reframe(x: Float, y: Float, w: Float, h: Float) {
+    fun reframe(x: Float, y: Float, w: Float, h: Float, keepTop: Boolean = false) {
         if (w <= 0f || h <= 0f || (draft.x == x && draft.y == y && draft.w == w && draft.h == h)) return
-        draft = framed(draft, x, y, w, h)
-        for (i in undo.indices) undo[i] = framed(undo[i], x, y, w, h)
-        for (i in redo.indices) redo[i] = framed(redo[i], x, y, w, h)
-        home = framed(home, x, y, w, h)
+        draft = framed(draft, x, y, w, h, keepTop)
+        for (i in undo.indices) undo[i] = framed(undo[i], x, y, w, h, keepTop)
+        for (i in redo.indices) redo[i] = framed(redo[i], x, y, w, h, keepTop)
+        home = framed(home, x, y, w, h, keepTop)
         onChange()
     }
 
@@ -520,10 +520,15 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
             return if (same) p else out
         }
 
-        /** [p] in the box (x, y, w, h): the same units per point, the same middle. */
-        fun framed(p: FfiPlot, x: Float, y: Float, w: Float, h: Float): FfiPlot {
+        /**
+         * [p] in the box (x, y, w, h): the same units per point, the same middle — or, with
+         * [keepTop], the same top-left (the graph keyboard came or went: nothing moves, the
+         * bottom is cut or shows again).
+         */
+        fun framed(p: FfiPlot, x: Float, y: Float, w: Float, h: Float, keepTop: Boolean = false): FfiPlot {
             if (p.w <= 0f || p.h <= 0f) return p.copy(x = x, y = y, w = w, h = h)
             val ux = (p.xMax - p.xMin) / p.w; val uy = (p.yMax - p.yMin) / p.h
+            if (keepTop) return p.copy(x = x, y = y, w = w, h = h, xMax = p.xMin + ux * w, yMin = p.yMax - uy * h)
             val cx = (p.xMin + p.xMax) / 2; val cy = (p.yMin + p.yMax) / 2
             return p.copy(x = x, y = y, w = w, h = h, xMin = cx - ux * w / 2, xMax = cx + ux * w / 2, yMin = cy - uy * h / 2, yMax = cy + uy * h / 2)
         }

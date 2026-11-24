@@ -1821,8 +1821,10 @@ class NotebookActivity : ComponentActivity() {
                         { graphPanel = true; g.openSettings(null); g.tab = 1 }, { finishGraph(true) }, { finishGraph(false) },
                         Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 8.dp, start = if (graphPanel) (GRAPH_PANEL_W + 20).dp else 0.dp))
                     GraphKeyboard(g.keys, Modifier.align(Alignment.BottomCenter))
-                    // The graph big beside the panel, or where it is on the page; again when the room changes.
-                    androidx.compose.runtime.LaunchedEffect(g, graphBig, graphPanel, keysUp) { kotlinx.coroutines.delay(60); fitGraph() }
+                    // The graph where it is on the page, out from under the panel: when the editor opens and when
+                    // the panel or Groß toggles — typing never moves it (the keyboard at most nudges it up).
+                    androidx.compose.runtime.LaunchedEffect(g, graphBig, graphPanel) { kotlinx.coroutines.delay(60); fitGraph() }
+                    androidx.compose.runtime.LaunchedEffect(g, keysUp) { if (keysUp) { kotlinx.coroutines.delay(60); keepGraphAboveKeys() } }
                 }
                 LatexDialog()
                 // Live: this view's position every 2 s while the laptop is connected (it shows a frame).
@@ -3136,6 +3138,23 @@ class NotebookActivity : ComponentActivity() {
                 val bottom = view.height - (if (g.keys.shown) GRAPH_KEYS_H.value + 76f else 84f) * d
                 view.fitBox(g.sheetId, box, android.graphics.RectF(left, 104 * d, view.width - 24 * d, bottom))
             } else graphHome?.let { view.showAt(it, g.sheetId, box, left) }
+        }
+
+        /**
+         * The graph keyboard came up: the view stays where it is unless the keyboard would cover the
+         * whole graph — then the page moves up just so far that the graph's top shows above it.
+         */
+        fun keepGraphAboveKeys() {
+            val g = graph ?: return
+            if (graphBig) return
+            val box = graphBox(g) ?: return
+            val page = (model?.placed?.firstOrNull { it.sheetId == g.sheetId } ?: view.board?.takeIf { it.sheetId == g.sheetId })?.rect ?: return
+            val d = resources.displayMetrics.density
+            val keysTop = view.height - GRAPH_KEYS_H.value * d
+            val c = view.camera()
+            val top = (page.top + box.top) * c[0] + c[2]
+            val room = keysTop - 56 * d
+            if (top > room) view.setCamera(floatArrayOf(c[0], c[1], c[2] - (top - room)))
         }
 
         /** The graph's box on the page (page points), or null when it is gone. */
