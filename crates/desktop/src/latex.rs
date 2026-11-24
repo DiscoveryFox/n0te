@@ -1,10 +1,12 @@
 //! LaTeX formulas as vector images: the local TeX installation (`latex` + `dvisvgm`) renders
-//! each formula once to SVG in `~/.cache/n0te/tex`; the editor shows it with iced's svg widget.
+//! each formula once to SVG in `~/.cache/n0te/tex` (Windows: `%LOCALAPPDATA%\n0te\cache\tex`,
+//! TeX Live or MiKTeX from PATH); the editor shows it with iced's svg widget.
 //!
 //! Rendering runs on a worker thread (a formula takes ~0.3 s the first time); until then
 //! [`formula`] says `Pending` and the source is shown. [`subscription`] fires when one is ready.
 //! TeX runs without shell escape, may only read/write its own directory (`openin_any=p`,
-//! `openout_any=p`) and is stopped after 10 s, so a shared notebook can't do anything with it.
+//! `openout_any=p`, TeX Live's settings) and is stopped after 10 s, so a shared notebook can't
+//! do anything with it.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -125,8 +127,7 @@ fn stream() -> iced::futures::stream::BoxStream<'static, ()> {
 }
 
 fn cache_dir() -> PathBuf {
-    let base = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join(".cache"));
-    base.join("n0te").join("tex")
+    n0te_platform::paths::cache_dir().join("tex")
 }
 
 fn render(latex: &str, display: bool) -> Formula {
@@ -166,9 +167,9 @@ fn render(latex: &str, display: bool) -> Formula {
     result.unwrap_or_else(Formula::Failed)
 }
 
-/// Runs a TeX tool in `dir`, confined to it, for at most 10 s.
+/// Runs a TeX tool in `dir`, confined to it, for at most 10 s (Windows: no console window).
 fn run(cmd: &mut Command, dir: &Path) -> Result<(), String> {
-    let mut child = cmd
+    let mut child = n0te_platform::no_window(cmd)
         .current_dir(dir)
         .env("openin_any", "p")
         .env("openout_any", "p")

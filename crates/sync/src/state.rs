@@ -132,10 +132,6 @@ pub fn load_or_create_key(root: &Path) -> Result<SecretKey> {
     }
     let key = SecretKey::generate();
     n0te_core::store::write_atomic(&path, &key.to_bytes())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
-    }
+    let _ = n0te_platform::fs::make_private(&path);
     Ok(key)
 }

@@ -11,11 +11,12 @@ Plan and decisions: `~/.claude/plans/n0te-notes-app.md`.
 | `crates/pdf` | `n0te-pdf`: pdfium (loaded by path) for page sizes, tiles and text; `PdfWorker`, the one thread per app that does pdfium work in priority order (visible tiles first, stale generations dropped, LRU of open documents); export = pdfium assembles the pages, n0te's own writer appends the ink (`ink_writer`: incremental update, Flate streams, optional content group "n0te ink"); notebook import/export helpers. |
 | `crates/ffi` | `n0te-ffi`: UniFFI bindings of the core for Android (Kotlin). Hot paths pass packed little-endian f32 bytes. PDF: `PdfService` (worker + `TileSink` callback), `NotebookHandle.importPdf/exportPdf`. |
 | `crates/sync` | `n0te-sync`: sync engine over iroh (own devices after pairing, guests with signed invite links, live presence/strokes, history checkpoints with thinning and restore-as-copy) and the `n0te-sync` service/CLI (`make n0te-sync`, systemd user unit in `packaging/`). FFI: `crates/ffi/src/sync.rs` (`SyncEngine`, `SyncListener`). Every library write is merge-on-save under a per-notebook lock; the engine uses its own Loro peer id (`device.sync`). |
+| `crates/platform` | `n0te-platform`: what differs between Linux and Windows, so the other crates stay free of `cfg`s: folders (`paths`: library, settings, cache, the service's scratch folder, Downloads), the service ↔ app connection (`ipc`: the Unix socket, on Windows a named pipe only this user can open), `open_path`, `local_time`, `spawn_detached`, `fs::make_private`, login `autostart` (Windows). |
 | `crates/uniffi-bindgen` | The bindgen CLI (`cargo run -p uniffi-bindgen -- generate …`). |
 | `scripts/build-android.sh` | Builds `libn0te_ffi.so` for arm64, copies the pinned arm64 `libpdfium.so` next to it and generates the Kotlin bindings into `android/build/rust/`. Run by Gradle before the Android app builds. |
 | `scripts/fetch-pdfium.sh` | Downloads the pinned, hash-checked prebuilt pdfium for linux-x64 and android-arm64 into `third_party/pdfium/` (gitignored). Needed by the n0te-pdf tests and the Android build. |
 | `android/` | The Android app (package `dev.n0bridge.n0te`): `:n0te` in n0bridge's `app-android` build, or on its own (`cd android && gradle assembleRelease`). |
-| `scripts/wincheck.sh` | Type-checks the workspace for Windows on Linux (`cargo check` with stub C headers, nothing linked). |
+| `scripts/wincheck.sh` | Type-checks the workspace for Windows on Linux (`cargo check` with stub C headers, nothing linked); `TARGET=aarch64-pc-windows-msvc` for ARM64. |
 
 ## Build and test
 

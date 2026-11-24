@@ -158,35 +158,7 @@ pub fn restore_as_copy(lib: &Library, notebook: &str, at: u64) -> Result<String>
 }
 
 /// "YYYY-MM-DD HH:MM" in local time.
-pub fn local_time(unix: u64) -> String {
-    #[cfg(unix)]
-    unsafe {
-        let t = unix as libc::time_t;
-        let mut tm: libc::tm = std::mem::zeroed();
-        if !libc::localtime_r(&t, &mut tm).is_null() {
-            return format!("{:04}-{:02}-{:02} {:02}:{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min);
-        }
-    }
-    // Fallback: UTC.
-    let days = unix / 86_400;
-    let (h, m) = ((unix % 86_400) / 3600, (unix % 3600) / 60);
-    let (y, mo, d) = civil(days as i64);
-    format!("{y:04}-{mo:02}-{d:02} {h:02}:{m:02} UTC")
-}
-
-/// Days since 1970-01-01 → (year, month, day) (H. Hinnant's algorithm).
-fn civil(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
-}
+pub use n0te_platform::local_time;
 
 #[cfg(test)]
 mod tests {
@@ -215,12 +187,6 @@ mod tests {
         assert!(del.contains(&(now - 3 * D + 5)));
         assert!(!del.contains(&(now - 60)) && !del.contains(&(now - 50 * 60)));
         assert!(thin(&[now - 400 * D], now).is_empty(), "the newest is always kept");
-    }
-
-    #[test]
-    fn civil_dates() {
-        assert_eq!(civil(0), (1970, 1, 1));
-        assert_eq!(civil(20_411), (2025, 11, 19));
     }
 
     #[test]

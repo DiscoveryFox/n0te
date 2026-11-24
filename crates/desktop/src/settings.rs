@@ -72,12 +72,10 @@ impl Default for Settings {
     }
 }
 
+/// The settings file: `$XDG_CONFIG_HOME/n0te/laptop.conf`; Windows
+/// `%APPDATA%\n0te\config\laptop.conf`.
 pub fn path() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("n0te/laptop.conf")
+    n0te_platform::paths::config_dir().join("laptop.conf")
 }
 
 impl Settings {

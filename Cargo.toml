@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/desktop", "crates/ffi", "crates/pdf", "crates/sync", "crates/uniffi-bindgen"]
+members = ["crates/core", "crates/desktop", "crates/ffi", "crates/pdf", "crates/platform", "crates/sync", "crates/uniffi-bindgen"]
 
 [workspace.package]
 edition = "2024"
@@ -14,6 +14,7 @@ thiserror = "2"
 blake3 = "1.8"
 n0te-core = { path = "crates/core" }
 n0te-pdf = { path = "crates/pdf" }
+n0te-platform = { path = "crates/platform" }
 n0te-sync = { path = "crates/sync" }
 
 [profile.release]

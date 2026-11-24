@@ -3799,6 +3799,7 @@ dependencies = [
  "iced_test",
  "n0te-core",
  "n0te-pdf",
+ "n0te-platform",
  "png 0.18.1",
  "raw-window-handle",
  "serde_json",
@@ -3834,6 +3835,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "n0te-platform"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "n0te-sync"
 version = "0.1.0"
 dependencies = [
@@ -3841,9 +3850,9 @@ dependencies = [
  "bytes",
  "data-encoding",
  "iroh",
- "libc",
  "loro",
  "n0te-core",
+ "n0te-platform",
  "postcard",
  "rand 0.9.5",
  "serde",

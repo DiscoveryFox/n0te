@@ -430,19 +430,16 @@ pub struct App {
     pub tablet: crate::tablet::Tablet,
 }
 
-/// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
+/// The library folder, the one the sync service uses: `$N0TE_LIBRARY`, else
+/// `$XDG_DATA_HOME/n0te` (~/.local/share/n0te); Windows `%APPDATA%\n0te`.
 pub fn default_root() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("n0te")
+    n0te_platform::paths::library_root()
 }
 
 /// Where n0bridge drops received files, and Downloads itself.
 fn bundle_dirs() -> Vec<PathBuf> {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
-    vec![home.join("Downloads/n0bridge"), home.join("Downloads")]
+    let downloads = n0te_platform::paths::downloads().unwrap_or_else(|| PathBuf::from("Downloads"));
+    vec![downloads.join("n0bridge"), downloads]
 }
 
 pub fn find_bundles(dirs: &[PathBuf]) -> Vec<Bundle> {
@@ -940,6 +937,10 @@ impl App {
                 Err(e) => self.say(format!("Import fehlgeschlagen: {e}")),
             },
             Message::SendToTablet => {
+                // Only through n0bridge (the palette offers it only then).
+                if !n0bridge_installed() {
+                    return Task::none();
+                }
                 let Screen::Notebook(o) = &self.screen else { return Task::none() };
                 let dir = std::env::temp_dir().join("n0te-out");
                 let safe: String = o.nb.title().chars().map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' { c } else { '_' }).collect();
@@ -1143,7 +1144,7 @@ impl App {
             }
             Message::Export(what) => self.export_pdf(what),
             Message::OpenPath(p) => {
-                let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+                let _ = n0te_platform::open_path(p);
             }
             Message::NewText(sheet, x, y) => return self.new_text(&sheet, x, y),
             Message::EditText(sheet, id) => return self.edit_text(&sheet, &id),
@@ -1297,7 +1298,7 @@ impl App {
                 Err(e) => self.say(format!("Koppeln: {e}")),
             },
             Message::PairToTablet => {
-                let Some(code) = self.pair_code.clone() else { return Task::none() };
+                let Some(code) = self.pair_code.clone().filter(|_| n0bridge_installed()) else { return Task::none() };
                 return Task::perform(
                     async move {
                         let to = tablet_target();
@@ -3453,7 +3454,7 @@ impl App {
     fn devices_view(&self) -> Element<'_, Message> {
         let mut col = column![].spacing(10);
         if self.sync.is_none() {
-            col = col.push(text("Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync").size(13).color(theme::p().accent));
+            col = col.push(text(live::service_hint()).size(13).color(theme::p().accent));
             return col.into();
         }
         if self.devices.is_empty() {
@@ -3963,7 +3964,7 @@ fn default_spacing(b: Background) -> f32 {
 }
 
 fn downloads() -> PathBuf {
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads")).unwrap_or_else(std::env::temp_dir)
+    n0te_platform::paths::downloads().unwrap_or_else(std::env::temp_dir)
 }
 
 /// `dir/title.ext`, or `title (2).ext` … if taken; unsafe characters replaced.
@@ -4049,9 +4050,10 @@ fn style_preview(t: &'static theme::Palette) -> Element<'static, Message> {
     .into()
 }
 
-/// Whether the n0bridge CLI is installed (then codes can go straight to the tablet).
-fn n0bridge_installed() -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("n0bridge").is_file()))
+/// Whether the n0bridge CLI is installed (then codes and notebooks can go straight to the
+/// tablet). Never on Windows: n0bridge is Linux only.
+pub(crate) fn n0bridge_installed() -> bool {
+    !cfg!(windows) && std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join("n0bridge").is_file()))
 }
 
 /// The paired tablet's n0bridge device id (`n0bridge devices`), since not every n0bridge

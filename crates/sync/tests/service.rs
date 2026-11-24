@@ -1,5 +1,7 @@
 //! The service binary end to end: a GUI session on its unix socket gets engine events as JSON
-//! lines and sends live commands; one-shot JSON queries work.
+//! lines and sends live commands; one-shot JSON queries work. (Unix: the socket sits in the
+//! test's own `$XDG_RUNTIME_DIR`. The Windows pipe is covered by n0te-platform's ipc tests.)
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
