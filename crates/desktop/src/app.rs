@@ -3629,7 +3629,7 @@ impl App {
         let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold);
         // n0te Tablet: the pen (and the mouse) write; laptop: a double click makes a text box.
         let tablet = crate::mode() == crate::Mode::Tablet;
-        let page_view = if tablet { page_view.on_pen(Message::Pen) } else { page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot) };
+        let page_view = if tablet { page_view.on_pen(Message::Pen).finger_draws(self.tablet.finger_draws) } else { page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot) };
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));
         if tablet && let Some(overlay) = crate::tablet::overlay::view(&self.tablet, o) {

@@ -856,10 +856,12 @@ pub struct PageView<'a, Message> {
     on_plot: Option<Box<dyn Fn(String, String) -> Message + 'a>>,
     /// n0te Tablet: the mouse draws like a pen (these events), fingers pan and zoom.
     on_pen: Option<Box<dyn Fn(crate::tablet::pen::PenEvent) -> Message + 'a>>,
+    /// n0te Tablet: one finger writes too (two still pan and zoom).
+    finger_draws: bool,
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None, finger_draws: false }
 }
 
 impl<'a, Message> PageView<'a, Message> {
@@ -874,6 +876,12 @@ impl<'a, Message> PageView<'a, Message> {
     /// pans and two pinch (both ignored while a pen is near the screen: a resting palm).
     pub fn on_pen(mut self, f: impl Fn(crate::tablet::pen::PenEvent) -> Message + 'a) -> Self {
         self.on_pen = Some(Box::new(f));
+        self
+    }
+
+    /// n0te Tablet: one finger writes like the pen.
+    pub fn finger_draws(mut self, on: bool) -> Self {
+        self.finger_draws = on;
         self
     }
 
@@ -899,6 +907,8 @@ struct State {
     mouse_pen: Option<std::time::Instant>,
     /// Fingers on the view (id → position), for panning and pinching.
     fingers: Vec<(u64, Point)>,
+    /// Finger writing: the finger that writes and since when.
+    finger_pen: Option<(u64, std::time::Instant)>,
 }
 
 fn mouse_sample(p: Point, since: std::time::Instant) -> crate::tablet::pen::Sample {
@@ -983,6 +993,42 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     if crate::tablet::pen::in_range() {
                         state.fingers.clear();
                         return;
+                    }
+                    // Finger writing: one finger writes; a second one turns it into pan / zoom.
+                    if self.finger_draws {
+                        let fe = |phase, p: Point, since| PenEvent { phase, samples: vec![mouse_sample(p, since)], eraser: false, barrel: false, real: false };
+                        match *t {
+                            touch::Event::FingerPressed { id, position } if state.fingers.is_empty() && state.finger_pen.is_none() && bounds.contains(position) => {
+                                let now = std::time::Instant::now();
+                                state.finger_pen = Some((id.0, now));
+                                state.fingers.push((id.0, position));
+                                shell.publish(on_pen(fe(Phase::Down, position, now)));
+                                shell.capture_event();
+                                return;
+                            }
+                            touch::Event::FingerPressed { .. } if state.finger_pen.is_some() => {
+                                // A second finger: what the first wrote goes, the two pan / zoom.
+                                shell.publish(on_pen(PenEvent { phase: Phase::Cancel, samples: Vec::new(), eraser: false, barrel: false, real: false }));
+                                state.finger_pen = None;
+                            }
+                            touch::Event::FingerMoved { id, position } if state.finger_pen.is_some_and(|f| f.0 == id.0) => {
+                                let since = state.finger_pen.expect("finger").1;
+                                if let Some(f) = state.fingers.iter_mut().find(|f| f.0 == id.0) {
+                                    f.1 = position;
+                                }
+                                shell.publish(on_pen(fe(Phase::Move, position, since)));
+                                shell.capture_event();
+                                return;
+                            }
+                            touch::Event::FingerLifted { id, position } | touch::Event::FingerLost { id, position } if state.finger_pen.is_some_and(|f| f.0 == id.0) => {
+                                let since = state.finger_pen.take().expect("finger").1;
+                                state.fingers.retain(|f| f.0 != id.0);
+                                shell.publish(on_pen(fe(Phase::Up, position, since)));
+                                shell.capture_event();
+                                return;
+                            }
+                            _ => {}
+                        }
                     }
                     let before: Vec<Point> = state.fingers.iter().map(|f| f.1).collect();
                     match *t {

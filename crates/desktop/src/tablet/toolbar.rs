@@ -165,6 +165,9 @@ pub fn pen_menu(t: &Tablet) -> Element<'_, Message> {
     for (i, name) in pens::PALETTE_NAMES.iter().enumerate() {
         pals = pals.push(button(text(*name).size(11.5)).padding([4, 8]).on_press(msg(Msg::Palette(i))).style(theme::option(i == t.palette)));
     }
+    col = col.push(
+        iced::widget::toggler(t.finger_draws).label("Mit dem Finger schreiben").on_toggle(|on| msg(Msg::FingerDraws(on))).size(18).text_size(13).spacing(10).style(theme::switch),
+    );
     col = col.push(iced::widget::scrollable(pals).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).width(Length::Fixed(260.0)));
     container(col).padding(8).style(theme::menu).into()
 }

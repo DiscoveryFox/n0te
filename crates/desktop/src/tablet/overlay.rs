@@ -16,6 +16,8 @@ struct Overlay {
     frame: Option<n0te_core::ink::Rect>,
     /// The laser point (page coordinates).
     laser: Option<Point>,
+    /// The pen hovering: where (page coordinates) and the ring's radius in px.
+    hover: Option<(Point, f32)>,
 }
 
 impl canvas::Program<Message> for Overlay {
@@ -43,6 +45,10 @@ impl canvas::Program<Message> for Overlay {
             frame.fill(&rect, Color { a: 0.06, ..accent });
             frame.stroke(&rect, Stroke::default().with_color(accent).with_width(1.5));
         }
+        if let Some((p, r)) = self.hover {
+            let c = self.camera.to_screen(local, p.x, p.y);
+            frame.stroke(&Path::circle(c, r), Stroke::default().with_color(Color { a: 0.7, ..theme::INK }).with_width(1.0));
+        }
         if let Some(p) = self.laser {
             let c = self.camera.to_screen(local, p.x, p.y);
             frame.fill(&Path::circle(c, 14.0), Color { a: 0.18, ..accent });
@@ -62,8 +68,16 @@ pub fn view<'a>(t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Message>> {
         Some(n0te_core::ink::Rect::new(r.x0 + x0, r.y0 + y0, r.x1 + x0, r.y1 + y0))
     });
     let laser = t.laser.filter(|(k, _)| *k == o.key).map(|(_, p)| p);
-    if lasso.is_none() && frame.is_none() && laser.is_none() {
+    // Hovering: a ring as big as the eraser (eraser) or the line (pens), not while writing.
+    let hover = t.hover.filter(|(k, _)| *k == o.key && !t.busy()).map(|(_, p)| {
+        let r = match t.tool {
+            super::Tool::Eraser => t.eraser_size,
+            _ => (t.brush().width * o.camera.zoom / 2.0).max(2.0),
+        };
+        (p, r)
+    });
+    if lasso.is_none() && frame.is_none() && laser.is_none() && hover.is_none() {
         return None;
     }
-    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, laser }).width(Length::Fill).height(Length::Fill).into())
+    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, laser, hover }).width(Length::Fill).height(Length::Fill).into())
 }

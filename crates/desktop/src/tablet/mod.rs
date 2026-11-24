@@ -65,6 +65,7 @@ pub enum Msg {
     Redo,
     /// The pen-type menu open / closed.
     PenMenu(bool),
+    FingerDraws(bool),
     DeleteSelection,
     ClearSelection,
     Copy,
@@ -155,6 +156,10 @@ pub struct Tablet {
     /// Eraser radius in screen points (the same size at every zoom).
     pub eraser_size: f32,
     pub pen_menu: bool,
+    /// A finger writes like the pen (devices without a pen); two fingers still pan and zoom.
+    pub finger_draws: bool,
+    /// Where the pen hovers (pane, page point), for the cursor ring.
+    pub hover: Option<(PaneKey, Point)>,
     pub selection: Option<Selection>,
     /// The lasso's outline while it is drawn (page coordinates), for the view.
     pub lasso_outline: Option<(PaneKey, Vec<Point>)>,
@@ -193,6 +198,8 @@ impl Default for Tablet {
             eraser_mode: EraserMode::Stroke,
             eraser_size: 10.0,
             pen_menu: false,
+            finger_draws: false,
+            hover: None,
             selection: None,
             lasso_outline: None,
             laser: None,
@@ -253,6 +260,7 @@ impl Tablet {
                 "fp_nib" => t.fountain.nib = pens::Nib::from_key(v),
                 "fp_taper" => t.fountain.taper = v != "0",
                 "pencil_opacity" => t.pencil_opacity = num(t.pencil_opacity).clamp(0.15, 1.0),
+                "finger_draws" => t.finger_draws = v == "1",
                 _ => {}
             }
         }
@@ -271,7 +279,7 @@ impl Tablet {
         let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
         let f = &self.fountain;
         let text = format!(
-            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\n",
+            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\n",
             self.pen.key(),
             self.palette,
             self.color,
@@ -283,6 +291,7 @@ impl Tablet {
             f.nib.key(),
             u8::from(f.taper),
             self.pencil_opacity,
+            u8::from(self.finger_draws),
         );
         let path = Self::conf_path();
         if let Some(dir) = path.parent() {
@@ -345,7 +354,7 @@ impl App {
 
     /// Toolbar actions.
     pub(crate) fn on_tablet(&mut self, m: Msg) -> Task<Message> {
-        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_));
+        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_));
         let task = self.tablet_action(m);
         if remember && self.persist_settings {
             self.tablet.save();
@@ -389,6 +398,7 @@ impl App {
                 t.tool = Tool::Eraser;
             }
             Msg::PenMenu(on) => t.pen_menu = on,
+            Msg::FingerDraws(on) => t.finger_draws = on,
             Msg::Undo => self.tablet_undo(true),
             Msg::Redo => self.tablet_undo(false),
             Msg::DeleteSelection => {
@@ -450,7 +460,8 @@ impl App {
                 return self.pen_up(tap);
             }
             Phase::Cancel => self.pen_cancel(),
-            Phase::Hover | Phase::Leave => {}
+            Phase::Hover => self.tablet.hover = e.last().and_then(|s| locate(self, s.x, s.y)).map(|(k, _, at)| (k, at)),
+            Phase::Leave => self.tablet.hover = None,
         }
         Task::none()
     }
