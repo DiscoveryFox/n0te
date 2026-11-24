@@ -116,7 +116,7 @@ fn main() {
             h.type_text(line);
         }
         // Out of the code block (Ctrl+Enter), then lists, a checkbox, formulas and a quote.
-        h.message(Message::Blocks(n0te_desktop::blocks::Msg::ExitBlock(h.app.text_page.as_ref().and_then(|t| t.doc.focus).unwrap_or(0))));
+        h.message(Message::Blocks(n0te_desktop::blocks::Msg::ExitBlock(focused_block(&h))));
         for (i, line) in ["1. Ableitung bilden", "Nullstellen finden", "", "[ ] Übung 4 rechnen", "", "Es gibt ein $\\xi \\in (a,b)$ mit $f'(\\xi) = \\frac{f(b)-f(a)}{b-a}$.", "$$"].iter().enumerate() {
             if i > 0 {
                 h.press(iced::keyboard::key::Named::Enter);
@@ -124,7 +124,7 @@ fn main() {
             h.type_text(line);
         }
         h.type_text("\\int_a^b f'(x)\\,dx = f(b) - f(a)");
-        h.message(Message::Blocks(n0te_desktop::blocks::Msg::ExitBlock(h.app.text_page.as_ref().and_then(|t| t.doc.focus).unwrap_or(0))));
+        h.message(Message::Blocks(n0te_desktop::blocks::Msg::ExitBlock(focused_block(&h))));
         h.type_text("> Merke: stetig auf [a,b], differenzierbar auf (a,b).");
         h.events(&[]);
         std::thread::sleep(std::time::Duration::from_millis(3000));
@@ -146,4 +146,12 @@ fn main() {
     h.message(Message::SetTheme("nothing"));
     println!("screenshots in {}", out.display());
     let _ = std::fs::remove_dir_all(root);
+}
+
+/// The block being written in the open text page (0: none).
+fn focused_block(h: &harness::Harness) -> u64 {
+    match &h.app.screen {
+        Screen::Notebook(s) => s.text_page.as_ref().and_then(|t| t.doc.focus).unwrap_or(0),
+        Screen::Library => 0,
+    }
 }

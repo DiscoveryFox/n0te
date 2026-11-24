@@ -19,7 +19,7 @@ use crate::app::{App, Message, Open, Screen};
 use crate::library::fit;
 use crate::search::{self, Search};
 use crate::shelf::{self, MenuRow};
-use crate::{pages, pdf, theme, widgets};
+use crate::{pages, pdf, split, theme, widgets};
 
 pub const WIDTH: f32 = 272.0;
 /// Hits listed at most (a common word in a long notebook would make thousands of rows).
@@ -29,32 +29,78 @@ const PICTURE_W: f32 = 112.0;
 const ROW_PICTURE_W: f32 = 18.0;
 const MARKED_PICTURE_W: f32 = 30.0;
 
-/// The search field (Ctrl+F focuses it).
+/// The ids of one pane's outline. Two outlines can show at once (two notebooks side by side):
+/// the active pane's carry the plain ids, so focusing the search field and scrolling the list
+/// reach only that one; the other pane's get an ending of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ids {
+    pub other: bool,
+}
+
+impl Ids {
+    pub const ACTIVE: Ids = Ids { other: false };
+
+    fn id(self, plain: String) -> iced::widget::Id {
+        iced::widget::Id::from(if self.other { format!("{plain}~other") } else { plain })
+    }
+
+    /// The search field (Ctrl+F focuses it).
+    pub fn input(self) -> iced::widget::Id {
+        self.id("n0te-search".into())
+    }
+
+    /// The scrolling list (outline, pictures, marked pages or results).
+    pub fn list(self) -> iced::widget::Id {
+        self.id("n0te-sidebar-list".into())
+    }
+
+    /// The `i`-th hit in the results.
+    pub fn hit(self, i: usize) -> iced::widget::Id {
+        self.id(format!("n0te-hit-{i}"))
+    }
+
+    /// A heading's row in the outline.
+    pub fn heading(self, id: &str) -> iced::widget::Id {
+        self.id(format!("n0te-heading-{id}"))
+    }
+
+    /// A page's or group's row (list), picture (pictures) or entry (marked pages).
+    pub fn page(self, node: &str) -> iced::widget::Id {
+        self.id(format!("n0te-page-{node}"))
+    }
+
+    /// One of the outline's buttons: "outline-list", "pictures", "add-page", "add-group", "fold-all".
+    pub fn named(self, name: &str) -> iced::widget::Id {
+        self.id(name.into())
+    }
+}
+
+/// The active pane's search field.
 pub fn input_id() -> iced::widget::Id {
-    iced::widget::Id::new("n0te-search")
+    Ids::ACTIVE.input()
 }
 
-/// The scrolling list (outline, pictures, marked pages or results).
+/// The active pane's list.
 pub fn list_id() -> iced::widget::Id {
-    iced::widget::Id::new("n0te-sidebar-list")
+    Ids::ACTIVE.list()
 }
 
-/// The `i`-th hit in the results.
+/// The `i`-th hit in the active pane's results.
 pub fn hit_id(i: usize) -> iced::widget::Id {
-    iced::widget::Id::from(format!("n0te-hit-{i}"))
+    Ids::ACTIVE.hit(i)
 }
 
-/// A heading's row in the outline.
+/// A heading's row in the active pane's outline.
 pub fn heading_id(id: &str) -> iced::widget::Id {
-    iced::widget::Id::from(format!("n0te-heading-{id}"))
+    Ids::ACTIVE.heading(id)
 }
 
-/// A page's or group's row (list), picture (pictures) or entry (marked pages).
+/// A page's or group's row in the active pane's outline.
 pub fn page_id(node: &str) -> iced::widget::Id {
-    iced::widget::Id::from(format!("n0te-page-{node}"))
+    Ids::ACTIVE.page(node)
 }
 
-/// A row of the page menu: "rename", "mark", "delete", "fold".
+/// A row of the page menu: "rename", "mark", "beside", "delete", "fold".
 pub fn menu_id(what: &str) -> iced::widget::Id {
     iced::widget::Id::from(format!("n0te-page-menu-{what}"))
 }
@@ -64,8 +110,7 @@ pub fn rename_id() -> iced::widget::Id {
     iced::widget::Id::new("n0te-page-rename")
 }
 
-/// The outline's own state: only the marked pages, the page menu, the rename dialog, whether
-/// the last delete can be undone.
+/// A pane's outline state: only the marked pages, the page menu, the rename dialog.
 #[derive(Debug, Default)]
 pub struct Outline {
     pub only_marked: bool,
@@ -75,8 +120,6 @@ pub struct Outline {
     pub asked: Option<String>,
     /// Renaming a page or group: (node, the name typed).
     pub renaming: Option<(String, String)>,
-    /// A page or group was deleted: "Rückgängig" in the status bar.
-    pub undo: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +134,11 @@ pub enum Msg {
     RenameDone,
     CloseRename,
     Mark(String, bool),
+    /// The page opens beside (in the other pane when there are two).
+    Beside(String),
+    /// A page (sheet, its name) dragged out of the outline: dropped on the other pane or the
+    /// right of the window, it opens there.
+    Drag(String, String, widgets::Drag),
     /// The first click asks, the second deletes (undoable).
     Delete(String),
     Undo,
@@ -107,12 +155,13 @@ fn om(m: Msg) -> Message {
     Message::Outline(m)
 }
 
-pub fn view<'a>(app: &'a App, o: &'a Open, current: u32) -> Element<'a, Message> {
-    let search = &app.search;
+/// A pane's outline (`ids`: whether it is the active pane's, see [`Ids`]).
+pub fn view<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Element<'a, Message> {
+    let search = &o.search;
     let pictures = app.settings.outline_pictures;
     let view_pick = |glyph: &'static [u8], on: bool, id: &'static str| {
         container(button(shelf::icon(glyph, 14.0, if on { theme::p().chrome } else { theme::p().muted })).padding([4, 7]).on_press(om(Msg::Pictures(id == "pictures"))).style(theme::tab(on)))
-            .id(iced::widget::Id::new(id))
+            .id(ids.named(id))
     };
     let n = o.pages.total_pages;
     let head = row![
@@ -126,15 +175,15 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32) -> Element<'a, Message>
     .align_y(Alignment::Center);
     let mut body = column![
         container(head).padding(Padding { top: 10.0, right: 10.0, bottom: 2.0, left: 18.0 }),
-        container(field(&search.query)).padding(Padding { top: 6.0, right: 10.0, bottom: 2.0, left: 10.0 }),
+        container(field(&search.query, ids)).padding(Padding { top: 6.0, right: 10.0, bottom: 2.0, left: 10.0 }),
     ];
     let pad = Padding { top: 6.0, right: 8.0, bottom: 10.0, left: 8.0 };
     if search.active() {
-        body = body.push(scrollable(results(search).padding(pad)).id(list_id()).style(theme::scroll_dark).height(Length::Fill));
+        body = body.push(scrollable(results(search, ids).padding(pad)).id(ids.list()).style(theme::scroll_dark).height(Length::Fill));
         return container(body).width(WIDTH).height(Length::Fill).style(theme::surface).into();
     }
     let marked: Vec<&String> = o.marked.iter().filter(|m| o.pages.pages.iter().any(|p| p.placed.node == **m)).collect();
-    let only = app.outline.only_marked && !o.marked.is_empty();
+    let only = o.outline.only_marked && !o.marked.is_empty();
     if !o.marked.is_empty() {
         let pick = |label: String, on: bool, m: Msg| button(theme::btn_small(&label)).padding([4, 10]).on_press(om(m)).style(theme::tab(on));
         body = body.push(
@@ -143,22 +192,22 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32) -> Element<'a, Message>
         );
     }
     let list = if only {
-        marked_pages(o, &app.headings, &marked, current)
+        marked_pages(o, &app.headings, &marked, current, ids)
     } else if pictures {
-        pictures_view(o, &app.headings, current)
+        pictures_view(o, &app.headings, current, ids)
     } else {
-        outline(app, o, current)
+        outline(app, o, current, ids)
     };
-    body = body.push(scrollable(list.padding(pad)).id(list_id()).style(theme::scroll_dark).height(Length::Fill));
-    if !app.read_only() {
-        body = body.push(footer(o));
+    body = body.push(scrollable(list.padding(pad)).id(ids.list()).style(theme::scroll_dark).height(Length::Fill));
+    if !app.read_only_nb(&o.id) {
+        body = body.push(footer(o, ids));
     }
     container(body).width(WIDTH).height(Length::Fill).style(theme::surface).into()
 }
 
 /// "+ Seite", "+ Gruppe", and every group folded or open.
-fn footer(o: &Open) -> Element<'_, Message> {
-    let small = |label: &str, m: Msg, id: &'static str| container(button(theme::btn_small(label)).padding([4, 9]).on_press(om(m)).style(theme::ghost)).id(iced::widget::Id::new(id));
+fn footer(o: &Open, ids: Ids) -> Element<'_, Message> {
+    let small = |label: &str, m: Msg, id: &'static str| container(button(theme::btn_small(label)).padding([4, 9]).on_press(om(m)).style(theme::ghost)).id(ids.named(id));
     let mut r = row![small("+ Seite", Msg::AddPage, "add-page"), small("+ Gruppe", Msg::AddGroup, "add-group"), Space::new().width(Length::Fill)].spacing(4).align_y(Alignment::Center);
     let groups: Vec<bool> = o.rows.iter().filter_map(|r| if let OutlineRow::Group { collapsed, .. } = r { Some(*collapsed) } else { None }).collect();
     if !groups.is_empty() {
@@ -199,9 +248,9 @@ fn name_of(o: &Open, headings: &HashMap<String, Vec<Heading>>, title: &str, shee
 }
 
 /// The search field: a loupe, the query, × to empty it (Escape does too).
-fn field(query: &str) -> Element<'_, Message> {
+fn field(query: &str, ids: Ids) -> Element<'_, Message> {
     let input = text_input("Suchen …", query)
-        .id(input_id())
+        .id(ids.input())
         .on_input(Message::SearchQuery)
         .on_submit(Message::SearchSubmit)
         .padding(Padding { top: 7.0, bottom: 7.0, left: 30.0, right: 28.0 })
@@ -220,12 +269,20 @@ fn field(query: &str) -> Element<'_, Message> {
 }
 
 /// A page or group row with its right-click menu.
-fn with_menu<'a>(content: impl Into<Element<'a, Message>>, node: &str) -> Element<'a, Message> {
+fn with_menu<'a>(content: impl Into<Element<'a, Message>>, node: &str, ids: Ids) -> Element<'a, Message> {
     let n = node.to_string();
-    container(widgets::pointer(content).on_right(move |at| om(Msg::Menu(n.clone(), at)))).id(page_id(node)).into()
+    container(widgets::pointer(content).on_right(move |at| om(Msg::Menu(n.clone(), at)))).id(ids.page(node)).into()
 }
 
-fn outline<'a>(app: &'a App, o: &'a Open, current: u32) -> Column<'a, Message> {
+/// A page's row or picture: its right-click menu, and dragged onto the other pane (or the right
+/// of the window) it opens there.
+fn page_row<'a>(content: impl Into<Element<'a, Message>>, node: &str, sheet: &str, name: &str, ids: Ids) -> Element<'a, Message> {
+    let (n, sheet, name) = (node.to_string(), sheet.to_string(), name.to_string());
+    let menu = n.clone();
+    container(widgets::pointer(content).on_right(move |at| om(Msg::Menu(menu.clone(), at))).on_drag(move |d| om(Msg::Drag(sheet.clone(), name.clone(), d)))).id(ids.page(&n)).into()
+}
+
+fn outline<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Column<'a, Message> {
     let (rows, pages, headings) = (&o.rows, &o.pages, &app.headings);
     let numbers: HashMap<&str, u32> = pages.pages.iter().filter(|p| p.placed.side == 0).map(|p| (p.placed.node.as_str(), p.placed.number)).collect();
     let marked: HashSet<&str> = o.marked.iter().map(String::as_str).collect();
@@ -245,7 +302,7 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32) -> Column<'a, Message> {
                     .padding(Padding { top: 7.0, bottom: 7.0, left: 10.0 + *depth as f32 * 14.0, right: 10.0 })
                     .width(Length::Fill)
                     .style(theme::row(false));
-                list = list.push(with_menu(b, node));
+                list = list.push(with_menu(b, node, ids));
             }
             OutlineRow::Sheet { node, depth, sheet_id, title, spec, left, right } => {
                 let n = numbers.get(node.as_str()).copied().unwrap_or(0);
@@ -280,7 +337,7 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32) -> Column<'a, Message> {
                     .padding(Padding { top: 4.0, bottom: 4.0, left: indent, right: 10.0 })
                     .width(Length::Fill)
                     .style(theme::row(n == current));
-                list = list.push(with_menu(b, node));
+                list = list.push(page_row(b, node, sheet_id, &name, ids));
                 // The page's headings, under its name: a click shows the heading on the page.
                 for (_, h) in heads.iter().enumerate().filter(|(i, _)| Some(*i) != named_by) {
                     let label = if h.text.trim().is_empty() { "Überschrift" } else { h.text.trim() };
@@ -297,7 +354,7 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32) -> Column<'a, Message> {
                                 .width(Length::Fill)
                                 .style(theme::row(false)),
                         )
-                        .id(heading_id(&h.id)),
+                        .id(ids.heading(&h.id)),
                     );
                 }
             }
@@ -308,7 +365,7 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32) -> Column<'a, Message> {
 
 /// The outline as page pictures, two to a row, "01 Name" under each; groups as headings
 /// across that fold; the page in view outlined in the accent, marked ones with a ribbon.
-fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, current: u32) -> Column<'a, Message> {
+fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, current: u32, ids: Ids) -> Column<'a, Message> {
     let marked: HashSet<&str> = o.marked.iter().map(String::as_str).collect();
     let mut list = column![].spacing(12);
     let mut pair: Vec<Element<'a, Message>> = Vec::new();
@@ -330,7 +387,7 @@ fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, curr
                 ]
                 .align_y(Alignment::Center);
                 let b = button(content).on_press(Message::Fold(node.clone())).padding(Padding { top: 6.0, bottom: 4.0, left: 4.0 + *depth as f32 * 12.0, right: 6.0 }).width(Length::Fill).style(theme::row(false));
-                list = list.push(with_menu(b, node));
+                list = list.push(with_menu(b, node, ids));
             }
             OutlineRow::Sheet { node, sheet_id, title, spec, .. } => {
                 let Some(i) = o.pages.page_of_sheet(sheet_id) else { continue };
@@ -347,7 +404,7 @@ fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, curr
                 .spacing(6)
                 .align_y(Alignment::Center);
                 let b = button(column![picture, label].spacing(5)).on_press(Message::Jump(sheet_id.clone())).padding(3).style(theme::row(false));
-                pair.push(with_menu(b, node));
+                pair.push(page_row(b, node, sheet_id, &name, ids));
                 if pair.len() == 2 {
                     list = flush(list, &mut pair);
                 }
@@ -359,7 +416,7 @@ fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, curr
 
 /// The marked pages wherever they are (in folded groups they don't show): picture, number,
 /// name, a ribbon that unmarks; a click shows the page.
-fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marked: &[&'a String], current: u32) -> Column<'a, Message> {
+fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marked: &[&'a String], current: u32, ids: Ids) -> Column<'a, Message> {
     let mut list = column![].spacing(2);
     if marked.is_empty() {
         return list.push(container(text("Die gemerkten Seiten liegen in zugeklappten Gruppen.").size(12).color(theme::p().muted)).padding([8, 10]));
@@ -388,18 +445,17 @@ fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marke
         .spacing(10)
         .align_y(Alignment::Center);
         let b = button(content).on_press(Message::Jump(p.sheet_id.clone())).padding([5, 8]).width(Length::Fill).style(theme::row(on));
-        list = list.push(with_menu(b, node));
+        list = list.push(page_row(b, node, &p.sheet_id, &name, ids));
     }
     list
 }
 
-/// The notebook under its page menu and the rename dialog (always these layers, so the page
-/// view keeps its state when one shows).
+/// The notebook under a pane's page menu and rename dialog (always these layers, so the page
+/// view keeps its state when one shows). Their messages go to that pane.
 pub fn layers<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Message> {
-    let Screen::Notebook(o) = &app.screen else { return base };
-    let s = &app.outline;
-    let dialog: Element<'a, Message> = match &s.renaming {
-        Some((node, value)) => {
+    let Screen::Notebook(s) = &app.screen else { return base };
+    let dialog: Element<'a, Message> = match s.panes.iter().find_map(|o| o.outline.renaming.as_ref().map(|r| (o, r))) {
+        Some((o, (node, value))) => {
             let group = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if n == node));
             let input = widgets::on_escape(
                 text_input(if group { "Name der Gruppe" } else { "Name der Seite" }, value).id(rename_id()).on_input(|t| om(Msg::RenameText(t))).on_submit(om(Msg::RenameDone)).padding(10).size(15).style(theme::field),
@@ -412,20 +468,24 @@ pub fn layers<'a>(app: &'a App, base: Element<'a, Message>) -> Element<'a, Messa
             ]
             .spacing(8);
             let sub = if group { String::new() } else { "Leer: die erste Überschrift benennt sie".into() };
-            shelf::dialog_layer(shelf::frame(if group { "Gruppe umbenennen" } else { "Seite umbenennen" }, sub, input.into(), foot.into(), 420.0), om(Msg::CloseRename))
+            let key = o.key;
+            shelf::dialog_layer(shelf::frame(if group { "Gruppe umbenennen" } else { "Seite umbenennen" }, sub, input.into(), foot.into(), 420.0), om(Msg::CloseRename)).map(move |m| split::route(key, m))
         }
         None => Space::new().into(),
     };
-    let menu: Element<'a, Message> = match &s.menu {
-        Some((node, at)) => shelf::float_menu(*at, move || menu_rows(app, o, node), om(Msg::CloseMenu)),
+    let menu: Element<'a, Message> = match s.panes.iter().find_map(|o| o.outline.menu.as_ref().map(|m| (o, m))) {
+        Some((o, (node, at))) => {
+            let key = o.key;
+            shelf::float_menu(*at, move || menu_rows(o, node), om(Msg::CloseMenu)).map(move |m| split::route(key, m))
+        }
         None => Space::new().into(),
     };
     stack![base, dialog, menu].into()
 }
 
-/// A page's menu: rename, mark, delete; a group's: rename, fold, delete.
-fn menu_rows(app: &App, o: &Open, node: &str) -> Vec<MenuRow> {
-    let asked = app.outline.asked.as_deref() == Some(node);
+/// A page's menu: rename, mark, open beside, delete; a group's: rename, fold, delete.
+fn menu_rows(o: &Open, node: &str) -> Vec<MenuRow> {
+    let asked = o.outline.asked.as_deref() == Some(node);
     let delete = MenuRow { id: menu_id("delete"), glyph: shelf::TRASH, label: if asked { "Wirklich löschen?" } else { "Löschen" }, danger: true, on: om(Msg::Delete(node.to_string())) };
     let rename = MenuRow { id: menu_id("rename"), glyph: shelf::PEN, label: "Umbenennen", danger: false, on: om(Msg::Rename(node.to_string())) };
     match o.rows.iter().find_map(|r| if let OutlineRow::Group { node: n, collapsed, .. } = r { (n == node).then_some(*collapsed) } else { None }) {
@@ -445,16 +505,18 @@ fn menu_rows(app: &App, o: &Open, node: &str) -> Vec<MenuRow> {
             vec![
                 rename,
                 MenuRow { id: menu_id("mark"), glyph: shelf::RIBBON, label: if marked { "Nicht mehr merken" } else { "Merken" }, danger: false, on: om(Msg::Mark(node.to_string(), !marked)) },
+                MenuRow { id: menu_id("beside"), glyph: split::SPLIT, label: "Daneben öffnen", danger: false, on: om(Msg::Beside(node.to_string())) },
                 delete,
             ]
         }
     }
 }
 
-/// Brings the page in view into view in the outline too (opening, switching list and
-/// pictures): its row about a third down the list.
+/// Brings the page in view into view in the active pane's outline too (opening, switching list
+/// and pictures): its row about a third down the list.
 pub fn reveal_current(app: &App) -> Task<Message> {
-    let Screen::Notebook(o) = &app.screen else { return Task::none() };
+    let Screen::Notebook(s) = &app.screen else { return Task::none() };
+    let o = s.active_pane();
     let current = o.pages.current_number(&o.camera);
     let Some(i) = o.pages.index_of_number(current) else { return Task::none() };
     iced::advanced::widget::operate(Reveal { list: list_id(), target: page_id(&o.pages.pages[i].placed.node), scroll: None, found: None })
@@ -497,6 +559,11 @@ impl<T: 'static> iced::advanced::widget::Operation<T> for Reveal {
 // --- what the outline does -------------------------------------------------------------------
 
 impl App {
+    /// The outline of the pane messages are for.
+    fn outline_mut(&mut self) -> Option<&mut Outline> {
+        self.pane_mut().map(|o| &mut o.outline)
+    }
+
     pub(crate) fn on_outline(&mut self, m: Msg) -> Task<Message> {
         match m {
             Msg::Pictures(on) => {
@@ -507,24 +574,29 @@ impl App {
                 return reveal_current(self);
             }
             Msg::OnlyMarked(on) => {
-                self.outline.only_marked = on;
+                if let Some(s) = self.outline_mut() {
+                    s.only_marked = on;
+                }
                 if !on {
                     return reveal_current(self);
                 }
             }
             Msg::Menu(node, at) => {
-                if !self.read_only() {
-                    self.outline.menu = Some((node, at));
-                    self.outline.asked = None;
+                let read_only = self.read_only();
+                if let Some(s) = self.outline_mut().filter(|_| !read_only) {
+                    s.menu = Some((node, at));
+                    s.asked = None;
                 }
             }
             Msg::CloseMenu => {
-                self.outline.menu = None;
-                self.outline.asked = None;
+                if let Some(s) = self.outline_mut() {
+                    s.menu = None;
+                    s.asked = None;
+                }
             }
             Msg::Rename(node) => {
-                self.outline.menu = None;
-                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let Some(o) = self.pane_mut() else { return Task::none() };
+                o.outline.menu = None;
                 let title = o
                     .rows
                     .iter()
@@ -533,62 +605,83 @@ impl App {
                         _ => None,
                     })
                     .unwrap_or_default();
-                self.outline.renaming = Some((node, title));
+                o.outline.renaming = Some((node, title));
                 return iced::widget::operation::focus(rename_id()).chain(iced::widget::operation::select_all(rename_id()));
             }
             Msg::RenameText(t) => {
-                if let Some((_, v)) = &mut self.outline.renaming {
+                if let Some((_, v)) = self.outline_mut().and_then(|s| s.renaming.as_mut()) {
                     *v = t;
                 }
             }
             Msg::RenameDone => {
-                if let Some((node, v)) = self.outline.renaming.take() {
+                if let Some((node, v)) = self.outline_mut().and_then(|s| s.renaming.take()) {
                     self.edit_notebook(|nb| nb.set_title_of(&node, v.trim()));
                 }
             }
-            Msg::CloseRename => self.outline.renaming = None,
-            Msg::Mark(node, on) => {
-                self.outline.menu = None;
-                self.edit_notebook(|nb| nb.set_marked(&node, on));
-                if let Screen::Notebook(o) = &self.screen
-                    && o.marked.is_empty()
-                {
-                    self.outline.only_marked = false;
+            Msg::CloseRename => {
+                if let Some(s) = self.outline_mut() {
+                    s.renaming = None;
                 }
             }
+            Msg::Mark(node, on) => {
+                if let Some(s) = self.outline_mut() {
+                    s.menu = None;
+                }
+                self.edit_notebook(|nb| nb.set_marked(&node, on));
+                if let Some(o) = self.pane_mut()
+                    && o.marked.is_empty()
+                {
+                    o.outline.only_marked = false;
+                }
+            }
+            Msg::Drag(sheet, name, d) => return self.drag_page(sheet, name, d),
+            Msg::Beside(node) => {
+                let Some(o) = self.pane_mut() else { return Task::none() };
+                o.outline.menu = None;
+                let sheet = o.pages.pages.iter().find(|p| p.placed.node == node).map(|p| p.placed.sheet_id.clone());
+                let id = o.id.clone();
+                return self.open_beside(&id, sheet);
+            }
             Msg::Delete(node) => {
-                if self.outline.asked.as_deref() != Some(node.as_str()) {
-                    self.outline.asked = Some(node);
+                let Some(o) = self.pane_mut() else { return Task::none() };
+                if o.outline.asked.as_deref() != Some(node.as_str()) {
+                    o.outline.asked = Some(node);
                     return Task::none();
                 }
-                self.outline.menu = None;
-                self.outline.asked = None;
-                let group = matches!(&self.screen, Screen::Notebook(o) if o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if *n == node)));
+                o.outline.menu = None;
+                o.outline.asked = None;
+                let group = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if *n == node));
+                let on_it = o.text_page.as_ref().is_some_and(|t| o.rows.iter().any(|r| matches!(r, OutlineRow::Sheet { node: n, sheet_id, .. } if *n == node && *sheet_id == t.sheet_id)));
+                let id = o.id.clone();
                 self.finish_text();
-                if group || self.text_page.as_ref().is_some_and(|t| matches!(&self.screen, Screen::Notebook(o) if o.rows.iter().any(|r| matches!(r, OutlineRow::Sheet { node: n, sheet_id, .. } if *n == node && *sheet_id == t.sheet_id)))) {
+                if group || on_it {
                     self.close_text_page();
                 }
                 self.edit_notebook(|nb| nb.delete_undoable(&node));
-                self.outline.undo = true;
+                // One history per notebook: "Rückgängig" undoes it whichever pane shows it.
+                self.undo_delete = Some(id);
                 self.say(if group { "Gruppe gelöscht" } else { "Seite gelöscht" });
             }
             Msg::Undo => {
-                self.outline.undo = false;
-                self.edit_notebook(|nb| nb.undo_delete().map(|_| ()));
+                let Some(nb) = self.undo_delete.take() else { return Task::none() };
+                let Some(key) = self.pane_showing(&nb) else { return Task::none() };
+                self.in_pane(key, |app| app.edit_notebook(|nb| nb.undo_delete().map(|_| ())));
                 self.say("Wiederhergestellt");
             }
             Msg::Fold(node, fold) => {
-                self.outline.menu = None;
+                if let Some(s) = self.outline_mut() {
+                    s.menu = None;
+                }
                 self.edit_notebook(|nb| nb.set_collapsed(&node, fold));
             }
             Msg::FoldAll(fold) => {
-                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let Some(o) = self.pane() else { return Task::none() };
                 let groups: Vec<String> = o.rows.iter().filter_map(|r| if let OutlineRow::Group { node, collapsed, .. } = r { (*collapsed != fold).then(|| node.clone()) } else { None }).collect();
                 self.edit_notebook(|nb| groups.iter().try_for_each(|g| nb.set_collapsed(g, fold)));
             }
             Msg::AddPage => return self.add_page(),
             Msg::AddGroup => {
-                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let Some(o) = self.pane() else { return Task::none() };
                 let current = o.pages.current_number(&o.camera);
                 let after = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone());
                 let (parent, index) = pdf::position_after(&o.nb, after.as_deref());
@@ -597,8 +690,10 @@ impl App {
                     made = Some(nb.add_group(parent.as_deref(), index, "Neue Gruppe")?);
                     Ok(())
                 });
-                if let Some(node) = made {
-                    self.outline.renaming = Some((node, "Neue Gruppe".into()));
+                if let Some(node) = made
+                    && let Some(s) = self.outline_mut()
+                {
+                    s.renaming = Some((node, "Neue Gruppe".into()));
                     return iced::widget::operation::focus(rename_id()).chain(iced::widget::operation::select_all(rename_id()));
                 }
             }
@@ -609,7 +704,7 @@ impl App {
     /// A page after the one in view, with its paper and size (after a PDF page, a board or a
     /// text page: the paper of new notebooks), then shown.
     fn add_page(&mut self) -> Task<Message> {
-        let Screen::Notebook(o) = &self.screen else { return Task::none() };
+        let Some(o) = self.pane() else { return Task::none() };
         let current = o.pages.current_number(&o.camera);
         let at = o.pages.index_of_number(current).map(|i| &o.pages.pages[i].placed);
         let spec = match at.map(|p| &p.spec) {
@@ -622,7 +717,7 @@ impl App {
             made = Some(nb.add_sheet(parent.as_deref(), index, &spec)?.1);
             Ok(())
         });
-        if let (Some(sheet), Screen::Notebook(o)) = (made, &mut self.screen)
+        if let (Some(sheet), Some(o)) = (made, self.pane_mut())
             && let Some(i) = o.pages.page_of_sheet(&sheet)
         {
             o.camera = o.pages.camera_for(i, &o.camera);
@@ -633,7 +728,7 @@ impl App {
 
 /// What the search found: page by page in outline order (number and name), each hit with its
 /// kind and its text, the query's words marked.
-fn results(s: &Search) -> Column<'_, Message> {
+fn results(s: &Search, ids: Ids) -> Column<'_, Message> {
     let mut list = column![].spacing(1);
     let count: usize = s.found.as_ref().map(|(_, pages)| pages.iter().map(|p| p.hits.len()).sum()).unwrap_or(0);
     let head: Element<'_, Message> = match &s.found {
@@ -685,7 +780,7 @@ fn results(s: &Search) -> Column<'_, Message> {
                         .width(Length::Fill)
                         .style(theme::row(false)),
                 )
-                .id(hit_id(n)),
+                .id(ids.hit(n)),
             );
             n += 1;
         }

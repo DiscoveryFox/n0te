@@ -1,6 +1,7 @@
 //! Small custom widgets: a drag grip (move / resize text boxes), Escape on a text field, room
 //! left below a part of a column (a dialog's buttons under a scrolling body), the pointer on a
-//! library card (right click, drag, drop) and the layer that closes a menu.
+//! library card (right click, drag, drop), the layer that closes a menu, and the split's parts:
+//! a pane that notices it is used, the divider between two panes.
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self, Renderer as _};
@@ -404,6 +405,167 @@ impl<Message: Clone> Widget<Message, Theme, iced::Renderer> for Dismiss<Message>
 
 impl<'a, Message: Clone + 'a> From<Dismiss<Message>> for Element<'a, Message> {
     fn from(w: Dismiss<Message>) -> Self {
+        Element::new(w)
+    }
+}
+
+/// A pane of the split: a press or a scroll in it reports `on_touch` before its content gets the
+/// event (and lets the content have it too), so the pane used last becomes the active one.
+pub struct Touched<'a, Message> {
+    content: Element<'a, Message>,
+    on_touch: Message,
+}
+
+pub fn touched<'a, Message>(content: impl Into<Element<'a, Message>>, on_touch: Message) -> Touched<'a, Message> {
+    Touched { content: content.into(), on_touch }
+}
+
+impl<'a, Message: Clone> Widget<Message, Theme, iced::Renderer> for Touched<'a, Message> {
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+    fn layout(&mut self, tree: &mut Tree, renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &iced::Renderer, operation: &mut dyn Operation) {
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+    fn update(&mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor, renderer: &iced::Renderer, clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, viewport: &Rectangle) {
+        let touch = matches!(event, Event::Mouse(mouse::Event::ButtonPressed(_) | mouse::Event::WheelScrolled { .. }));
+        if touch && !shell.is_event_captured() && cursor.is_over(layout.bounds()) {
+            shell.publish(self.on_touch.clone());
+        }
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
+    }
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle, renderer: &iced::Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+    }
+    fn draw(&self, tree: &Tree, renderer: &mut iced::Renderer, theme: &Theme, style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, viewport: &Rectangle) {
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+    }
+    fn overlay<'b>(&'b mut self, tree: &'b mut Tree, layout: Layout<'b>, renderer: &iced::Renderer, viewport: &Rectangle, translation: Vector) -> Option<overlay::Element<'b, Message, Theme, iced::Renderer>> {
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: Clone + 'a> From<Touched<'a, Message>> for Element<'a, Message> {
+    fn from(w: Touched<'a, Message>) -> Self {
+        Element::new(w)
+    }
+}
+
+/// The split's divider, laid over the whole room: the strip at the cut (`at`, a share of the
+/// room) is dragged, reported as the share under the pointer, and let go there. Elsewhere the
+/// pointer goes through to the panes.
+pub struct Divider<'a, Message> {
+    /// Side by side: the strip stands upright.
+    across: bool,
+    at: f32,
+    on_drag: Box<dyn Fn(f32) -> Message + 'a>,
+    on_release: Box<dyn Fn(f32) -> Message + 'a>,
+}
+
+pub fn divider<'a, Message>(across: bool, at: f32, on_drag: impl Fn(f32) -> Message + 'a, on_release: impl Fn(f32) -> Message + 'a) -> Divider<'a, Message> {
+    Divider { across, at, on_drag: Box::new(on_drag), on_release: Box::new(on_release) }
+}
+
+#[derive(Default)]
+struct DividerState {
+    /// Held: the share it was dragged to last.
+    held: Option<f32>,
+}
+
+/// How far either side of the cut the pointer grabs the divider (px).
+const GRAB: f32 = 7.0;
+
+impl<Message> Divider<'_, Message> {
+    /// Where the cut is (window px, along the room's long side).
+    fn cut(&self, b: Rectangle) -> f32 {
+        if self.across { b.x + (b.width * self.at).floor() } else { b.y + (b.height * self.at).floor() }
+    }
+    fn over(&self, b: Rectangle, p: Point) -> bool {
+        let cut = self.cut(b);
+        b.contains(p) && (if self.across { p.x } else { p.y } - cut).abs() <= GRAB
+    }
+    fn share(&self, b: Rectangle, p: Point) -> f32 {
+        let s = if self.across { (p.x - b.x) / b.width } else { (p.y - b.y) / b.height };
+        s.clamp(0.0, 1.0)
+    }
+}
+
+impl<'a, Message> Widget<Message, Theme, iced::Renderer> for Divider<'a, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<DividerState>()
+    }
+    fn state(&self) -> tree::State {
+        tree::State::new(DividerState::default())
+    }
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fill, Length::Fill)
+    }
+    fn layout(&mut self, _tree: &mut Tree, _renderer: &iced::Renderer, limits: &layout::Limits) -> layout::Node {
+        layout::Node::new(limits.max())
+    }
+    fn update(&mut self, tree: &mut Tree, event: &Event, layout: Layout<'_>, cursor: mouse::Cursor, _renderer: &iced::Renderer, _clipboard: &mut dyn Clipboard, shell: &mut Shell<'_, Message>, _viewport: &Rectangle) {
+        let b = layout.bounds();
+        let state = tree.state.downcast_mut::<DividerState>();
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                if let Some(p) = cursor.position_over(b).filter(|p| self.over(b, *p)) {
+                    state.held = Some(self.share(b, p));
+                    shell.capture_event();
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { position }) if state.held.is_some() => {
+                let s = self.share(b, *position);
+                state.held = Some(s);
+                shell.publish((self.on_drag)(s));
+                shell.capture_event();
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                if let Some(s) = state.held.take() {
+                    shell.publish((self.on_release)(s));
+                    shell.capture_event();
+                }
+            }
+            _ => {}
+        }
+    }
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: mouse::Cursor, _viewport: &Rectangle, _renderer: &iced::Renderer) -> mouse::Interaction {
+        let held = tree.state.downcast_ref::<DividerState>().held.is_some();
+        if held || cursor.position_over(layout.bounds()).is_some_and(|p| self.over(layout.bounds(), p)) {
+            if self.across { mouse::Interaction::ResizingHorizontally } else { mouse::Interaction::ResizingVertically }
+        } else {
+            mouse::Interaction::None
+        }
+    }
+    fn draw(&self, tree: &Tree, renderer: &mut iced::Renderer, _theme: &Theme, _style: &renderer::Style, layout: Layout<'_>, cursor: mouse::Cursor, _viewport: &Rectangle) {
+        let b = layout.bounds();
+        let cut = self.cut(b);
+        let hot = tree.state.downcast_ref::<DividerState>().held.is_some() || cursor.position_over(b).is_some_and(|p| self.over(b, p));
+        let gap = crate::split::GAP;
+        // The gap between the panes, and a short handle in its middle.
+        let (strip, handle) = if self.across {
+            (Rectangle::new(Point::new(cut - gap / 2.0, b.y), Size::new(gap, b.height)), Rectangle::new(Point::new(cut - 2.0, b.y + b.height / 2.0 - 24.0), Size::new(4.0, 48.0)))
+        } else {
+            (Rectangle::new(Point::new(b.x, cut - gap / 2.0), Size::new(b.width, gap)), Rectangle::new(Point::new(b.x + b.width / 2.0 - 24.0, cut - 2.0), Size::new(48.0, 4.0)))
+        };
+        renderer.fill_quad(renderer::Quad { bounds: strip, ..Default::default() }, theme::p().chrome);
+        renderer.fill_quad(
+            renderer::Quad { bounds: handle, border: Border { radius: 2.0.into(), ..Default::default() }, ..Default::default() },
+            if hot { theme::p().accent } else { theme::p().muted },
+        );
+    }
+}
+
+impl<'a, Message: 'a> From<Divider<'a, Message>> for Element<'a, Message> {
+    fn from(w: Divider<'a, Message>) -> Self {
         Element::new(w)
     }
 }

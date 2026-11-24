@@ -1,5 +1,5 @@
 //! Laptop settings: theme and page gaps, how the library and the outline look, folders made
-//! here that are still empty, when notebooks were opened — in
+//! here that are still empty, when notebooks were opened, hints already shown — in
 //! $XDG_CONFIG_HOME/n0te/laptop.conf (key=value).
 
 use std::path::PathBuf;
@@ -32,6 +32,8 @@ pub struct Settings {
     pub lib_opened: Vec<(String, u64)>,
     /// The outline as page pictures (else the list).
     pub outline_pictures: bool,
+    /// The hint on how two notebooks side by side work was shown once.
+    pub split_seen: bool,
 }
 
 /// How many open times the settings keep.
@@ -65,6 +67,7 @@ impl Default for Settings {
             lib_folders: Vec::new(),
             lib_opened: Vec::new(),
             outline_pictures: false,
+            split_seen: false,
         }
     }
 }
@@ -103,6 +106,7 @@ impl Settings {
                     s.lib_opened.truncate(OPENED_KEPT);
                 }
                 "outline_view" => s.outline_pictures = v == "pictures",
+                "split_seen" => s.split_seen = v == "1",
                 _ => {}
             }
         }
@@ -135,7 +139,7 @@ impl Settings {
         let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
         let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -150,6 +154,7 @@ impl Settings {
             folders.join(&FOLDER_SEP.to_string()),
             opened.join(";"),
             if self.outline_pictures { "pictures" } else { "list" },
+            if self.split_seen { 1 } else { 0 },
         )
     }
 
@@ -181,7 +186,7 @@ mod tests {
 
     #[test]
     fn the_library_view_empty_folders_and_open_times_survive_a_save() {
-        let mut s = Settings { lib_list: true, outline_pictures: true, lib_folders: vec!["Uni".into(), "Uni/WS26 = Winter".into()], ..Settings::default() };
+        let mut s = Settings { lib_list: true, outline_pictures: true, split_seen: true, lib_folders: vec!["Uni".into(), "Uni/WS26 = Winter".into()], ..Settings::default() };
         s.opened_now("a", 10);
         s.opened_now("b", 30);
         s.opened_now("a", 50);

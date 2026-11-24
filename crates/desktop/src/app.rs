@@ -24,6 +24,7 @@ use crate::live::{self, LiveEvent};
 use crate::palette::{self, Command};
 use crate::search::{self, Search};
 use crate::settings::Settings;
+use crate::split::{self, PaneKey, Split};
 use crate::{library, sidebar, theme};
 
 /// A notebook in the library list.
@@ -206,10 +207,18 @@ pub enum Message {
     Shelf(crate::shelf::Msg),
     /// The outline: list or pictures, marked pages, the page menu, new pages and groups.
     Outline(sidebar::Msg),
+    /// Two notebooks side by side: a message for one pane (from its view, or from a task it
+    /// started); a press or a scroll in a pane makes it the active one; the split's controls.
+    Pane(PaneKey, Box<Message>),
+    Activate(PaneKey),
+    Split(split::Msg),
 }
 
-/// The text box being edited: its sheet stays open while typing.
+/// The text box being edited: its sheet stays open while typing. Only in the active pane (the
+/// keyboard goes with it).
 pub struct Editing {
+    pub pane: PaneKey,
+    pub notebook: String,
     pub sheet_id: String,
     pub box_id: String,
     pub sheet: Sheet,
@@ -272,19 +281,49 @@ pub enum ExportWhat {
     Picked,
 }
 
+/// A notebook on screen: alone, or one of two side by side (a pane, see [`split`]). Two panes
+/// showing the same notebook share its document (`nb`): an edit in one shows in the other at
+/// once, and the notebook's undo is one. The view of it is the pane's own.
 pub struct Open {
+    /// Names this pane while it is open.
+    pub key: PaneKey,
     pub id: String,
-    pub nb: Notebook,
+    pub nb: Rc<Notebook>,
     pub rows: Vec<OutlineRow>,
     /// The pages marked to find again (main and side pages, outline order).
     pub marked: Vec<String>,
     pub pages: Pages,
     pub camera: Camera,
+    /// The outline column shows.
+    pub sidebar: bool,
+    /// The outline's search field and what it found in this notebook.
+    pub search: Search,
+    /// The outline's own state: only the marked pages, its page menu, renaming.
+    pub outline: sidebar::Outline,
+    /// The text page being edited here (full page, or docked as the notes column).
+    pub text_page: Option<TextPage>,
+    /// A page to show once the view knows its size (opened beside at a page).
+    pub start: Option<String>,
 }
 
 pub enum Screen {
     Library,
-    Notebook(Box<Open>),
+    Notebook(Box<Split>),
+}
+
+/// Headings to read (again) in one notebook: every sheet's, these sheets', and the ones not
+/// read yet.
+#[derive(Debug, Default)]
+struct Due {
+    all: bool,
+    sheets: HashSet<String>,
+    check: bool,
+}
+
+impl Due {
+    fn is_empty(&self) -> bool {
+        !self.all && !self.check && self.sheets.is_empty()
+    }
 }
 
 pub struct App {
@@ -302,7 +341,6 @@ pub struct App {
     /// Where exported PDFs go (~/Downloads).
     pub export_dir: PathBuf,
     pub editing: Option<Editing>,
-    pub text_page: Option<TextPage>,
     pub settings: Settings,
     /// Only the real app writes the settings file (tests don't touch ~/.config).
     pub persist_settings: bool,
@@ -330,7 +368,8 @@ pub struct App {
     pub last_views: std::collections::HashMap<String, (String, [f32; 4])>,
     /// The invite whose settings are open in the share panel.
     pub invite_open: Option<String>,
-    presence_at: Option<Instant>,
+    /// When where this laptop looks was last sent, per notebook.
+    presence_at: HashMap<String, Instant>,
     pub pair_code: Option<String>,
     /// Share panel open, with the invites of the open notebook.
     pub share: Option<Vec<live::Invite>>,
@@ -341,8 +380,8 @@ pub struct App {
     pub joining: Option<String>,
     /// History panel open: checkpoints (unix time, "date  size").
     pub history: Option<Vec<(u64, String)>>,
-    /// Change stamp of the open notebook (saves by other processes on this machine).
-    stamp: u64,
+    /// Change stamps of the notebooks on screen (saves by other processes on this machine).
+    stamps: HashMap<String, u64>,
     /// Without a service connection (tests): don't try to connect.
     pub offline: bool,
     pub entries: Vec<Entry>,
@@ -357,30 +396,30 @@ pub struct App {
     pub page_panel: bool,
     /// A size of its own being typed (mm): Some while those fields are open.
     pub size_text: Option<(String, String)>,
-    /// Touchpad: a pinch under way (zoom at its start, the fingers' centre in the view), and the
-    /// page gliding after a swipe (velocity px/s, last frame).
-    pub pinch: Option<(f32, Point)>,
+    /// Touchpad: a pinch under way (its pane, the zoom at its start, the fingers' centre in the
+    /// view), and the page gliding after a swipe (its pane, velocity px/s, last frame).
+    pub pinch: Option<(PaneKey, f32, Point)>,
     /// A size change that would cut content off, waiting for "Trotzdem ändern".
     pub size_warning: Option<SizeWarning>,
-    pub glide: Option<(f32, f32, Instant)>,
+    pub glide: Option<(PaneKey, f32, f32, Instant)>,
     pub show_imports: bool,
+    /// The outline shows in a notebook opened from the library (the last choice).
     pub sidebar: bool,
-    /// The outline's search field and what it found in the open notebook.
-    pub search: Search,
-    /// The open notebook's headings, by main sheet id (top to bottom), read in the background.
+    /// The headings of the notebooks on screen, by sheet id (top to bottom), read in the
+    /// background.
     pub headings: HashMap<String, Vec<Heading>>,
-    /// Headings to read (again): every sheet's, or these sheets'; one read at a time.
-    headings_all: bool,
-    headings_due: HashSet<String>,
-    /// Look for sheets whose headings weren't read yet (new pages).
-    headings_check: bool,
+    /// Headings to read (again), per notebook; one read at a time.
+    headings_due: HashMap<String, Due>,
     headings_reading: bool,
-    /// The "Koordinatensystem" panel, open for one plot.
+    /// The "Koordinatensystem" panel, open for one plot, and the pane it belongs to.
     pub plot_edit: Option<crate::plots::Editor>,
+    pub plot_pane: PaneKey,
     /// How the library is organised and looked at (folder, search, menu, dialog, selection).
     pub shelf: crate::shelf::Shelf,
-    /// The open notebook's outline: marked pages only, its page menu, renaming.
-    pub outline: sidebar::Outline,
+    /// The notebook whose last deleted page or group "Rückgängig" brings back.
+    pub undo_delete: Option<String>,
+    /// The last pane key handed out.
+    last_key: PaneKey,
 }
 
 /// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
@@ -441,7 +480,6 @@ impl App {
             last_export: None,
             export_dir: downloads(),
             editing: None,
-            text_page: None,
             settings,
             persist_settings: false,
             palette: None,
@@ -459,14 +497,14 @@ impl App {
             follow_host: None,
             last_views: std::collections::HashMap::new(),
             invite_open: None,
-            presence_at: None,
+            presence_at: HashMap::new(),
             pair_code: None,
             share: None,
             share_qr: None,
             pair_qr: None,
             joining: None,
             history: None,
-            stamp: 0,
+            stamps: HashMap::new(),
             offline: true,
             entries: Vec::new(),
             bundles: Vec::new(),
@@ -482,15 +520,14 @@ impl App {
             size_warning: None,
             show_imports: false,
             sidebar: true,
-            search: Search::default(),
             headings: HashMap::new(),
-            headings_all: false,
-            headings_due: HashSet::new(),
-            headings_check: false,
+            headings_due: HashMap::new(),
             headings_reading: false,
             plot_edit: None,
+            plot_pane: 0,
             shelf: crate::shelf::Shelf::default(),
-            outline: sidebar::Outline::default(),
+            undo_delete: None,
+            last_key: 0,
         };
         // Folders made here that are still empty (the settings keep them).
         app.shelf.made = app.settings.lib_folders.iter().cloned().collect();
@@ -539,7 +576,7 @@ impl App {
             iced::window::open_events().map(Message::WindowOpened),
             crate::gestures::subscription().map(Message::Gesture),
             // The frame clock: a gliding page, a found spot fading.
-            if self.glide.is_some() || matches!(&self.screen, Screen::Notebook(o) if o.pages.flash.as_ref().is_some_and(|f| !f.done())) {
+            if self.glide.is_some() || matches!(&self.screen, Screen::Notebook(s) if s.panes.iter().any(|o| o.pages.flash.as_ref().is_some_and(|f| !f.done()))) {
                 iced::window::frames().map(Message::Glide)
             } else {
                 Subscription::none()
@@ -564,10 +601,82 @@ impl App {
         self.bundles = find_bundles(&bundle_dirs());
     }
 
+    /// Shows notebook `id`: from the library alone; in a notebook in the pane messages are for
+    /// (the same notebook again keeps its search and outline until read again).
     fn open(&mut self, id: &str) -> Result<(), String> {
-        let nb = self.lib.load_notebook(id).map_err(|e| e.to_string())?;
+        let key = match &self.screen {
+            Screen::Notebook(s) => s.key(),
+            Screen::Library => self.new_key(),
+        };
+        let mut pane = self.make_pane(key, id)?;
+        self.finish_text();
+        self.close_text_page();
+        match &mut self.screen {
+            Screen::Notebook(s) => {
+                let i = s.index(key).unwrap_or(0);
+                let old = &mut s.panes[i];
+                pane.sidebar = old.sidebar;
+                let same = old.id == id;
+                if same {
+                    pane.search = std::mem::take(&mut old.search);
+                    pane.search.stale = true;
+                    pane.outline = std::mem::take(&mut old.outline);
+                }
+                let before = std::mem::replace(&mut s.panes[i], pane).id;
+                if !same {
+                    if self.plot_pane == key {
+                        self.plot_edit = None;
+                    }
+                    self.gone(&before);
+                }
+            }
+            Screen::Library => {
+                pane.sidebar = self.sidebar;
+                self.headings.clear();
+                self.screen = Screen::Notebook(Box::new(Split::new(pane)));
+            }
+        }
+        self.watch(id);
+        Ok(())
+    }
+
+    /// A new pane key.
+    pub(crate) fn new_key(&mut self) -> PaneKey {
+        self.last_key += 1;
+        self.last_key
+    }
+
+    /// A pane showing notebook `id` (its outline on, the first page in view once it has a size),
+    /// sharing the document with a pane that shows it already.
+    pub(crate) fn make_pane(&self, key: PaneKey, id: &str) -> Result<Open, String> {
+        let shared = match &self.screen {
+            Screen::Notebook(s) => s.panes.iter().find(|p| p.id == id).map(|p| p.nb.clone()),
+            Screen::Library => None,
+        };
+        let nb = match shared {
+            Some(nb) => nb,
+            None => Rc::new(self.lib.load_notebook(id).map_err(|e| e.to_string())?),
+        };
         let rows = nb.outline(false);
-        let layout = nl::layout(&rows, &nb.outline(true), self.settings.layout());
+        let pages = self.new_pages(id, nl::layout(&rows, &nb.outline(true), self.settings.layout()));
+        Ok(Open {
+            key,
+            id: id.to_string(),
+            marked: nb.marked(),
+            rows,
+            nb,
+            pages,
+            camera: Camera::default(),
+            sidebar: true,
+            search: Search::default(),
+            outline: sidebar::Outline::default(),
+            text_page: None,
+            start: None,
+        })
+    }
+
+    /// The pages of notebook `id` laid out, read from the library as they come into view.
+    fn new_pages(&self, id: &str, layout: nl::Layout) -> Pages {
         let lib = self.lib.clone();
         let nid = id.to_string();
         let pages = Pages::new(
@@ -586,24 +695,102 @@ impl App {
             self.pdf.clone(),
         );
         pages.show_remote_frame.set(self.settings.remote_frame);
-        self.finish_text();
-        self.close_text_page();
-        // The same notebook again (new design, merged import): its search and headings stay
-        // until read again; another one starts afresh.
-        if self.notebook_id().as_deref() != Some(id) {
-            self.search.clear();
-            self.headings.clear();
-            self.plot_edit = None;
+        pages
+    }
+
+    /// Notebook `id` came on screen: saves elsewhere are watched for, its headings read.
+    pub(crate) fn watch(&mut self, id: &str) {
+        self.stamps.insert(id.to_string(), self.lib.change_stamp(id));
+        self.headings_due.entry(id.to_string()).or_default().all = true;
+    }
+
+    /// Notes that notebook `id` was opened now (the start's "Zuletzt geöffnet", the ⧉ menu).
+    pub(crate) fn opened(&mut self, id: &str) {
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        self.settings.opened_now(id, now);
+        if self.persist_settings {
+            self.settings.save();
         }
-        self.search.stale = true;
-        self.headings_all = true;
-        self.stamp = self.lib.change_stamp(id);
-        if self.notebook_id().as_deref() != Some(id) {
-            self.outline = sidebar::Outline::default();
+    }
+
+    /// Notebook `nb` left the screen (its pane closed or shows another one): who saw where I
+    /// looked in it sees no frame any more.
+    pub(crate) fn gone(&mut self, nb: &str) {
+        if matches!(&self.screen, Screen::Notebook(s) if s.shows(nb)) {
+            return;
         }
-        let marked = nb.marked();
-        self.screen = Screen::Notebook(Box::new(Open { id: id.to_string(), nb, rows, marked, pages, camera: Camera::default() }));
-        Ok(())
+        self.stamps.remove(nb);
+        self.headings_due.remove(nb);
+        self.presence_at.remove(nb);
+        if self.watched(nb)
+            && let Some(sync) = &self.sync
+        {
+            sync.send(&["presence".to_string(), nb.to_string(), String::new()]);
+        }
+    }
+
+    /// Runs `f` for pane `key` (the pane messages are for meanwhile); None when it isn't open.
+    pub(crate) fn in_pane<R>(&mut self, key: PaneKey, f: impl FnOnce(&mut App) -> R) -> Option<R> {
+        let Screen::Notebook(s) = &mut self.screen else { return None };
+        s.index(key)?;
+        let before = s.retarget(key);
+        let r = f(self);
+        if let Screen::Notebook(s) = &mut self.screen {
+            let back = if s.index(before).is_some() { before } else { s.active };
+            s.retarget(back);
+        }
+        Some(r)
+    }
+
+    /// The pane messages are for.
+    pub(crate) fn pane(&self) -> Option<&Open> {
+        match &self.screen {
+            Screen::Notebook(s) => Some(&***s),
+            Screen::Library => None,
+        }
+    }
+
+    pub(crate) fn pane_mut(&mut self) -> Option<&mut Open> {
+        match &mut self.screen {
+            Screen::Notebook(s) => Some(&mut ***s),
+            Screen::Library => None,
+        }
+    }
+
+    /// The pane showing notebook `nb` that speaks for it (see [`Split::owner`]).
+    pub fn pane_showing(&self, nb: &str) -> Option<PaneKey> {
+        match &self.screen {
+            Screen::Notebook(s) => s.owner(nb),
+            Screen::Library => None,
+        }
+    }
+
+    /// The panes on screen (keys, left to right).
+    fn pane_keys(&self) -> Vec<PaneKey> {
+        match &self.screen {
+            Screen::Notebook(s) => s.panes.iter().map(|p| p.key).collect(),
+            Screen::Library => Vec::new(),
+        }
+    }
+
+    /// The ids of the outline of the pane messages are for (see [`sidebar::Ids`]).
+    fn ids(&self) -> sidebar::Ids {
+        sidebar::Ids { other: matches!(&self.screen, Screen::Notebook(s) if s.key() != s.active) }
+    }
+
+    /// The panels the toolbar opened close (they belong to the active pane), and a size change
+    /// still asking is left.
+    pub(crate) fn close_panels(&mut self) {
+        self.page_panel = false;
+        self.size_text = None;
+        self.size_warning = None;
+        self.share = None;
+        self.history = None;
+        self.show_pdf_import = false;
+        self.export = None;
+        if let Screen::Notebook(s) = &mut self.screen {
+            s.menu = None;
+        }
     }
 
     pub(crate) fn say(&mut self, s: impl Into<String>) {
@@ -614,6 +801,11 @@ impl App {
     /// search to run again after the notebook changed.
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let task = self.handle(message);
+        // Between messages they are for the active pane.
+        if let Screen::Notebook(s) = &mut self.screen {
+            let active = s.active;
+            s.retarget(active);
+        }
         let more = self.background();
         if more.is_empty() { task } else { Task::batch(std::iter::once(task).chain(more)) }
     }
@@ -625,61 +817,71 @@ impl App {
                 self.shelf.drag = None;
                 match self.open(&id) {
                     Ok(()) => {
-                        // For the start's "Zuletzt geöffnet".
-                        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                        self.settings.opened_now(&id, now);
-                        if self.persist_settings {
-                            self.settings.save();
-                        }
+                        self.opened(&id);
                         return sidebar::reveal_current(self);
                     }
                     Err(e) => self.say(format!("Notizbuch nicht lesbar: {e}")),
                 }
             }
             Message::Back => {
+                // What is being written is saved, in every pane.
                 self.finish_text();
-                self.close_text_page();
+                for key in self.pane_keys() {
+                    self.in_pane(key, |app| app.close_text_page());
+                }
                 self.plot_edit = None;
                 self.live_session = None;
                 self.share = None;
                 self.history = None;
+                self.undo_delete = None;
                 self.screen = Screen::Library;
+                self.stamps.clear();
+                self.headings_due.clear();
+                self.presence_at.clear();
                 self.refresh();
             }
             Message::Refresh => self.refresh(),
             Message::Camera(c) => {
-                if let Screen::Notebook(o) = &mut self.screen {
-                    o.camera = c;
+                let Screen::Notebook(s) = &mut self.screen else { return Task::none() };
+                let speaks = s.owner(&s.id) == Some(s.key());
+                let id = s.id.clone();
+                let o = &mut ***s;
+                let before = o.camera;
+                o.camera = c;
+                // Opened at a page: shown once the view knows its size.
+                if c.viewport.width > 0.0
+                    && let Some(sheet) = o.start.take()
+                    && let Some(i) = o.pages.page_of_sheet(&sheet)
+                {
+                    o.camera = o.pages.camera_for(i, &c);
                 }
-                // Moved by hand: following the owner ends (it would snap back).
-                if self.follow_host.take().is_some() {
+                // Moved by hand (not resized): following the owner ends (it would snap back).
+                if speaks && before.viewport == c.viewport && self.follow_host.take().is_some() {
                     self.say("Folgen beendet");
                 }
                 self.follow_notes();
-                self.send_presence();
+                if speaks {
+                    self.send_presence(&id);
+                }
             }
             Message::Fold(node) => {
-                let lib = self.lib.clone();
-                if let Screen::Notebook(o) = &mut self.screen {
-                    let collapsed = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, collapsed: true, .. } if *n == node));
-                    if o.nb.set_collapsed(&node, !collapsed).is_ok() {
-                        let _ = lib.save_notebook(&o.nb);
-                        o.rows = o.nb.outline(false);
-                        o.marked = o.nb.marked();
-                        o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
-                        o.camera = o.pages.clamp(o.camera);
-                    }
+                let Some(o) = self.pane() else { return Task::none() };
+                let collapsed = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, collapsed: true, .. } if *n == node));
+                if o.nb.set_collapsed(&node, !collapsed).is_ok() {
+                    let _ = self.lib.save_notebook(&o.nb);
+                    let id = o.id.clone();
+                    self.relayout_book(&id);
                 }
             }
             Message::Jump(sheet) => {
-                if let Screen::Notebook(o) = &mut self.screen
+                if let Some(o) = self.pane_mut()
                     && let Some(i) = o.pages.page_of_sheet(&sheet)
                 {
                     o.camera = o.pages.camera_for(i, &o.camera);
                 }
             }
             Message::Zoom(z) => {
-                if let Screen::Notebook(o) = &mut self.screen {
+                if let Some(o) = self.pane_mut() {
                     let c = o.camera;
                     let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
                     let zoom = z.clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
@@ -687,7 +889,9 @@ impl App {
                 }
             }
             Message::ToggleSidebar => {
-                self.sidebar = !self.sidebar;
+                let Some(o) = self.pane_mut() else { return Task::none() };
+                o.sidebar = !o.sidebar;
+                self.sidebar = o.sidebar;
                 if self.sidebar {
                     return sidebar::reveal_current(self);
                 }
@@ -705,9 +909,13 @@ impl App {
                     self.show_imports = false;
                     self.refresh();
                     let title = self.entries.iter().find(|e| e.id == id).map(|e| e.title.clone()).unwrap_or_default();
-                    let reopen = matches!(&self.screen, Screen::Notebook(o) if o.id == id) || matches!(self.screen, Screen::Library);
-                    if reopen {
-                        let _ = self.open(&id);
+                    match &self.screen {
+                        Screen::Library => {
+                            let _ = self.open(&id);
+                        }
+                        // On screen: what came in shows where it is open.
+                        Screen::Notebook(s) if s.shows(&id) => self.refresh_open(&id, true, &[]),
+                        Screen::Notebook(_) => {}
                     }
                     self.say(format!("„{title}“ übernommen (mit dem Stand hier zusammengeführt)"));
                 }
@@ -858,10 +1066,10 @@ impl App {
             }
             Message::Gesture(g) => return self.gesture(g),
             Message::Glide(now) => {
-                if let Screen::Notebook(o) = &mut self.screen
-                    && o.pages.flash.as_ref().is_some_and(|f| f.done())
-                {
-                    o.pages.flash = None;
+                if let Screen::Notebook(s) = &mut self.screen {
+                    for o in s.panes.iter_mut().filter(|o| o.pages.flash.as_ref().is_some_and(|f| f.done())) {
+                        o.pages.flash = None;
+                    }
                 }
                 return self.glide_step(now);
             }
@@ -924,10 +1132,7 @@ impl App {
                 }
             }
             Message::MoveText(d) | Message::ResizeText(d) => {
-                let zoom = match &self.screen {
-                    Screen::Notebook(o) => o.camera.zoom,
-                    _ => 1.0,
-                };
+                let zoom = self.pane().map(|o| o.camera.zoom).unwrap_or(1.0);
                 if let Some(e) = &mut self.editing {
                     if matches!(message, Message::MoveText(_)) {
                         e.x += d.x / zoom;
@@ -947,7 +1152,7 @@ impl App {
             Message::DeleteText => {
                 if let Some(e) = self.editing.take() {
                     let _ = e.sheet.remove(std::slice::from_ref(&e.box_id));
-                    self.store_sheet(&e.sheet_id, &e.sheet);
+                    self.store_sheet(&e.notebook, &e.sheet_id, &e.sheet);
                 }
             }
             Message::DoneText => self.finish_text(),
@@ -955,8 +1160,13 @@ impl App {
                 if self.editing.as_ref().is_some_and(|e| e.dirty && e.last_change.elapsed().as_millis() > 800) {
                     self.save_text(false);
                 }
-                if self.text_page.as_ref().is_some_and(|t| t.dirty && t.last_change.elapsed().as_millis() > 800) {
-                    self.save_text_page();
+                // Text pages typed in, after a pause (in every pane).
+                let typed: Vec<PaneKey> = match &self.screen {
+                    Screen::Notebook(s) => s.panes.iter().filter(|o| o.text_page.as_ref().is_some_and(|t| t.dirty && t.last_change.elapsed().as_millis() > 800)).map(|o| o.key).collect(),
+                    Screen::Library => Vec::new(),
+                };
+                for key in typed {
+                    self.in_pane(key, |app| app.save_text_page());
                 }
                 if !self.offline {
                     if self.sync.is_none() {
@@ -967,12 +1177,16 @@ impl App {
                         self.devices_at = Some(Instant::now());
                     }
                 }
-                // Saves by another process here (the sync service, a second window).
-                if let Screen::Notebook(o) = &self.screen {
-                    let now = self.lib.change_stamp(&o.id);
-                    if now != self.stamp {
-                        self.stamp = now;
-                        self.refresh_open(true, &[]);
+                // Saves by another process here (the sync service, a second window), each
+                // notebook on screen once.
+                let shown = match &self.screen {
+                    Screen::Notebook(s) => s.notebooks(),
+                    Screen::Library => Vec::new(),
+                };
+                for nb in shown {
+                    let now = self.lib.change_stamp(&nb);
+                    if self.stamps.insert(nb.clone(), now).is_some_and(|before| before != now) {
+                        self.refresh_open(&nb, true, &[]);
                     }
                 }
             }
@@ -982,13 +1196,14 @@ impl App {
                     self.say("Kein Gerät online: Tablet koppeln (Einstellungen) und n0te dort öffnen");
                     return Task::none();
                 };
-                let Some(nb) = self.notebook_id() else { return Task::none() };
+                // Live goes with ★: the tablet opens the main pane's notebook.
+                let Screen::Notebook(s) = &self.screen else { return Task::none() };
+                let nb = s.pane(s.main).map(|p| p.id.clone()).unwrap_or_default();
                 if let Some(s) = &self.sync {
                     s.send(&["open".into(), d.id.clone(), nb]);
                 }
                 self.live_session = Some(LiveSession { device: d.id, name: d.name.clone(), follow_them: false, they_follow: false });
-                self.presence_at = None;
-                self.send_presence();
+                self.send_presence_all();
                 self.say(format!("Live mit {}: es öffnet das Notizbuch", d.name));
             }
             Message::StopLive => {
@@ -998,14 +1213,18 @@ impl App {
                     s.send(&["follow".into(), l.device.clone(), "0".into()]);
                 }
                 self.live_session = None;
-                if let Screen::Notebook(o) = &self.screen {
-                    o.pages.remote.borrow_mut().clear();
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in &s.panes {
+                        o.pages.remote.borrow_mut().clear();
+                    }
                 }
             }
             Message::RemoteFrame(on) => {
                 self.settings.remote_frame = on;
-                if let Screen::Notebook(o) = &self.screen {
-                    o.pages.show_remote_frame.set(on);
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in &s.panes {
+                        o.pages.show_remote_frame.set(on);
+                    }
                 }
                 if self.persist_settings {
                     self.settings.save();
@@ -1033,8 +1252,7 @@ impl App {
                         s.send(&["follow".into(), l.device.clone(), if on { "1".into() } else { "0".into() }]);
                     }
                 }
-                self.presence_at = None;
-                self.send_presence();
+                self.send_presence_all();
             }
             Message::PairStart => match live::request(&["pair-code"]) {
                 Ok(code) => {
@@ -1138,9 +1356,11 @@ impl App {
                 if self.persist_settings {
                     self.settings.save();
                 }
-                if !on && let Screen::Notebook(o) = &self.screen {
+                if !on && let Screen::Notebook(s) = &self.screen {
                     let names: Vec<String> = self.guests.iter().map(|g| g.name.clone()).collect();
-                    o.pages.remote.borrow_mut().retain(|m| !names.contains(&m.name));
+                    for o in &s.panes {
+                        o.pages.remote.borrow_mut().retain(|m| !names.contains(&m.name));
+                    }
                 }
             }
             Message::ShareView(on) => {
@@ -1163,7 +1383,9 @@ impl App {
                 }
             }
             Message::Summon(device) => {
-                let (Some(nb), Some((sheet, r))) = (self.notebook_id(), self.my_view()) else { return Task::none() };
+                // To where I look in this notebook (the main pane's view when it shows it twice).
+                let Some(nb) = self.notebook_id() else { return Task::none() };
+                let Some((sheet, r)) = self.view_in(&nb) else { return Task::none() };
                 let mut args: Vec<String> = vec!["summon".into(), nb, sheet];
                 args.extend(r.iter().map(|x| format!("{x:.1}")));
                 if let Some(d) = &device {
@@ -1191,8 +1413,9 @@ impl App {
                 self.follow_host = if on { owner } else { None };
                 if let Some(d) = self.follow_host.clone()
                     && let Some((sheet, r)) = self.last_views.get(&d).cloned()
+                    && let Some(key) = self.pane_showing(&nb)
                 {
-                    self.look_at(&sheet, r);
+                    self.in_pane(key, |app| app.look_at(&sheet, r));
                 }
             }
             Message::ToggleInvite(id) => {
@@ -1353,17 +1576,17 @@ impl App {
             Message::SetRowGap(v) => {
                 self.settings.row_gap = v;
                 if self.persist_settings { self.settings.save(); }
-                self.relayout();
+                self.relayout_all();
             }
             Message::SetSideGap(v) => {
                 self.settings.side_gap = v;
                 if self.persist_settings { self.settings.save(); }
-                self.relayout();
+                self.relayout_all();
             }
             Message::OpenTextPage(sheet, docked) => return self.open_text_page(&sheet, docked),
             Message::CloseTextPage => self.close_text_page(),
             Message::Blocks(m) => {
-                if let Some(t) = &mut self.text_page {
+                if let Some(t) = self.pane_mut().and_then(|o| o.text_page.as_mut()) {
                     let task = t.doc.update(m).map(Message::Blocks);
                     if t.doc.to_markdown() != t.saved {
                         t.dirty = true;
@@ -1373,7 +1596,7 @@ impl App {
                 }
             }
             Message::NewTextPage => {
-                let Screen::Notebook(o) = &self.screen else { return Task::none() };
+                let Some(o) = self.pane() else { return Task::none() };
                 let current = o.pages.current_number(&o.camera);
                 let node = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone());
                 let (parent, index) = pdf::position_after(&o.nb, node.as_deref());
@@ -1382,7 +1605,7 @@ impl App {
                     Ok((_, sheet)) => {
                         let _ = self.lib.save_notebook(&o.nb);
                         self.relayout();
-                        if let Screen::Notebook(o) = &mut self.screen
+                        if let Some(o) = self.pane_mut()
                             && let Some(i) = o.pages.page_of_sheet(&sheet)
                         {
                             o.camera = o.pages.camera_for(i, &o.camera);
@@ -1393,44 +1616,52 @@ impl App {
                 }
             }
             Message::SearchQuery(q) => {
-                self.search.query = q;
-                if !self.search.active() {
-                    self.search.clear();
+                let Some(search) = self.search_mut() else { return Task::none() };
+                search.query = q;
+                if !search.active() {
+                    search.clear();
                     return Task::none();
                 }
-                self.search.stale = false;
+                search.stale = false;
                 return self.search_soon();
             }
             Message::SearchDue(n) => {
-                if n == self.search.typed && self.search.active() {
+                if self.pane().is_some_and(|o| n == o.search.typed && o.search.active()) {
                     return self.start_search();
                 }
             }
             Message::Found(generation, query, found) => {
+                let list = self.ids().list();
+                let Some(search) = self.search_mut() else { return Task::none() };
                 if let Some(pages) = found
-                    && generation == self.search.latest.load(std::sync::atomic::Ordering::Relaxed)
+                    && generation == search.latest.load(std::sync::atomic::Ordering::Relaxed)
                 {
-                    self.search.busy = false;
-                    let other_words = self.search.found.as_ref().is_none_or(|(q, _)| *q != query);
-                    self.search.found = Some((query, pages));
+                    search.busy = false;
+                    let other_words = search.found.as_ref().is_none_or(|(q, _)| *q != query);
+                    search.found = Some((query, pages));
                     // New words: the list starts at the top (the same search again stays put).
                     if other_words {
-                        return iced::widget::operation::snap_to(sidebar::list_id(), iced::widget::operation::RelativeOffset::START);
+                        return iced::widget::operation::snap_to(list, iced::widget::operation::RelativeOffset::START);
                     }
                 }
             }
             Message::SearchSubmit => {
-                let first = self.search.hits().next().map(|(p, h)| (p.sheet_id.clone(), [h.x0, h.y0, h.x1, h.y1]));
+                let first = self.pane().and_then(|o| o.search.hits().next().map(|(p, h)| (p.sheet_id.clone(), [h.x0, h.y0, h.x1, h.y1])));
                 if let Some((sheet, r)) = first {
                     self.reveal(&sheet, r);
                 }
             }
-            Message::SearchClear => self.search.clear(),
+            Message::SearchClear => {
+                if let Some(search) = self.search_mut() {
+                    search.clear();
+                }
+            }
             Message::FocusSearch => {
-                if matches!(self.screen, Screen::Notebook(_)) {
-                    self.sidebar = true;
+                let input = self.ids().input();
+                if let Some(o) = self.pane_mut() {
+                    o.sidebar = true;
                     // What was searched before is selected: typing replaces it.
-                    return iced::widget::operation::focus(sidebar::input_id()).chain(iced::widget::operation::select_all(sidebar::input_id()));
+                    return iced::widget::operation::focus(input.clone()).chain(iced::widget::operation::select_all(input));
                 }
                 if self.shelf.selected.is_none() && self.shelf.dialog.is_none() {
                     let id = crate::shelf::search_id();
@@ -1440,12 +1671,12 @@ impl App {
             Message::Reveal(sheet, r) => self.reveal(&sheet, r),
             Message::Headings(nb, read) => {
                 self.headings_reading = false;
-                if self.notebook_id().as_deref() == Some(nb.as_str()) {
+                if matches!(&self.screen, Screen::Notebook(s) if s.shows(&nb)) {
                     self.headings.extend(read);
                 }
             }
             Message::ToggleNotes => {
-                if self.text_page.as_ref().is_some_and(|t| t.docked) {
+                if self.pane().and_then(|o| o.text_page.as_ref()).is_some_and(|t| t.docked) {
                     self.close_text_page();
                 } else {
                     return self.open_notes(true);
@@ -1455,8 +1686,16 @@ impl App {
             Message::InsertPlot => return self.insert_plot(),
             Message::Shelf(m) => return self.on_shelf(m),
             Message::Outline(m) => return self.on_outline(m),
+            Message::Pane(key, m) => return self.in_pane(key, |app| app.handle(*m)).map(|task| split::routed(key, task)).unwrap_or_else(Task::none),
+            Message::Activate(key) => self.activate(key),
+            Message::Split(m) => return self.on_split(m),
             Message::Plot(m) => {
                 use crate::plots::Reply;
+                // The panel belongs to the pane it was opened in.
+                if matches!(&self.screen, Screen::Notebook(s) if s.key() != self.plot_pane && s.index(self.plot_pane).is_some()) {
+                    let key = self.plot_pane;
+                    return self.handle(Message::Pane(key, Box::new(Message::Plot(m))));
+                }
                 let Some(e) = &mut self.plot_edit else { return Task::none() };
                 match e.update(m) {
                     Reply::None => {}
@@ -1515,6 +1754,7 @@ impl App {
         let Some(plot) = self.lib.load_sheet(&nb, sheet_id).ok().and_then(|s| s.plots().into_iter().find(|p| p.id == plot_id)) else { return Task::none() };
         let paper = self.paper_of(sheet_id);
         self.plot_edit = Some(crate::plots::Editor::new(sheet_id, plot, paper));
+        self.plot_pane = self.pane().map(|o| o.key).unwrap_or_default();
         crate::plots::focus(crate::plots::input_id(), None)
     }
 
@@ -1548,6 +1788,7 @@ impl App {
         }
         plot.id = id;
         self.plot_edit = Some(crate::plots::Editor::new(&sheet_id, plot, paper));
+        self.plot_pane = self.pane().map(|o| o.key).unwrap_or_default();
         crate::plots::focus(crate::plots::input_id(), None)
     }
 
@@ -1570,99 +1811,112 @@ impl App {
             self.say(format!("Nicht geändert: {e}"));
             return false;
         }
-        self.store_sheet(sheet_id, &sheet);
+        self.store_sheet(&nb, sheet_id, &sheet);
         true
     }
 
     /// What the last message left to do in the background: headings to read (one read at a
-    /// time; what comes due meanwhile waits for the next), a search to run again.
+    /// time, the notebooks on screen in turn; what comes due meanwhile waits for the next), a
+    /// search to run again in a pane.
     fn background(&mut self) -> Vec<Task<Message>> {
         let mut out = Vec::new();
-        let Screen::Notebook(o) = &self.screen else { return out };
-        if !self.headings_reading && (self.headings_all || self.headings_check || !self.headings_due.is_empty()) {
-            let sheets: Vec<String> = o
-                .nb
-                .outline(true)
-                .into_iter()
-                .filter_map(|r| match r {
-                    OutlineRow::Sheet { sheet_id, .. } => Some(sheet_id),
-                    OutlineRow::Group { .. } => None,
-                })
-                .filter(|s| self.headings_all || self.headings_due.contains(s) || !self.headings.contains_key(s))
-                .collect();
-            self.headings_all = false;
-            self.headings_check = false;
-            self.headings_due.clear();
-            if !sheets.is_empty() {
-                self.headings_reading = true;
-                let (root, nb) = (self.lib.root().to_path_buf(), o.id.clone());
-                out.push(Task::perform(
-                    async move {
-                        let read = search::read_headings(&root, &nb, &sheets);
-                        (nb, read)
-                    },
-                    |(nb, read)| Message::Headings(nb, read),
-                ));
+        let Screen::Notebook(s) = &self.screen else { return out };
+        if !self.headings_reading {
+            for id in s.notebooks() {
+                let Some(due) = self.headings_due.remove(&id).filter(|d| !d.is_empty()) else { continue };
+                let Some(o) = s.panes.iter().find(|o| o.id == id) else { continue };
+                let sheets: Vec<String> = o
+                    .nb
+                    .outline(true)
+                    .into_iter()
+                    .filter_map(|r| match r {
+                        OutlineRow::Sheet { sheet_id, .. } => Some(sheet_id),
+                        OutlineRow::Group { .. } => None,
+                    })
+                    .filter(|s| due.all || due.sheets.contains(s) || !self.headings.contains_key(s))
+                    .collect();
+                if !sheets.is_empty() {
+                    self.headings_reading = true;
+                    let root = self.lib.root().to_path_buf();
+                    out.push(Task::perform(
+                        async move {
+                            let read = search::read_headings(&root, &id, &sheets);
+                            (id, read)
+                        },
+                        |(nb, read)| Message::Headings(nb, read),
+                    ));
+                    break;
+                }
             }
         }
-        if self.search.stale && self.search.active() {
-            self.search.stale = false;
-            out.push(self.search_soon());
+        let stale: Vec<PaneKey> = s.panes.iter().filter(|o| o.search.stale && o.search.active()).map(|o| o.key).collect();
+        for key in stale {
+            let soon = self.in_pane(key, |app| {
+                if let Some(search) = app.search_mut() {
+                    search.stale = false;
+                }
+                app.search_soon()
+            });
+            if let Some(task) = soon {
+                out.push(split::routed(key, task));
+            }
         }
         out
     }
 
-    /// Sheets changed (None: maybe all; empty: the notebook's pages): their headings are read
-    /// again, new sheets' too, and a search in the field runs again.
-    fn changed(&mut self, sheets: Option<&[String]>) {
+    /// Sheets of notebook `nb` changed (None: maybe all; empty: the notebook's pages): their
+    /// headings are read again, new sheets' too, and a search in a pane showing it runs again.
+    fn changed(&mut self, nb: &str, sheets: Option<&[String]>) {
+        let due = self.headings_due.entry(nb.to_string()).or_default();
         match sheets {
-            Some(s) => self.headings_due.extend(s.iter().cloned()),
-            None => self.headings_all = true,
+            Some(s) => due.sheets.extend(s.iter().cloned()),
+            None => due.all = true,
         }
-        self.headings_check = true;
-        if self.search.active() {
-            self.search.stale = true;
+        due.check = true;
+        if let Screen::Notebook(s) = &mut self.screen {
+            for o in s.panes.iter_mut().filter(|o| o.id == nb && o.search.active()) {
+                o.search.stale = true;
+            }
         }
+    }
+
+    /// The search of the pane messages are for.
+    fn search_mut(&mut self) -> Option<&mut Search> {
+        self.pane_mut().map(|o| &mut o.search)
     }
 
     /// The search runs a moment after the last key ([`search::DEBOUNCE`]).
     fn search_soon(&mut self) -> Task<Message> {
-        self.search.typed += 1;
-        let n = self.search.typed;
+        let Some(search) = self.search_mut() else { return Task::none() };
+        search.typed += 1;
+        let n = search.typed;
         Task::perform(search::after(search::DEBOUNCE), move |_| Message::SearchDue(n))
     }
 
     /// Starts the search in the background (one still running stops).
     fn start_search(&mut self) -> Task<Message> {
-        let open = self.open_sheets();
-        let Screen::Notebook(o) = &self.screen else { return Task::none() };
-        let generation = self.search.latest.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        let job = search::Job {
-            root: self.lib.root().to_path_buf(),
-            notebook: o.id.clone(),
-            query: self.search.query.clone(),
-            targets: search::targets(&o.nb),
-            open,
-            pdf: self.pdf.clone(),
-            generation,
-            latest: self.search.latest.clone(),
-        };
-        self.search.busy = true;
-        self.search.stale = false;
+        let Some(id) = self.notebook_id() else { return Task::none() };
+        let open = self.open_sheets(&id);
+        let (root, pdf) = (self.lib.root().to_path_buf(), self.pdf.clone());
+        let Some(o) = self.pane_mut() else { return Task::none() };
+        let generation = o.search.latest.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let job = search::Job { root, notebook: o.id.clone(), query: o.search.query.clone(), targets: search::targets(&o.nb), open, pdf, generation, latest: o.search.latest.clone() };
+        o.search.busy = true;
+        o.search.stale = false;
         let query = job.query.clone();
         Task::perform(async move { search::run(&job) }, move |found| Message::Found(generation, query.clone(), found))
     }
 
-    /// The sheets being edited here as they are on screen (typed, not saved yet): snapshots by
-    /// sheet id, for the search.
-    fn open_sheets(&self) -> HashMap<String, Vec<u8>> {
+    /// The sheets of notebook `nb` being edited here as they are on screen (typed, not saved
+    /// yet, in any pane): snapshots by sheet id, for the search.
+    fn open_sheets(&self, nb: &str) -> HashMap<String, Vec<u8>> {
         let mut out = HashMap::new();
         let copy = |sheet: &Sheet, edit: &dyn Fn(&Sheet)| -> Option<Vec<u8>> {
             let c = Sheet::load(0, &sheet.snapshot().ok()?).ok()?;
             edit(&c);
             c.snapshot().ok()
         };
-        if let Some(e) = &self.editing {
+        if let Some(e) = self.editing.as_ref().filter(|e| e.notebook == nb) {
             let text = e.content.text();
             let text = text.strip_suffix('\n').unwrap_or(&text).to_string();
             if let Some(b) = copy(&e.sheet, &|c| {
@@ -1672,7 +1926,11 @@ impl App {
                 out.insert(e.sheet_id.clone(), b);
             }
         }
-        if let Some(t) = self.text_page.as_ref().filter(|t| t.dirty && !t.sheet_id.is_empty()) {
+        let panes = match &self.screen {
+            Screen::Notebook(s) => s.panes.iter().filter(|o| o.id == nb).collect(),
+            Screen::Library => Vec::new(),
+        };
+        for t in panes.into_iter().filter_map(|o| o.text_page.as_ref()).filter(|t| t.dirty && !t.sheet_id.is_empty()) {
             let md = t.doc.to_markdown();
             if let Some(b) = copy(&t.sheet, &|c| {
                 let _ = c.set_page_text(&md);
@@ -1686,9 +1944,7 @@ impl App {
     /// Shows a spot of a sheet (sheet points) in the middle of the view, at the zoom it has,
     /// and lights it up; folded groups around it open first.
     fn reveal(&mut self, sheet: &str, r: [f32; 4]) {
-        let lib = self.lib.clone();
-        let layout = self.settings.layout();
-        let Screen::Notebook(o) = &mut self.screen else { return };
+        let Some(o) = self.pane() else { return };
         if o.pages.page_of_sheet(sheet).is_none() {
             let folded = folded_around(&o.nb, sheet);
             if folded.is_empty() {
@@ -1697,11 +1953,11 @@ impl App {
             for g in &folded {
                 let _ = o.nb.set_collapsed(g, false);
             }
-            let _ = lib.save_notebook(&o.nb);
-            o.rows = o.nb.outline(false);
-            o.marked = o.nb.marked();
-            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
+            let _ = self.lib.save_notebook(&o.nb);
+            let id = o.id.clone();
+            self.relayout_book(&id);
         }
+        let Some(o) = self.pane_mut() else { return };
         let Some(i) = o.pages.page_of_sheet(sheet) else { return };
         let page = o.pages.pages[i].placed.rect;
         let c = o.camera;
@@ -1731,13 +1987,11 @@ impl App {
                     sync.send(&["share-view".to_string(), "off".to_string()]);
                 }
             }
-            LiveEvent::Changed { notebook, index, sheets } => {
-                if self.notebook_id().as_deref() == Some(notebook.as_str()) {
-                    self.refresh_open(index, &sheets);
-                } else if matches!(self.screen, Screen::Library) {
-                    self.refresh();
-                }
-            }
+            LiveEvent::Changed { notebook, index, sheets } => match &self.screen {
+                Screen::Notebook(s) if s.shows(&notebook) => self.refresh_open(&notebook, index, &sheets),
+                Screen::Notebook(_) => {}
+                Screen::Library => self.refresh(),
+            },
             LiveEvent::Online { .. } | LiveEvent::Offline { .. } | LiveEvent::Paired { .. } => {
                 // Reconnected or gone: the other app may have restarted, so nobody follows anyone
                 // any more (a stale follow on both sides made the views chase each other).
@@ -1757,19 +2011,17 @@ impl App {
                 self.devices_at = Some(Instant::now());
             }
             LiveEvent::Presence { device, notebook, sheet, viewport, laser, .. } => {
-                if self.notebook_id().as_deref() != Some(notebook.as_str()) {
-                    return Task::none();
-                }
+                let Some(owner) = self.pane_showing(&notebook) else { return Task::none() };
                 if let Some(s) = &sheet {
                     self.last_views.insert(device.clone(), (s.clone(), viewport));
                 }
+                // Following the owner (as a guest): the pane that speaks for the notebook goes there.
                 if self.follow_host.as_deref() == Some(device.as_str())
                     && let Some(s) = &sheet
                 {
                     let s = s.clone();
-                    self.look_at(&s, viewport);
+                    self.in_pane(owner, |app| app.look_at(&s, viewport));
                 }
-                let Screen::Notebook(o) = &mut self.screen else { return Task::none() };
                 // Named: own device, guest or the owner; guests' frames only when wanted.
                 let guest = self.guests.iter().find(|g| g.device == device);
                 let host = self.joined.iter().any(|j| j.owner == device);
@@ -1784,54 +2036,66 @@ impl App {
                     .or_else(|| guest.map(|g| g.name.clone()))
                     .or_else(|| self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()))
                     .unwrap_or_else(|| "Gast".into());
-                // Looking nowhere (e.g. the owner stopped sharing its view): its frame goes.
-                let Some(sheet) = sheet else {
-                    o.pages.remote.borrow_mut().retain(|m| m.name != name);
-                    return Task::none();
-                };
-                let mark = crate::pages::RemoteMark { sheet_id: sheet.clone(), rect: n0te_core::ink::Rect::new(viewport[0], viewport[1], viewport[2], viewport[3]), laser: laser.map(|l| (l[0], l[1])), name };
-                {
+                let following = self.live_session.as_ref().is_some_and(|l| l.follow_them && l.device == device);
+                let Screen::Notebook(s) = &mut self.screen else { return Task::none() };
+                let main = s.main;
+                // Every pane showing the notebook shows the frame. Looking nowhere (e.g. the owner
+                // stopped sharing its view): its frame goes.
+                for o in s.panes.iter_mut().filter(|o| o.id == notebook) {
                     let mut marks = o.pages.remote.borrow_mut();
-                    marks.retain(|m| m.name != mark.name);
-                    marks.push(mark.clone());
+                    marks.retain(|m| m.name != name);
+                    if let Some(sheet) = &sheet {
+                        marks.push(crate::pages::RemoteMark { sheet_id: sheet.clone(), rect: n0te_core::ink::Rect::new(viewport[0], viewport[1], viewport[2], viewport[3]), laser: laser.map(|l| (l[0], l[1])), name: name.clone() });
+                    }
                 }
-                // Following: show what the other device shows.
-                if self.live_session.as_ref().is_some_and(|l| l.follow_them && l.device == device)
-                    && let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).map(|p| p.placed.rect)
-                    && mark.rect.width() > 1.0
+                // Following the tablet: the main pane (★) shows what it shows.
+                if let (true, Some(sheet), Some(o)) = (following, &sheet, s.pane_mut(main).filter(|o| o.id == notebook))
+                    && let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == *sheet).map(|p| p.placed.rect)
+                    && viewport[2] - viewport[0] > 1.0
                 {
                     let c = o.camera;
-                    let zoom = (c.viewport.width / mark.rect.width()).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
-                    let (cx, cy) = (page.x0 + (mark.rect.x0 + mark.rect.x1) / 2.0, page.y0 + (mark.rect.y0 + mark.rect.y1) / 2.0);
+                    let zoom = (c.viewport.width / (viewport[2] - viewport[0])).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
+                    let (cx, cy) = (page.x0 + (viewport[0] + viewport[2]) / 2.0, page.y0 + (viewport[1] + viewport[3]) / 2.0);
                     o.camera = o.pages.clamp(Camera { x: cx - c.viewport.width / zoom / 2.0, y: cy - c.viewport.height / zoom / 2.0, zoom, ..c });
                 }
             }
             LiveEvent::Stroke { device, notebook, sheet, stroke, brush, samples, done } => {
-                if let Screen::Notebook(o) = &self.screen
-                    && o.id == notebook
-                {
-                    o.pages.live_samples(&device, stroke, &sheet, brush, &samples, done);
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in s.panes.iter().filter(|o| o.id == notebook) {
+                        o.pages.live_samples(&device, stroke, &sheet, brush, &samples, done);
+                    }
                 }
             }
             LiveEvent::Erase { notebook, sheet, ids, dabs } => {
-                if let Screen::Notebook(o) = &self.screen
-                    && o.id == notebook
-                {
-                    o.pages.live_erase(&sheet, &ids, &dabs);
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in s.panes.iter().filter(|o| o.id == notebook) {
+                        o.pages.live_erase(&sheet, &ids, &dabs);
+                    }
                 }
             }
             LiveEvent::Open { device, notebook } => {
                 let name = self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone()).unwrap_or_else(|| "Tablet".into());
                 if self.entries.iter().any(|e| e.id == notebook) || self.lib.load_notebook(&notebook).is_ok() {
-                    if self.notebook_id().as_deref() != Some(notebook.as_str()) {
-                        let _ = self.open(&notebook);
+                    match &self.screen {
+                        // Two side by side: it opens in the main pane (★).
+                        Screen::Notebook(s) if s.panes.len() > 1 => {
+                            let main = s.main;
+                            if s.pane(main).is_some_and(|o| o.id != notebook)
+                                && let Err(e) = self.replace_pane(main, &notebook, None)
+                            {
+                                self.say(format!("Notizbuch nicht lesbar: {e}"));
+                            }
+                        }
+                        Screen::Notebook(s) if s.id == notebook => {}
+                        _ => {
+                            let _ = self.open(&notebook);
+                        }
                     }
                     // Keep who follows whom when the same device asks again (e.g. "Laptop folgt mir").
                     let (follow_them, they_follow) = self.live_session.as_ref().filter(|l| l.device == device).map(|l| (l.follow_them, l.they_follow)).unwrap_or((false, false));
                     self.live_session = Some(LiveSession { device, name: name.clone(), follow_them, they_follow });
                     // Where this view is, right away (the tablet may want to follow it).
-                    self.presence_at = None;
-                    self.send_presence();
+                    self.send_presence_all();
                     self.say(format!("{name} hat dieses Notizbuch live geöffnet"));
                 }
             }
@@ -1849,17 +2113,18 @@ impl App {
             }
             LiveEvent::Guest { name, on, device, .. } => {
                 self.say(if on { format!("{name} ist dazugekommen") } else { format!("{} ist gegangen", self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone()).unwrap_or_else(|| "Ein Gast".into())) });
-                if !on && let Screen::Notebook(o) = &self.screen {
+                if !on && let Screen::Notebook(s) = &self.screen {
                     let gone = self.guests.iter().find(|g| g.device == device).map(|g| g.name.clone());
                     if let Some(gone) = gone {
-                        o.pages.remote.borrow_mut().retain(|m| m.name != gone);
+                        for o in &s.panes {
+                            o.pages.remote.borrow_mut().retain(|m| m.name != gone);
+                        }
                     }
                 }
                 self.refresh_guests();
                 // A new guest sees where this laptop looks right away (to jump there / follow).
                 if on {
-                    self.presence_at = None;
-                    self.send_presence();
+                    self.send_presence_all();
                 }
                 if self.share.is_some() {
                     return self.handle(Message::ShowShare(true));
@@ -1876,7 +2141,9 @@ impl App {
             }
             LiveEvent::JoinWaiting { owner } => self.say(format!("Warte, bis {owner} dich hereinlässt …")),
             LiveEvent::Summoned { device, notebook, sheet, viewport } => {
-                if self.notebook_id().as_deref() == Some(notebook.as_str()) && self.look_at(&sheet, viewport) {
+                // The pane that speaks for the notebook goes (the main one when it shows it twice).
+                let Some(key) = self.pane_showing(&notebook) else { return Task::none() };
+                if self.in_pane(key, |app| app.look_at(&sheet, viewport)) == Some(true) {
                     let name = self.joined.iter().find(|j| j.owner == device).map(|j| j.owner_name.clone()).or_else(|| self.devices.iter().find(|d| d.id == device).map(|d| d.name.clone())).unwrap_or_else(|| "Der Besitzer".into());
                     self.say(format!("{name} hat dich zu sich geholt"));
                 }
@@ -1892,41 +2159,44 @@ impl App {
         Task::none()
     }
 
-    /// Another device changed the open notebook: outline and/or sheets read again.
-    fn refresh_open(&mut self, index: bool, sheets: &[String]) {
+    /// Another device (or process) changed notebook `nb`: its document is read again once,
+    /// every pane showing it lays out and reads its sheets again.
+    fn refresh_open(&mut self, nb: &str, index: bool, sheets: &[String]) {
         let lib = self.lib.clone();
-        let Screen::Notebook(o) = &mut self.screen else { return };
+        let layout = self.settings.layout();
+        let Screen::Notebook(s) = &mut self.screen else { return };
+        let Some(first) = s.panes.iter().find(|o| o.id == nb) else { return };
         if index || sheets.is_empty() {
-            let _ = lib.refresh_notebook(&o.nb);
-            o.rows = o.nb.outline(false);
-            o.marked = o.nb.marked();
-            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
-            o.camera = o.pages.clamp(o.camera);
+            let _ = lib.refresh_notebook(&first.nb);
         }
-        let all: Vec<String> = if sheets.is_empty() { o.pages.pages.iter().map(|p| p.placed.sheet_id.clone()).collect() } else { sheets.to_vec() };
-        for s in &all {
-            o.pages.reload_sheet(s);
+        for o in s.panes.iter_mut().filter(|o| o.id == nb) {
+            if index || sheets.is_empty() {
+                o.rows = o.nb.outline(false);
+                o.marked = o.nb.marked();
+                o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
+                o.camera = o.pages.clamp(o.camera);
+            }
+            let all: Vec<String> = if sheets.is_empty() { o.pages.pages.iter().map(|p| p.placed.sheet_id.clone()).collect() } else { sheets.to_vec() };
+            for s in &all {
+                o.pages.reload_sheet(s);
+            }
+            // An open text page that hasn't been typed in since: show the new text.
+            if let Some(t) = &mut o.text_page
+                && !t.dirty
+                && all.contains(&t.sheet_id)
+                && lib.refresh_sheet(nb, &t.sheet_id, &t.sheet).unwrap_or(false)
+            {
+                t.saved = t.sheet.page_text();
+                t.doc = crate::blocks::Doc::from_markdown(&t.saved);
+            }
         }
-        // An open text page that hasn't been typed in since: show the new text.
-        let id = o.id.clone();
-        if let Some(t) = &mut self.text_page
-            && !t.dirty
-            && all.contains(&t.sheet_id)
-            && lib.refresh_sheet(&id, &t.sheet_id, &t.sheet).unwrap_or(false)
-        {
-            t.saved = t.sheet.page_text();
-            t.doc = crate::blocks::Doc::from_markdown(&t.saved);
-        }
-        if let Some(e) = &self.editing
-            && all.contains(&e.sheet_id)
-        {
-            let _ = lib.refresh_sheet(&id, &e.sheet_id, &e.sheet);
+        if let Some(e) = self.editing.as_ref().filter(|e| e.notebook == nb && (sheets.is_empty() || sheets.contains(&e.sheet_id))) {
+            let _ = lib.refresh_sheet(nb, &e.sheet_id, &e.sheet);
         }
         // Headings and a search in the field follow (sheets in folded groups too).
-        self.changed(if sheets.is_empty() { None } else { Some(sheets) });
+        self.changed(nb, if sheets.is_empty() { None } else { Some(sheets) });
     }
 
-    /// Live: where this view is (sheet points of the page in the middle), at most 10× a second.
     /// Who is connected around our notebooks (guests here, owners of joined ones).
     fn refresh_guests(&mut self) {
         if self.sync.is_some() {
@@ -1936,19 +2206,16 @@ impl App {
         }
     }
 
-    /// Where this laptop looks: the sheet nearest the middle and the window in its points.
-    fn my_view(&self) -> Option<(String, [f32; 4])> {
-        let Screen::Notebook(o) = &self.screen else { return None };
-        let c = o.camera;
-        let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
-        let p = o.pages.sheet_at(cx, cy).or_else(|| o.pages.pages.iter().map(|p| &p.placed).min_by(|a, b| (a.rect.y0 - cy).abs().total_cmp(&(b.rect.y0 - cy).abs())))?;
-        let v = c.view_rect();
-        Some((p.sheet_id.clone(), [v.x0 - p.rect.x0, v.y0 - p.rect.y0, v.x1 - p.rect.x0, v.y1 - p.rect.y0]))
+    /// Where this laptop looks in notebook `nb`: the view of the pane that speaks for it.
+    fn view_in(&self, nb: &str) -> Option<(String, [f32; 4])> {
+        let Screen::Notebook(s) = &self.screen else { return None };
+        view_of(s.pane(s.owner(nb)?)?)
     }
 
-    /// Shows `r` (sheet points) of `sheet` (jump to / follow / summoned).
+    /// Shows `r` (sheet points) of `sheet` in the pane messages are for (jump to / follow /
+    /// summoned).
     fn look_at(&mut self, sheet: &str, r: [f32; 4]) -> bool {
-        let Screen::Notebook(o) = &mut self.screen else { return false };
+        let Some(o) = self.pane_mut() else { return false };
         let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).map(|p| p.placed.rect) else { return false };
         if r[2] - r[0] <= 1.0 {
             return false;
@@ -1960,27 +2227,51 @@ impl App {
         true
     }
 
-    fn send_presence(&mut self) {
-        let Some(sync) = &self.sync else { return };
-        // Own tablet live, guests in this notebook, or (as a guest) its owner: they see where
-        // the laptop looks. Before, only the live tablet got it.
-        let nb = self.notebook_id().unwrap_or_default();
-        let anyone = self.live_session.is_some() || self.guests.iter().any(|g| g.notebook == nb) || self.joined.iter().any(|j| j.notebook == nb && j.online);
-        if !anyone {
+    /// Someone sees where this laptop looks in notebook `nb`: the own tablet live, guests in
+    /// it, or (as a guest) its owner.
+    fn watched(&self, nb: &str) -> bool {
+        self.live_session.is_some() || self.guests.iter().any(|g| g.notebook == nb) || self.joined.iter().any(|j| j.notebook == nb && j.online)
+    }
+
+    /// What tells others where this laptop looks in notebook `nb` ("presence", notebook, sheet,
+    /// the view in its points, zoom): the pane that speaks for it — one frame per notebook,
+    /// the main pane's when it is open twice.
+    pub fn presence_args(&self, nb: &str) -> Option<Vec<String>> {
+        let Screen::Notebook(s) = &self.screen else { return None };
+        let o = s.pane(s.owner(nb)?)?;
+        let (sheet, r) = view_of(o)?;
+        Some(["presence".to_string(), nb.to_string(), sheet].into_iter().chain(r.iter().map(|x| format!("{x:.1}"))).chain([format!("{:.3}", o.camera.zoom)]).collect())
+    }
+
+    /// Where this laptop looks in notebook `nb`, to who sees it, at most 10× a second.
+    fn send_presence(&mut self, nb: &str) {
+        if self.sync.is_none() || !self.watched(nb) || self.presence_at.get(nb).is_some_and(|t| t.elapsed().as_millis() < 100) {
             return;
         }
-        if self.presence_at.is_some_and(|t| t.elapsed().as_millis() < 100) {
-            return;
-        }
-        let Screen::Notebook(o) = &self.screen else { return };
-        let c = o.camera;
-        let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
-        let Some(p) = o.pages.sheet_at(cx, cy).or_else(|| o.pages.pages.iter().map(|p| &p.placed).min_by(|a, b| (a.rect.y0 - cy).abs().total_cmp(&(b.rect.y0 - cy).abs()))) else { return };
-        let v = c.view_rect();
-        let r = [v.x0 - p.rect.x0, v.y0 - p.rect.y0, v.x1 - p.rect.x0, v.y1 - p.rect.y0];
-        let args: Vec<String> = ["presence".to_string(), o.id.clone(), p.sheet_id.clone()].into_iter().chain(r.iter().map(|x| format!("{x:.1}"))).chain([format!("{:.3}", c.zoom)]).collect();
+        let (Some(sync), Some(args)) = (&self.sync, self.presence_args(nb)) else { return };
         sync.send(&args);
-        self.presence_at = Some(Instant::now());
+        self.presence_at.insert(nb.to_string(), Instant::now());
+    }
+
+    /// Where this laptop looks, now, in every notebook on screen.
+    pub(crate) fn send_presence_all(&mut self) {
+        self.presence_at.clear();
+        let shown = match &self.screen {
+            Screen::Notebook(s) => s.notebooks(),
+            Screen::Library => Vec::new(),
+        };
+        for nb in shown {
+            self.send_presence(&nb);
+        }
+    }
+
+    /// Live with the tablet goes with ★: it opens the main pane's notebook (after ★ moved, or
+    /// another notebook came into the main pane).
+    pub(crate) fn live_follows_main(&mut self) {
+        let (Some(l), Some(sync), Screen::Notebook(s)) = (&self.live_session, &self.sync, &self.screen) else { return };
+        if let Some(o) = s.pane(s.main) {
+            sync.send(&["open".to_string(), l.device.clone(), o.id.clone()]);
+        }
     }
 
     fn palette_items(&self) -> Vec<palette::Item> {
@@ -2024,23 +2315,35 @@ impl App {
             Command::RotatePage => self.handle(Message::RotatePage),
             Command::PageSetup => self.handle(Message::ShowPage(true)),
             Command::Search => self.handle(Message::FocusSearch),
+            Command::Again => self.handle(Message::Split(split::Msg::Again)),
+            Command::Swap => self.handle(Message::Split(split::Msg::Swap)),
+            Command::CloseOther => match &self.screen {
+                Screen::Notebook(s) => match s.other(s.active) {
+                    Some(k) => self.handle(Message::Split(split::Msg::Close(k))),
+                    None => Task::none(),
+                },
+                Screen::Library => Task::none(),
+            },
         }
     }
 
-    /// Opens the current notebook again (new theme: paper caches), keeping the camera.
+    /// Draws the notebooks on screen anew (new theme: paper caches), keeping the cameras.
     fn reopen(&mut self) {
-        let Screen::Notebook(o) = &self.screen else { return };
-        let (id, cam) = (o.id.clone(), o.camera);
-        if self.open(&id).is_ok()
-            && let Screen::Notebook(o) = &mut self.screen
-        {
-            o.camera = cam;
+        let fresh: Vec<(PaneKey, Pages)> = match &self.screen {
+            Screen::Notebook(s) => s.panes.iter().map(|o| (o.key, self.new_pages(&o.id, nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout())))).collect(),
+            Screen::Library => return,
+        };
+        let Screen::Notebook(s) = &mut self.screen else { return };
+        for (key, pages) in fresh {
+            if let Some(o) = s.pane_mut(key) {
+                o.pages = pages;
+            }
         }
     }
 
     /// The current main page's notes sheet (a text side sheet on the right), if any.
     fn notes_sheet(&self) -> Option<(String, String)> {
-        let Screen::Notebook(o) = &self.screen else { return None };
+        let o = self.pane()?;
         let current = o.pages.current_number(&o.camera);
         let main = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone())?;
         let notes = o.pages.pages.iter().map(|p| &p.placed).filter(|p| p.main_node == main && p.side > 0 && p.spec.background == Background::Text).min_by_key(|p| p.side);
@@ -2055,7 +2358,7 @@ impl App {
                 self.close_text_page();
                 return Task::none();
             }
-            let Screen::Notebook(o) = &self.screen else { return Task::none() };
+            let Some(o) = self.pane() else { return Task::none() };
             match o.nb.add_side_sheet(&main, n0te_core::notebook::Side::Right, 0, &SheetSpec::a4(Background::Text)) {
                 Ok((_, s)) => {
                     let _ = self.lib.save_notebook(&o.nb);
@@ -2069,15 +2372,20 @@ impl App {
             }
         }
         let task = self.open_text_page(&sheet, true);
-        if let Some(t) = &mut self.text_page {
+        if let Some(t) = self.text_page_mut() {
             t.main_node = Some(main);
         }
         task
     }
 
+    /// The text page of the pane messages are for.
+    fn text_page_mut(&mut self) -> Option<&mut TextPage> {
+        self.pane_mut().and_then(|o| o.text_page.as_mut())
+    }
+
     /// The docked notes follow the page in view.
     fn follow_notes(&mut self) {
-        let Some(t) = &self.text_page else { return };
+        let Some(t) = self.pane().and_then(|o| o.text_page.as_ref()) else { return };
         if !t.docked {
             return;
         }
@@ -2088,7 +2396,7 @@ impl App {
         if sheet.is_empty() {
             // This page has no notes yet: keep the column, empty, until the user writes.
             self.save_text_page();
-            if let Some(t) = &mut self.text_page {
+            if let Some(t) = self.text_page_mut() {
                 t.main_node = Some(main);
                 t.sheet_id.clear();
                 t.doc = crate::blocks::Doc::from_markdown("");
@@ -2096,7 +2404,7 @@ impl App {
             }
         } else {
             let _ = self.open_text_page(&sheet, true);
-            if let Some(t) = &mut self.text_page {
+            if let Some(t) = self.text_page_mut() {
                 t.main_node = Some(main);
             }
         }
@@ -2121,46 +2429,53 @@ impl App {
             Some((id, position)) => tp.doc.focus_block(id, text_editor::Cursor { position, selection: None }).map(Message::Blocks),
             None => Task::none(),
         };
-        self.text_page = Some(tp);
+        if let Some(o) = self.pane_mut() {
+            o.text_page = Some(tp);
+        }
         task
     }
 
     fn save_text_page(&mut self) {
-        let Some(t) = self.text_page.as_mut() else { return };
+        let Some(o) = self.pane() else { return };
+        let Some(t) = o.text_page.as_ref() else { return };
         let md = t.doc.to_markdown();
+        let nb = o.id.clone();
         if t.sheet_id.is_empty() {
             // Notes for a page that had none: the first words create the notes sheet.
             if md.trim().is_empty() {
-                t.dirty = false;
+                if let Some(t) = self.text_page_mut() {
+                    t.dirty = false;
+                }
                 return;
             }
             let Some(main) = t.main_node.clone() else { return };
-            let Screen::Notebook(o) = &self.screen else { return };
             let Ok((_, s)) = o.nb.add_side_sheet(&main, n0te_core::notebook::Side::Right, 0, &SheetSpec::a4(Background::Text)) else { return };
             let _ = self.lib.save_notebook(&o.nb);
-            let Some(nb) = self.notebook_id() else { return };
             let Ok(sheet) = self.lib.load_sheet(&nb, &s) else { return };
-            if let Some(t) = self.text_page.as_mut() {
+            if let Some(t) = self.text_page_mut() {
                 t.sheet_id = s;
                 t.sheet = sheet;
             }
             self.relayout();
         }
-        let Some(t) = self.text_page.as_mut() else { return };
+        let Some(t) = self.text_page_mut() else { return };
         let _ = t.sheet.set_page_text(&md);
         t.saved = md;
         t.dirty = false;
         let (id, snap) = (t.sheet_id.clone(), t.sheet.snapshot().unwrap_or_default());
         if let Ok(sheet) = Sheet::load(0, &snap) {
-            self.store_sheet(&id, &sheet);
+            self.store_sheet(&nb, &id, &sheet);
         }
     }
 
+    /// Closes the text page of the pane messages are for (saved first).
     pub(crate) fn close_text_page(&mut self) {
-        if self.text_page.as_ref().is_some_and(|t| t.dirty) {
+        if self.pane().and_then(|o| o.text_page.as_ref()).is_some_and(|t| t.dirty) {
             self.save_text_page();
         }
-        self.text_page = None;
+        if let Some(o) = self.pane_mut() {
+            o.text_page = None;
+        }
     }
 
     /// The text page editor: a paper column with the block editor (full width, or the docked
@@ -2222,16 +2537,14 @@ impl App {
         container(scrollable(page).style(theme::scroll_dark).height(Length::Fill).width(Length::Fill)).style(theme::surface).width(Length::Fill).height(Length::Fill).into()
     }
 
-    fn notebook_id(&self) -> Option<String> {
-        match &self.screen {
-            Screen::Notebook(o) => Some(o.id.clone()),
-            Screen::Library => None,
-        }
+    /// The notebook of the pane messages are for.
+    pub(crate) fn notebook_id(&self) -> Option<String> {
+        self.pane().map(|o| o.id.clone())
     }
 
     /// The main page in the middle of the view: its node and spec.
     pub fn page_in_view(&self) -> Option<(String, SheetSpec)> {
-        let Screen::Notebook(o) = &self.screen else { return None };
+        let o = self.pane()?;
         let i = o.pages.index_of_number(o.pages.current_number(&o.camera))?;
         let p = &o.pages.pages[i].placed;
         Some((p.node.clone(), p.spec.clone()))
@@ -2239,28 +2552,54 @@ impl App {
 
     /// The open notebook is someone else's and we may only read it.
     pub fn read_only(&self) -> bool {
-        let Some(id) = self.notebook_id() else { return false };
-        self.joined.iter().any(|j| j.notebook == id && !j.write)
+        self.notebook_id().is_some_and(|id| self.read_only_nb(&id))
     }
 
-    /// Changes the open notebook, saves it and lays the pages out again.
+    /// Notebook `nb` is someone else's and we may only read it.
+    pub fn read_only_nb(&self, nb: &str) -> bool {
+        self.joined.iter().any(|j| j.notebook == nb && !j.write)
+    }
+
+    /// Changes the open notebook, saves it and lays its pages out again (in every pane showing
+    /// it: they share the document).
     pub(crate) fn edit_notebook(&mut self, f: impl FnOnce(&Notebook) -> n0te_core::Result<()>) {
         if self.read_only() {
             self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
             return;
         }
-        let lib = self.lib.clone();
-        let layout = self.settings.layout();
-        let Screen::Notebook(o) = &mut self.screen else { return };
+        let Some(o) = self.pane() else { return };
         let done = f(&o.nb);
-        let _ = lib.save_notebook(&o.nb);
-        o.rows = o.nb.outline(false);
-        o.marked = o.nb.marked();
-        o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
-        o.camera = o.pages.clamp(o.camera);
-        self.changed(Some(&[]));
+        let _ = self.lib.save_notebook(&o.nb);
+        let id = o.id.clone();
+        self.relayout_book(&id);
+        self.changed(&id, Some(&[]));
         if let Err(e) = done {
             self.say(format!("Nicht geändert: {e}"));
+        }
+    }
+
+    /// Lays out every pane showing notebook `id` again (its document changed), keeping their
+    /// cameras.
+    fn relayout_book(&mut self, id: &str) {
+        let layout = self.settings.layout();
+        let Screen::Notebook(s) = &mut self.screen else { return };
+        for o in s.panes.iter_mut().filter(|o| o.id == id) {
+            o.rows = o.nb.outline(false);
+            o.marked = o.nb.marked();
+            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), layout));
+            o.camera = o.pages.clamp(o.camera);
+        }
+    }
+
+    /// Every notebook on screen laid out again (the gaps between pages changed).
+    fn relayout_all(&mut self) {
+        let shown = match &self.screen {
+            Screen::Notebook(s) => s.notebooks(),
+            Screen::Library => Vec::new(),
+        };
+        for id in shown {
+            self.relayout_book(&id);
+            self.changed(&id, Some(&[]));
         }
     }
 
@@ -2271,7 +2610,7 @@ impl App {
             self.say("Nur lesen: Seiten ändert, wer dich eingeladen hat");
             return;
         }
-        let Screen::Notebook(o) = &self.screen else { return };
+        let Some(o) = self.pane() else { return };
         let mut sheet_of = std::collections::HashMap::new();
         for row in o.nb.outline(true) {
             if let OutlineRow::Sheet { node, sheet_id, left, right, .. } = row {
@@ -2334,34 +2673,42 @@ impl App {
         container(container(col).padding(24).width(Length::Fixed(520.0)).style(theme::panel)).padding(Padding { top: 120.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
-    /// A touchpad gesture: a pinch zooms around the fingers (and pans as they move), a swipe
-    /// that ends in motion lets the page glide on, fingers on the touchpad catch it.
+    /// A touchpad gesture: a pinch zooms around the fingers (and pans as they move) in the pane
+    /// under them, a swipe that ends in motion lets the page glide on (in the active pane: the
+    /// swipe scrolled it, which made it active), fingers on the touchpad catch it.
     fn gesture(&mut self, g: Gesture) -> Task<Message> {
-        let Screen::Notebook(o) = &self.screen else {
+        let Screen::Notebook(s) = &self.screen else {
             self.pinch = None;
             self.glide = None;
             return Task::none();
         };
-        let c = o.camera;
         match g {
             Gesture::PinchBegin { x, y } => {
                 self.glide = None;
-                let p = Point::new(x - c.origin.x, y - c.origin.y);
-                // Only over the pages (not the sidebar, the bars or a panel).
-                let over = p.x >= 0.0 && p.y >= 0.0 && p.x <= c.viewport.width && p.y <= c.viewport.height;
+                // Only over the pages (not the outline, the bars or a panel).
+                let under = s.panes.iter().find(|o| {
+                    let c = o.camera;
+                    let p = Point::new(x - c.origin.x, y - c.origin.y);
+                    p.x >= 0.0 && p.y >= 0.0 && p.x <= c.viewport.width && p.y <= c.viewport.height
+                });
                 let panel = self.page_panel || self.share.is_some() || self.history.is_some() || self.export.is_some() || self.show_settings || self.plot_edit.is_some();
-                self.pinch = (over && !panel).then_some((c.zoom, p));
+                self.pinch = under.filter(|_| !panel).map(|o| (o.key, o.camera.zoom, Point::new(x - o.camera.origin.x, y - o.camera.origin.y)));
+                if let Some((key, ..)) = self.pinch {
+                    self.activate(key);
+                }
                 Task::none()
             }
             Gesture::Pinch { scale, dx, dy } => {
-                let Some((z0, p)) = self.pinch else { return Task::none() };
+                let Some((key, z0, p)) = self.pinch else { return Task::none() };
+                let Some(o) = s.pane(key) else { return Task::none() };
+                let c = o.camera;
                 // The page point under the fingers stays under them while they move and spread.
                 let anchor = Point::new(c.x + p.x / c.zoom, c.y + p.y / c.zoom);
                 let p = Point::new(p.x + dx, p.y + dy);
-                self.pinch = Some((z0, p));
                 let zoom = (z0 * scale).clamp(pages::MIN_ZOOM, pages::MAX_ZOOM);
                 let next = o.pages.clamp(Camera { x: anchor.x - p.x / zoom, y: anchor.y - p.y / zoom, zoom, ..c });
-                self.handle(Message::Camera(next))
+                self.pinch = Some((key, z0, p));
+                self.handle(Message::Pane(key, Box::new(Message::Camera(next))))
             }
             Gesture::PinchEnd => {
                 self.pinch = None;
@@ -2369,7 +2716,7 @@ impl App {
             }
             Gesture::Fling { vx, vy } => {
                 if self.settings.momentum && self.pinch.is_none() {
-                    self.glide = Some((vx, vy, Instant::now()));
+                    self.glide = Some((s.active, vx, vy, Instant::now()));
                 }
                 Task::none()
             }
@@ -2383,8 +2730,11 @@ impl App {
     /// One frame of a gliding page: it slows down like on paper (time constant 0.35 s) and stops
     /// at the notebook's edge.
     fn glide_step(&mut self, now: Instant) -> Task<Message> {
-        let Some((vx, vy, last)) = self.glide else { return Task::none() };
-        let Screen::Notebook(o) = &self.screen else {
+        let Some((key, vx, vy, last)) = self.glide else { return Task::none() };
+        let Some(o) = (match &self.screen {
+            Screen::Notebook(s) => s.pane(key),
+            Screen::Library => None,
+        }) else {
             self.glide = None;
             return Task::none();
         };
@@ -2396,23 +2746,36 @@ impl App {
         // An axis that hit the edge stops; the other glides on.
         let vx = if (next.x - want.x).abs() > 0.01 { 0.0 } else { vx * decay };
         let vy = if (next.y - want.y).abs() > 0.01 { 0.0 } else { vy * decay };
-        self.glide = (vx.hypot(vy) > 20.0).then_some((vx, vy, now));
+        self.glide = (vx.hypot(vy) > 20.0).then_some((key, vx, vy, now));
         if next == c {
             return Task::none();
         }
-        self.handle(Message::Camera(next))
+        self.handle(Message::Pane(key, Box::new(Message::Camera(next))))
     }
 
-    /// Writes a sheet and makes the canvas read it again.
-    fn store_sheet(&mut self, sheet_id: &str, sheet: &Sheet) {
-        let Some(nb) = self.notebook_id() else { return };
-        if let Err(e) = self.lib.save_sheet(&nb, sheet_id, sheet) {
+    /// Writes a sheet of notebook `nb` and makes every pane showing it read it again; the same
+    /// text page open (and not typed in) in another pane shows the new text.
+    fn store_sheet(&mut self, nb: &str, sheet_id: &str, sheet: &Sheet) {
+        if let Err(e) = self.lib.save_sheet(nb, sheet_id, sheet) {
             self.say(format!("Speichern fehlgeschlagen: {e}"));
         }
-        if let Screen::Notebook(o) = &self.screen {
-            o.pages.reload_sheet(sheet_id);
+        let lib = self.lib.clone();
+        if let Screen::Notebook(s) = &mut self.screen {
+            let body = sheet.page_text();
+            for o in s.panes.iter_mut().filter(|o| o.id == nb) {
+                o.pages.reload_sheet(sheet_id);
+                if let Some(t) = &mut o.text_page
+                    && t.sheet_id == sheet_id
+                    && !t.dirty
+                    && t.saved != body
+                    && lib.refresh_sheet(nb, sheet_id, &t.sheet).unwrap_or(false)
+                {
+                    t.saved = t.sheet.page_text();
+                    t.doc = crate::blocks::Doc::from_markdown(&t.saved);
+                }
+            }
         }
-        self.changed(Some(&[sheet_id.to_string()]));
+        self.changed(nb, Some(&[sheet_id.to_string()]));
     }
 
     /// Saves the box being edited (text, and with `place` its position/size).
@@ -2425,9 +2788,9 @@ impl App {
             let _ = e.sheet.place_text_box(&e.box_id, e.x, e.y, e.w, e.size);
         }
         e.dirty = false;
-        let (sheet_id, sheet) = (e.sheet_id.clone(), Sheet::load(0, &e.sheet.snapshot().unwrap_or_default()));
+        let (nb, sheet_id, sheet) = (e.notebook.clone(), e.sheet_id.clone(), Sheet::load(0, &e.sheet.snapshot().unwrap_or_default()));
         if let Ok(sheet) = sheet {
-            self.store_sheet(&sheet_id, &sheet);
+            self.store_sheet(&nb, &sheet_id, &sheet);
         }
     }
 
@@ -2441,7 +2804,7 @@ impl App {
             && e.content.text().trim().is_empty()
         {
             let _ = e.sheet.remove(std::slice::from_ref(&e.box_id));
-            self.store_sheet(&e.sheet_id, &e.sheet);
+            self.store_sheet(&e.notebook, &e.sheet_id, &e.sheet);
         }
     }
 
@@ -2455,21 +2818,19 @@ impl App {
         let Some(tb) = sheet.text_boxes().into_iter().find(|t| t.id == box_id) else { return Task::none() };
         let mut content = text_editor::Content::with_text(&tb.text);
         content.perform(text_editor::Action::Move(text_editor::Motion::DocumentEnd));
-        self.editing = Some(Editing { sheet_id: sheet_id.to_string(), box_id: box_id.to_string(), sheet, content, x: tb.x, y: tb.y, w: tb.w, size: tb.size, dirty: false, last_change: Instant::now() });
+        let pane = self.pane().map(|o| o.key).unwrap_or_default();
+        self.editing = Some(Editing { pane, notebook: nb, sheet_id: sheet_id.to_string(), box_id: box_id.to_string(), sheet, content, x: tb.x, y: tb.y, w: tb.w, size: tb.size, dirty: false, last_change: Instant::now() });
         iced::widget::operation::focus(editor_id())
     }
 
     fn new_text(&mut self, sheet_id: &str, x: f32, y: f32) -> Task<Message> {
         self.finish_text();
         let Some(nb) = self.notebook_id() else { return Task::none() };
-        let page_w = match &self.screen {
-            Screen::Notebook(o) => o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet_id).map(|p| p.placed.rect.width()).unwrap_or(595.0),
-            _ => 595.0,
-        };
+        let page_w = self.pane().and_then(|o| o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet_id)).map(|p| p.placed.rect.width()).unwrap_or(595.0);
         let Ok(sheet) = self.lib.load_sheet(&nb, sheet_id) else { return Task::none() };
         let w = (page_w - x - 24.0).clamp(80.0, 360.0);
         let Ok(id) = sheet.add_text_box(x, y, w, 14.0, "") else { return Task::none() };
-        self.store_sheet(sheet_id, &sheet);
+        self.store_sheet(&nb, sheet_id, &sheet);
         self.edit_text(sheet_id, &id)
     }
 
@@ -2481,8 +2842,10 @@ impl App {
             return Vec::new();
         }
         let mut out: Vec<Element<'a, Message>> = Vec::new();
+        // The box being typed into shows as an editor in its pane only.
+        let editing = self.editing.as_ref().filter(|e| e.pane == o.key);
         for (sheet, page, tb) in o.pages.visible_texts(&cam) {
-            if self.editing.as_ref().is_some_and(|e| e.box_id == tb.id) {
+            if editing.is_some_and(|e| e.box_id == tb.id) {
                 continue;
             }
             let x = (page.x0 + tb.x - cam.x) * cam.zoom;
@@ -2497,7 +2860,7 @@ impl App {
             let area = mouse_area(body).on_press(on_press).interaction(iced::mouse::Interaction::Text);
             out.push(pin(area).x(x).y(y).into());
         }
-        if let Some(e) = &self.editing
+        if let Some(e) = editing
             && let Some(page) = o.pages.pages.iter().find(|p| p.placed.sheet_id == e.sheet_id).map(|p| p.placed.rect)
         {
             let x = (page.x0 + e.x - cam.x) * cam.zoom;
@@ -2530,15 +2893,11 @@ impl App {
         out
     }
 
-    /// Lays the open notebook out again after a structural change (keeps the camera).
+    /// Lays the open notebook out again after a structural change (keeps the cameras).
     fn relayout(&mut self) {
-        if let Screen::Notebook(o) = &mut self.screen {
-            o.rows = o.nb.outline(false);
-            o.marked = o.nb.marked();
-            o.pages.relayout(nl::layout(&o.rows, &o.nb.outline(true), self.settings.layout()));
-            o.camera = o.pages.clamp(o.camera);
-        }
-        self.changed(Some(&[]));
+        let Some(id) = self.notebook_id() else { return };
+        self.relayout_book(&id);
+        self.changed(&id, Some(&[]));
     }
 
     /// A PDF: in the library a new notebook named after the file, in a notebook new pages
@@ -2644,12 +3003,17 @@ impl App {
                 _ => Task::none(),
             };
         }
-        // The outline's page menu and rename dialog: Esc closes them, the rest waits.
-        if self.outline.menu.is_some() || self.outline.renaming.is_some() {
+        // A page menu or rename dialog of the outline, the ⧉ menu: Esc closes them, the rest waits.
+        if let Screen::Notebook(s) = &mut self.screen
+            && (s.menu.is_some() || s.panes.iter().any(|o| o.outline.menu.is_some() || o.outline.renaming.is_some()))
+        {
             if let Key::Named(Named::Escape) = key.as_ref() {
-                self.outline.menu = None;
-                self.outline.asked = None;
-                self.outline.renaming = None;
+                s.menu = None;
+                for o in &mut s.panes {
+                    o.outline.menu = None;
+                    o.outline.asked = None;
+                    o.outline.renaming = None;
+                }
             }
             return Task::none();
         }
@@ -2669,7 +3033,7 @@ impl App {
                 e.last_change = Instant::now();
                 return iced::widget::operation::focus(editor_id());
             }
-            if self.text_page.is_some() {
+            if self.pane().is_some_and(|o| o.text_page.is_some()) {
                 return self.handle(Message::Blocks(crate::blocks::Msg::Wrap(mark)));
             }
         }
@@ -2690,7 +3054,7 @@ impl App {
             if matches!(self.screen, Screen::Library) && self.shelf.escape() {
                 return Task::none();
             }
-            if self.text_page.is_some() {
+            if self.pane().is_some_and(|o| o.text_page.is_some()) {
                 self.close_text_page();
                 return Task::none();
             }
@@ -2704,9 +3068,17 @@ impl App {
                 return Task::none();
             }
             // Search results in the sidebar: the outline again.
-            if self.search.active() && matches!(self.screen, Screen::Notebook(_)) {
-                self.search.clear();
+            if let Some(search) = self.search_mut().filter(|s| s.active()) {
+                search.clear();
                 return Task::none();
+            }
+            // Two notebooks: one shown alone comes back beside the other, then the one beside
+            // the main pane closes.
+            if let Screen::Notebook(s) = &self.screen
+                && s.panes.len() > 1
+            {
+                let side = s.other(s.main).unwrap_or(s.main);
+                return self.handle(Message::Split(if s.maxed.is_some() { split::Msg::Alone(None) } else { split::Msg::Close(side) }));
             }
             return self.handle(Message::Back);
         }
@@ -2759,7 +3131,7 @@ impl App {
     pub fn view(&self) -> Element<'_, Message> {
         let base = match &self.screen {
             Screen::Library => crate::shelf::layers(self, library::view(self)),
-            Screen::Notebook(o) => sidebar::layers(self, self.notebook_view(o)),
+            Screen::Notebook(s) => split::layers(self, s, sidebar::layers(self, self.notebook_view(s))),
         };
         let overlay: Option<Element<'_, Message>> = if let Some(w) = &self.size_warning {
             Some(self.size_warning_view(w))
@@ -2772,8 +3144,10 @@ impl App {
         } else if let (Screen::Notebook(o), Some(picked)) = (&self.screen, &self.export) {
             Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera)))
         } else if let (Screen::Notebook(_), Some(e)) = (&self.screen, &self.plot_edit) {
-            // Esc in a field cancels too (the field would only let go of the focus).
-            Some(Element::from(crate::widgets::on_escape(e.view(), crate::plots::Msg::Escape)).map(Message::Plot))
+            // Esc in a field cancels too (the field would only let go of the focus). Its
+            // messages go to the pane it was opened in.
+            let key = self.plot_pane;
+            Some(Element::from(crate::widgets::on_escape(e.view(), crate::plots::Msg::Escape)).map(move |m| split::route(key, Message::Plot(m))))
         } else {
             None
         };
@@ -2995,7 +3369,9 @@ impl App {
             ("Strg F", "Im Notizbuch suchen: Handschrift, Text, Überschriften, PDF"),
             ("Rechtsklick", "Bibliothek: Menü für Notizbuch, Ordner, Tag"),
             ("Karte ziehen", "Auf einen Ordner links: dorthin verschieben"),
-            ("Esc", "Zurück · Bearbeiten beenden · Bibliothek"),
+            ("Esc", "Zurück · Bearbeiten beenden · zweites Notizbuch schließen · Bibliothek"),
+            ("⧉ in der Leiste", "Daneben öffnen: dieses Notizbuch nochmal oder ein anderes"),
+            ("Strich zwischen zweien", "Ziehen: Breite (⅓, ½, ⅔) · an den Rand: schließen"),
             ("Bild ↑ / ↓, ← / →", "Vorige / nächste Seite"),
             ("Pos1 / Ende", "Erste / letzte Seite"),
             ("Mausrad · Ziehen", "Verschieben"),
@@ -3147,18 +3523,62 @@ impl App {
         container(container(col).padding(26).width(Length::Fixed(860.0)).max_height(820.0).style(theme::panel)).padding(Padding { top: 40.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
-    fn notebook_view<'a>(&'a self, o: &'a Open) -> Element<'a, Message> {
+    /// The notebook screen: the toolbar for the active pane, live with the tablet, the panes
+    /// (one, or two side by side), the status bar.
+    fn notebook_view<'a>(&'a self, s: &'a Split) -> Element<'a, Message> {
+        let o = s.active_pane();
+        let live_bar: Element<'a, Message> = match &self.live_session {
+            Some(l) => {
+                // With two panes: live goes with ★.
+                let label = if s.panes.len() > 1 { format!("Live mit {} · ★", l.name) } else { format!("Live mit {}", l.name) };
+                container(
+                    row![
+                        text(theme::cased(&label)).font(theme::label_font()).size(theme::label_size()).color(theme::p().accent),
+                        Space::new().width(18),
+                        iced::widget::checkbox(l.follow_them).label("Ansicht folgt dem Tablet").on_toggle(Message::FollowThem).size(14).text_size(12),
+                        Space::new().width(18),
+                        iced::widget::checkbox(l.they_follow).label("Tablet folgt mir").on_toggle(Message::TheyFollow).size(14).text_size(12),
+                        Space::new().width(18),
+                        iced::widget::checkbox(self.settings.remote_frame).label("Rahmen zeigen").on_toggle(Message::RemoteFrame).size(14).text_size(12),
+                        Space::new().width(Length::Fill),
+                        button(theme::btn_small("Beenden")).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
+                    ]
+                    .align_y(Alignment::Center),
+                )
+                .padding([4, 14])
+                .width(Length::Fill)
+                .style(theme::chrome)
+                .into()
+            }
+            None => Space::new().height(0).into(),
+        };
+        column![
+            self.top_bar(s, o, o.pages.current_number(&o.camera)),
+            container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
+            live_bar,
+            split::view(self, s),
+            container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
+            self.status_bar(),
+        ]
+        .into()
+    }
+
+    /// One pane: its outline, the pages (or its text page) with the text boxes, and, in the
+    /// active one, the panel opened from the toolbar over them.
+    pub(crate) fn pane_view<'a>(&'a self, o: &'a Open, active: bool) -> Element<'a, Message> {
         let current = o.pages.current_number(&o.camera);
         let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold).on_double_click(Message::NewText).on_plot_click(Message::EditPlot);
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
-        if self.sidebar {
-            body = body.push(sidebar::view(self, o, current));
+        if o.sidebar {
+            body = body.push(sidebar::view(self, o, current, sidebar::Ids { other: !active }));
             body = body.push(container(Space::new()).width(1).height(Length::Fill).style(theme::hairline));
         }
-        let panel: Option<Element<'a, Message>> = if let Some(h) = &self.history {
+        let panel: Option<Element<'a, Message>> = if !active {
+            None
+        } else if let Some(h) = &self.history {
             Some(self.history_panel(h))
         } else if let Some(invites) = &self.share {
             Some(self.share_panel(invites))
@@ -3173,7 +3593,7 @@ impl App {
             Some(p) => stack![canvas, container(p).padding(16).width(Length::Fill)].into(),
             None => canvas,
         };
-        match &self.text_page {
+        match &o.text_page {
             Some(t) if !t.docked => body = body.push(self.text_page_view(t, o)),
             Some(t) => {
                 body = body.push(canvas);
@@ -3182,40 +3602,13 @@ impl App {
             }
             None => body = body.push(canvas),
         }
-        let live_bar: Element<'a, Message> = match &self.live_session {
-            Some(l) => container(
-                row![
-                    text(theme::cased(&format!("Live mit {}", l.name))).font(theme::label_font()).size(theme::label_size()).color(theme::p().accent),
-                    Space::new().width(18),
-                    iced::widget::checkbox(l.follow_them).label("Ansicht folgt dem Tablet").on_toggle(Message::FollowThem).size(14).text_size(12),
-                    Space::new().width(18),
-                    iced::widget::checkbox(l.they_follow).label("Tablet folgt mir").on_toggle(Message::TheyFollow).size(14).text_size(12),
-                    Space::new().width(18),
-                    iced::widget::checkbox(self.settings.remote_frame).label("Rahmen zeigen").on_toggle(Message::RemoteFrame).size(14).text_size(12),
-                    Space::new().width(Length::Fill),
-                    button(theme::btn_small("Beenden")).padding([3, 10]).on_press(Message::StopLive).style(theme::ghost),
-                ]
-                .align_y(Alignment::Center),
-            )
-            .padding([4, 14])
-            .width(Length::Fill)
-            .style(theme::chrome)
-            .into(),
-            None => Space::new().height(0).into(),
-        };
-        column![
-            self.top_bar(o, current),
-            container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
-            live_bar,
-            body.height(Length::Fill),
-            container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
-            self.status_bar(),
-        ]
-        .into()
+        body.height(Length::Fill).into()
     }
 
-    fn top_bar<'a>(&'a self, o: &'a Open, current: u32) -> Element<'a, Message> {
+    fn top_bar<'a>(&'a self, s: &'a Split, o: &'a Open, current: u32) -> Element<'a, Message> {
         let chip = |s: String| container(text(s).font(theme::meta_font()).size(theme::SMALL)).padding([3, 10]).style(theme::chip);
+        // Two panes: live is the main pane's (★).
+        let star = if s.panes.len() > 1 { "★ " } else { "" };
         container(
             row![
                 button(theme::btn("‹ Bibliothek")).padding(theme::pad()).on_press(Message::Back).style(theme::ghost),
@@ -3229,12 +3622,14 @@ impl App {
                     .padding([3, 10])
                     .on_press(Message::ShowPage(!self.page_panel))
                     .style(theme::tab(self.page_panel)),
+                Space::new().width(6),
+                split::menu_button(s.menu.is_some()),
                 Space::new().width(14),
                 button(theme::btn("+ Textseite")).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
                 Space::new().width(6),
                 button(theme::btn("+ Koordinatensystem")).padding(theme::pad()).on_press(Message::InsertPlot).style(theme::tab(false)),
                 Space::new().width(6),
-                button(theme::btn("Notizen")).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(self.text_page.as_ref().is_some_and(|t| t.docked))),
+                button(theme::btn("Notizen")).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(o.text_page.as_ref().is_some_and(|t| t.docked))),
                 Space::new().width(6),
                 button(theme::btn("PDF einfügen")).padding(theme::pad()).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
                 Space::new().width(6),
@@ -3244,8 +3639,8 @@ impl App {
                 button(theme::btn(&self.share_label(&o.id))).padding(theme::pad()).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
                 Space::new().width(6),
                 match &self.live_session {
-                    Some(l) => button(theme::btn(&format!("● Live · {}", l.name))).padding(theme::pad()).on_press(Message::StopLive).style(theme::accent_button),
-                    None => button(theme::btn("Live")).padding(theme::pad()).on_press(Message::StartLive).style(theme::tab(false)),
+                    Some(l) => button(theme::btn(&format!("{star}● Live · {}", l.name))).padding(theme::pad()).on_press(Message::StopLive).style(theme::accent_button),
+                    None => button(theme::btn(&format!("{star}Live"))).padding(theme::pad()).on_press(Message::StartLive).style(theme::tab(false)),
                 },
             ]
             .align_y(Alignment::Center),
@@ -3283,7 +3678,7 @@ impl App {
                     None => Space::new().into(),
                 },
                 Space::new().width(6),
-                if self.outline.undo && matches!(self.screen, Screen::Notebook(_)) {
+                if self.undo_delete.as_ref().is_some_and(|nb| matches!(&self.screen, Screen::Notebook(s) if s.shows(nb))) {
                     Element::from(button(theme::btn_small("Rückgängig")).padding([0, 8]).on_press(Message::Outline(sidebar::Msg::Undo)).style(theme::ghost))
                 } else {
                     Space::new().into()
@@ -3449,6 +3844,15 @@ impl App {
     pub fn scroll<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
         scrollable(content).style(theme::scroll_dark).height(Length::Fill).width(Length::Fill).into()
     }
+}
+
+/// Where a pane looks: the sheet nearest the middle and the view in its points.
+fn view_of(o: &Open) -> Option<(String, [f32; 4])> {
+    let c = o.camera;
+    let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
+    let p = o.pages.sheet_at(cx, cy).or_else(|| o.pages.pages.iter().map(|p| &p.placed).min_by(|a, b| (a.rect.y0 - cy).abs().total_cmp(&(b.rect.y0 - cy).abs())))?;
+    let v = c.view_rect();
+    Some((p.sheet_id.clone(), [v.x0 - p.rect.x0, v.y0 - p.rect.y0, v.x1 - p.rect.x0, v.y1 - p.rect.y0]))
 }
 
 /// The folded groups around a sheet (main or side sheet), outermost first.

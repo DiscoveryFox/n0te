@@ -18,6 +18,7 @@ pub mod search;
 pub mod settings;
 pub mod shelf;
 pub mod sidebar;
+pub mod split;
 pub mod theme;
 pub mod widgets;
 

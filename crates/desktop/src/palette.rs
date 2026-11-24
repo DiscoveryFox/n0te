@@ -36,6 +36,11 @@ pub enum Command {
     PageSetup,
     /// The outline's search field (Ctrl+F).
     Search,
+    /// Two side by side: this notebook again beside it, left and right swapped, the other one
+    /// closed.
+    Again,
+    Swap,
+    CloseOther,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +82,13 @@ pub fn items(app: &App) -> Vec<Item> {
             v.push(item("Teilen / Gäste einladen", "nur lesen oder lesen & schreiben", Command::Share));
             v.push(item("Verlauf: früheren Stand wiederherstellen", "Strg H", Command::History));
             v.push(item("Gliederung ein/aus", "Strg B", Command::ToggleSidebar));
+            v.push(item("Dieses Notizbuch daneben", "zwei Stellen zugleich · ⧉ in der Leiste", Command::Again));
+            if let Screen::Notebook(s) = &app.screen
+                && s.panes.len() > 1
+            {
+                v.push(item("Seiten tauschen", "die zwei Notizbücher", Command::Swap));
+                v.push(item("Den anderen schließen", "Esc", Command::CloseOther));
+            }
             v.push(item("Zoom 100 %", "Strg 0", Command::Zoom(1.0)));
             v.push(item("Zoom 200 %", "", Command::Zoom(2.0)));
             v.push(item("Bibliothek", "Esc", Command::Library));

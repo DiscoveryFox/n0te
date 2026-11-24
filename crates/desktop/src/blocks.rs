@@ -120,7 +120,6 @@ struct Snapshot {
 
 pub struct Doc {
     pub blocks: Vec<Block>,
-    next_id: u64,
     /// The block that last received input (iced owns the real focus state).
     pub focus: Option<u64>,
     undo: Vec<Snapshot>,
@@ -136,13 +135,15 @@ enum EditClass {
     Other,
 }
 
+static NEXT_BLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub fn editor_id(block: u64) -> widget::Id {
     widget::Id::from(format!("blk-{block}"))
 }
 
 impl Doc {
     pub fn new(items: &[(&str, &str)]) -> Self {
-        let mut doc = Doc { blocks: Vec::new(), next_id: 1, focus: None, undo: Vec::new(), redo: Vec::new(), last_edit: None };
+        let mut doc = Doc { blocks: Vec::new(), focus: None, undo: Vec::new(), redo: Vec::new(), last_edit: None };
         for (prefix, body) in items {
             let id = doc.alloc();
             doc.blocks.push(Block { id, kind: Kind::from_prefix(prefix), content: Content::with_text(body) });
@@ -265,10 +266,10 @@ impl Doc {
         out
     }
 
+    /// A new block id, unique in the whole app: two text pages can be open at once (one in each
+    /// pane of the split), and focusing a block goes by its widget id.
     fn alloc(&mut self) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        id
+        NEXT_BLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub fn index(&self, id: u64) -> Option<usize> {

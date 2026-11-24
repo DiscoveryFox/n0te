@@ -351,8 +351,8 @@ fn stored_body(root: &std::path::Path, nb: &str, sheet: &str) -> String {
 fn text_page_with_markdown_shortcuts_saves_its_body() {
     let (mut h, root, nb) = blank_notebook("textpage");
     h.message(Message::NewTextPage);
-    let sheet = h.app.text_page.as_ref().expect("text page open").sheet_id.clone();
-    assert!(!h.app.text_page.as_ref().unwrap().docked);
+    let sheet = open(&h).text_page.as_ref().expect("text page open").sheet_id.clone();
+    assert!(!open(&h).text_page.as_ref().unwrap().docked);
     h.type_text("# Mitschrift");
     h.press(Named::Enter);
     h.type_text("Der Mittelwertsatz.");
@@ -364,14 +364,14 @@ fn text_page_with_markdown_shortcuts_saves_its_body() {
     assert_eq!((p.placed.number, p.placed.spec.background), (2, n0te_core::notebook::Background::Text));
     // Opening it again from the canvas shows the stored body as blocks.
     h.message(Message::OpenTextPage(sheet.clone(), false));
-    assert_eq!(h.app.text_page.as_ref().unwrap().doc.blocks.len(), 2);
+    assert_eq!(open(&h).text_page.as_ref().unwrap().doc.blocks.len(), 2);
 }
 
 #[test]
 fn notes_column_creates_a_side_text_page_and_follows_the_page() {
     let (mut h, root, nb) = blank_notebook("notes");
     h.message(Message::ToggleNotes);
-    let t = h.app.text_page.as_ref().expect("notes open");
+    let t = open(&h).text_page.as_ref().expect("notes open");
     assert!(t.docked);
     let sheet = t.sheet_id.clone();
     let o = open(&h);
@@ -379,7 +379,7 @@ fn notes_column_creates_a_side_text_page_and_follows_the_page() {
     assert_eq!((side.placed.side, side.placed.label()), (1, "1 R1".to_string()));
     h.type_text("Frage: gilt das für komplexe Zahlen?");
     h.message(Message::ToggleNotes);
-    assert!(h.app.text_page.is_none());
+    assert!(open(&h).text_page.is_none());
     assert_eq!(stored_body(&root, &nb, &sheet), "Frage: gilt das für komplexe Zahlen?");
 }
 
@@ -391,7 +391,7 @@ fn palette_finds_and_runs_commands_and_pages() {
     h.type_text("textseite");
     h.message(Message::PaletteRun(None));
     assert!(h.app.palette.is_none());
-    assert!(h.app.text_page.is_some(), "\"Neue Textseite\" ran");
+    assert!(open(&h).text_page.is_some(), "\"Neue Textseite\" ran");
     h.message(Message::CloseTextPage);
     // Pages by number: go to page 2 (the new text page).
     h.message(Message::OpenPalette);
@@ -708,7 +708,7 @@ fn pinching_zooms_around_the_fingers_and_a_swipe_glides_until_touched() {
     h.message(Message::Glide(t0 + std::time::Duration::from_millis(32)));
     let c3 = open(&h).camera;
     assert!(c3.y > c2.y, "glided down: {} -> {}", c2.y, c3.y);
-    let (_, v, _) = h.app.glide.unwrap();
+    let (_, _, v, _) = h.app.glide.unwrap();
     assert!(v < 1200.0 && v > 0.0, "slows down: {v}");
     h.message(Message::Gesture(Gesture::Touch));
     assert!(h.app.glide.is_none());
@@ -885,7 +885,7 @@ fn ctrl_f_searches_the_whole_notebook_and_lists_the_hits_by_page() {
     let field = h.bounds_of(sidebar::input_id()).expect("a search field in the sidebar");
     assert_eq!(h.find(iced_test::selector::is_focused()), Some(field), "Ctrl+F focuses it");
     h.type_text("Grenzwert");
-    let (query, pages) = h.app.search.found.clone().expect("searched");
+    let (query, pages) = open(&h).search.found.clone().expect("searched");
     assert_eq!(query, "Grenzwert");
     // Page by page in outline order (side sheets after their page, folded groups too), each
     // page's hits best first, then top to bottom.
@@ -909,13 +909,13 @@ fn ctrl_f_searches_the_whole_notebook_and_lists_the_hits_by_page() {
     h.frame();
     // The recogniser's second guess counts too ("Falge" for "Folge" is read as it is).
     h.message(Message::SearchQuery("falge".into()));
-    assert_eq!(h.app.search.hits().map(|(p, _)| p.number).collect::<Vec<_>>(), vec![1]);
+    assert_eq!(open(&h).search.hits().map(|(p, _)| p.number).collect::<Vec<_>>(), vec![1]);
     h.message(Message::SearchQuery("Integral".into()));
-    assert_eq!(h.app.search.found.as_ref().map(|(_, p)| p.len()), Some(0), "nothing found");
+    assert_eq!(open(&h).search.found.as_ref().map(|(_, p)| p.len()), Some(0), "nothing found");
     h.frame();
     // Escape in the field empties it: the outline again.
     h.press(Named::Escape);
-    assert!(!h.app.search.active() && h.app.search.found.is_none());
+    assert!(!open(&h).search.active() && open(&h).search.found.is_none());
     assert!(h.bounds_of(sidebar::heading_id(&s.headings[1])).is_some());
 }
 
@@ -929,7 +929,7 @@ fn text_typed_but_not_saved_yet_is_found_too() {
     assert!(h.app.editing.as_ref().is_some_and(|e| e.dirty), "typed, not saved yet");
     assert!(stored_texts(&root, &nb).iter().all(|t| t.text.is_empty()));
     h.message(Message::SearchQuery("konvergenzradius".into()));
-    let hits: Vec<(String, HitKind, String)> = h.app.search.hits().map(|(p, h)| (p.sheet_id.clone(), h.kind, h.text.clone())).collect();
+    let hits: Vec<(String, HitKind, String)> = open(&h).search.hits().map(|(p, h)| (p.sheet_id.clone(), h.kind, h.text.clone())).collect();
     assert_eq!(hits, vec![(sheet, HitKind::Text, "Konvergenzradius".to_string())]);
 }
 
@@ -940,8 +940,8 @@ fn clicking_a_hit_shows_it_in_the_middle_and_lights_it_up() {
     let h = &mut s.h;
     let zoom = open(h).camera.zoom;
     h.message(Message::SearchQuery("unendlichen".into()));
-    let hit = h.app.search.hits().next().expect("found").1.clone();
-    assert_eq!(h.app.search.hits().count(), 1);
+    let hit = open(&h).search.hits().next().expect("found").1.clone();
+    assert_eq!(open(&h).search.hits().count(), 1);
     assert!(open(h).pages.page_of_sheet(&s.sheets[3]).is_none(), "its group is folded");
     let row = h.bounds_of(sidebar::hit_id(0)).expect("its row");
     h.click(row.center());
@@ -1024,7 +1024,7 @@ fn pdf_text_is_found_where_it_lies_on_the_page() {
     h.message(Message::Open(nb.id()));
     h.events(&[]);
     h.message(Message::SearchQuery("folie".into()));
-    let found = h.app.search.found.clone().expect("searched").1;
+    let found = open(&h).search.found.clone().expect("searched").1;
     assert_eq!(found.iter().map(|p| (p.number, p.name.as_str())).collect::<Vec<_>>(), vec![(1, "PDF-Seite 1"), (2, "PDF-Seite 2")]);
     let (a, b) = (&found[0].hits[0], &found[1].hits[0]);
     assert_eq!((a.kind, a.text.as_str(), b.kind, b.text.as_str()), (HitKind::Pdf, "Folie 0", HitKind::Pdf, "Folie 1"));
@@ -1517,7 +1517,7 @@ fn a_function_of_a_plot_is_found_listed_with_the_plot_icon_and_shown() {
     let page = open(&h).pages.pages[0].rect();
     h.message(Message::Camera(n0te_desktop::pages::Camera { x: page.x0, y: page.y0 + 500.0, zoom: 3.0, ..c }));
     h.message(Message::SearchQuery("sin".into()));
-    let hits: Vec<(HitKind, String, [f32; 4])> = h.app.search.hits().map(|(_, h)| (h.kind, h.text.clone(), [h.x0, h.y0, h.x1, h.y1])).collect();
+    let hits: Vec<(HitKind, String, [f32; 4])> = open(&h).search.hits().map(|(_, h)| (h.kind, h.text.clone(), [h.x0, h.y0, h.x1, h.y1])).collect();
     assert_eq!(hits, vec![(HitKind::Plot, "f(x) = 2sin x".to_string(), [100.0, 200.0, 340.0, 360.0])], "the plot's box");
     assert_eq!(sidebar::glyph_of(HitKind::Plot), sidebar::PLOT);
     assert!([HitKind::Ink, HitKind::Text, HitKind::Heading, HitKind::Pdf].iter().all(|&k| sidebar::glyph_of(k) != sidebar::PLOT));
@@ -2102,7 +2102,7 @@ fn outline_pages_are_marked_filtered_renamed_and_deleted_from_their_menu() {
     // Merken from the page's right-click menu: a ribbon, the filter.
     let row = h.bounds_of(sidebar::page_id(&first.0)).expect("its row");
     h.right_click(row.center());
-    assert!(h.app.outline.menu.is_some());
+    assert!(open(&h).outline.menu.is_some());
     assert!(h.find("Merken").is_some() && h.find("Löschen").is_some());
     click_on(&mut h, sidebar::menu_id("mark"));
     assert_eq!(open(&h).marked, vec![first.0.clone()]);
@@ -2110,7 +2110,7 @@ fn outline_pages_are_marked_filtered_renamed_and_deleted_from_their_menu() {
     h.message(Message::Outline(Msg::OnlyMarked(true)));
     assert!(h.bounds_of(sidebar::page_id(&first.0)).is_some() && h.bounds_of(sidebar::page_id(&second.0)).is_none(), "only the marked page");
     h.message(Message::Outline(Msg::Mark(first.0.clone(), false)));
-    assert!(open(&h).marked.is_empty() && !h.app.outline.only_marked, "nothing marked: all again");
+    assert!(open(&h).marked.is_empty() && !open(&h).outline.only_marked, "nothing marked: all again");
     // Umbenennen: the name selected, Enter keeps what is typed.
     let row = h.bounds_of(sidebar::page_id(&second.0)).unwrap();
     h.right_click(row.center());
@@ -2118,7 +2118,7 @@ fn outline_pages_are_marked_filtered_renamed_and_deleted_from_their_menu() {
     assert_eq!(h.find(iced_test::selector::is_focused()), h.bounds_of(sidebar::rename_id()));
     h.type_text("Einleitung");
     h.press(Named::Enter);
-    assert!(h.app.outline.renaming.is_none());
+    assert!(open(&h).outline.renaming.is_none());
     assert_eq!(sheet_nodes(&h)[1].2, "Einleitung");
     assert!(h.find("Einleitung").is_some());
     // Löschen asks once, then deletes; "Rückgängig" brings it back.
@@ -2129,7 +2129,7 @@ fn outline_pages_are_marked_filtered_renamed_and_deleted_from_their_menu() {
     assert!(h.find("Wirklich löschen?").is_some() && sheet_nodes(&h).len() == count, "asks first");
     click_on(&mut h, sidebar::menu_id("delete"));
     assert_eq!(sheet_nodes(&h).len(), count - 1);
-    assert!(h.app.outline.undo && h.app.status.as_deref() == Some("Seite gelöscht"));
+    assert!(h.app.undo_delete.is_some() && h.app.status.as_deref() == Some("Seite gelöscht"));
     h.message(Message::Outline(Msg::Undo));
     assert_eq!(sheet_nodes(&h).len(), count);
     // A group's menu: rename, fold, delete (no marking).
@@ -2139,7 +2139,7 @@ fn outline_pages_are_marked_filtered_renamed_and_deleted_from_their_menu() {
     assert!(h.bounds_of(sidebar::menu_id("fold")).is_some() && h.bounds_of(sidebar::menu_id("mark")).is_none());
     let m = key(&h, Named::Escape);
     h.message(m);
-    assert!(h.app.outline.menu.is_none(), "Esc closes it");
+    assert!(open(&h).outline.menu.is_none(), "Esc closes it");
 }
 
 #[test]
@@ -2153,7 +2153,7 @@ fn the_outline_footer_adds_pages_and_groups_and_folds_every_group() {
     assert_eq!(o.pages.current_number(&o.camera), 2, "after the page in view, and shown");
     // A group, named right away.
     click_on(&mut h, iced::widget::Id::new("add-group"));
-    assert!(h.app.outline.renaming.as_ref().is_some_and(|(_, t)| t == "Neue Gruppe"));
+    assert!(open(&h).outline.renaming.as_ref().is_some_and(|(_, t)| t == "Neue Gruppe"));
     h.type_text("Woche 5");
     h.press(Named::Enter);
     assert!(open(&h).rows.iter().any(|r| matches!(r, OutlineRow::Group { title, .. } if title == "Woche 5")));
@@ -2200,4 +2200,268 @@ fn page_pictures_and_the_outline_follows_the_page_in_view() {
     h.message(Message::Jump(sheet));
     let o = open(&h);
     assert_eq!(o.pages.current_number(&o.camera), number);
+}
+
+// --- two notebooks side by side ------------------------------------------------------------------
+
+fn split_of(h: &Harness) -> &n0te_desktop::split::Split {
+    match &h.app.screen {
+        Screen::Notebook(s) => s,
+        Screen::Library => panic!("no notebook open"),
+    }
+}
+
+/// A message for one pane, as its view sends it.
+fn in_pane(key: n0te_desktop::split::PaneKey, m: Message) -> Message {
+    Message::Pane(key, Box::new(m))
+}
+
+/// A library with the demo notebook and a one-page "Übungen"; the demo open.
+fn two_notebooks(tag: &str) -> (Harness, std::path::PathBuf, String, String) {
+    let root = temp_root(tag);
+    let lib = Library::open(&root).unwrap();
+    let demo = demo::save_into(&lib);
+    let nb = lib.create_notebook("Übungen").unwrap();
+    nb.add_sheet(None, 0, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+    lib.save_notebook(&nb).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::Open(demo.clone()));
+    h.events(&[]);
+    h.events(&[]);
+    (h, root, demo, nb.id())
+}
+
+#[test]
+fn the_same_notebook_twice_shares_one_document_and_one_undo() {
+    use n0te_desktop::sidebar::Msg as Outline;
+    use n0te_desktop::split;
+    let (mut h, _root, demo, _) = two_notebooks("split-same");
+    let o = open(&h);
+    let last = *o.pages.mains().last().unwrap();
+    let (last_sheet, last_number) = (o.pages.pages[last].placed.sheet_id.clone(), o.pages.pages[last].placed.number);
+    h.message(Message::Jump(last_sheet));
+    // ⧉ in the toolbar, then "Dieses Notizbuch nochmal": beside it, at the page in view.
+    click_on(&mut h, split::button_id());
+    assert!(split_of(&h).menu.is_some(), "the menu opened");
+    click_on(&mut h, split::menu_id("again"));
+    h.events(&[]);
+    h.events(&[]);
+    let s = split_of(&h);
+    assert_eq!(s.panes.len(), 2);
+    let (a, b) = (s.panes[0].key, s.panes[1].key);
+    assert!(std::rc::Rc::ptr_eq(&s.panes[0].nb, &s.panes[1].nb), "one document");
+    assert_eq!((s.active, s.main, s.menu.is_none()), (a, a, true), "the first stays active and ★");
+    assert!(s.panes[1].camera.viewport.width > 0.0 && !s.panes[1].sidebar);
+    assert_eq!(s.panes[1].pages.current_number(&s.panes[1].camera), last_number, "opened at the page in view");
+    // A page added in A shows in B at once.
+    let before = s.panes[1].pages.mains().len();
+    h.message(Message::Outline(Outline::AddPage));
+    let s = split_of(&h);
+    assert_eq!((s.panes[0].pages.mains().len(), s.panes[1].pages.mains().len()), (before + 1, before + 1));
+    // Deleted from B's outline (its own messages), brought back from the status bar: one
+    // history for the notebook.
+    let node = s.panes[1].rows.iter().find_map(|r| if let OutlineRow::Sheet { node, .. } = r { Some(node.clone()) } else { None }).unwrap();
+    let pages = |h: &Harness| split_of(h).panes.iter().map(|p| p.rows.iter().filter(|r| matches!(r, OutlineRow::Sheet { .. })).count()).collect::<Vec<_>>();
+    let n = pages(&h)[0];
+    h.message(in_pane(b, Message::Outline(Outline::Delete(node.clone()))));
+    h.message(in_pane(b, Message::Outline(Outline::Delete(node.clone()))));
+    assert_eq!(pages(&h), vec![n - 1, n - 1], "gone in both panes");
+    assert_eq!(h.app.undo_delete.as_deref(), Some(demo.as_str()));
+    h.message(Message::Outline(Outline::Undo));
+    assert_eq!(pages(&h), vec![n, n], "back in both");
+    // A text box written in A shows in B.
+    let first = split_of(&h).panes[0].pages.pages[0].placed.sheet_id.clone();
+    h.message(Message::NewText(first.clone(), 60.0, 100.0));
+    assert!(h.app.editing.as_ref().is_some_and(|e| e.pane == a));
+    h.type_text("Satz 4.2");
+    h.message(Message::DoneText);
+    let p = &split_of(&h).panes[1];
+    let r = p.pages.pages[p.pages.page_of_sheet(&first).unwrap()].placed.rect;
+    let cam = n0te_desktop::pages::Camera { x: r.x0, y: r.y0, zoom: 1.0, viewport: Size::new(r.width(), r.height()), origin: Point::ORIGIN };
+    assert!(p.pages.visible_texts(&cam).iter().any(|(_, _, t)| t.text == "Satz 4.2"), "the box shows in B");
+    // Each pane searches on its own.
+    h.message(in_pane(b, Message::SearchQuery("Grenzwert".into())));
+    let s = split_of(&h);
+    assert!(s.panes[1].search.active() && !s.panes[0].search.active());
+}
+
+#[test]
+fn a_click_makes_a_pane_active_and_the_star_moves_only_when_clicked() {
+    use n0te_desktop::split;
+    let (mut h, _root, demo, other) = two_notebooks("split-active");
+    h.message(Message::Split(split::Msg::Beside(other.clone(), None)));
+    h.events(&[]);
+    h.events(&[]);
+    let s = split_of(&h);
+    let (a, b) = (s.panes[0].key, s.panes[1].key);
+    assert_eq!((s.panes[0].id.as_str(), s.panes[1].id.as_str()), (demo.as_str(), other.as_str()));
+    // Side by side, half each: B's pages start right of the middle and reach the window's edge.
+    let cb = s.panes[1].camera;
+    assert!(cb.origin.x > 800.0 && (cb.origin.x + cb.viewport.width - 1600.0).abs() < 1.0, "{cb:?}");
+    let za = s.panes[0].camera.zoom;
+    // A click on B's page makes it the active one: the toolbar works on it.
+    h.click(Point::new(cb.origin.x + cb.viewport.width / 2.0, cb.origin.y + 200.0));
+    assert_eq!(split_of(&h).active, b);
+    h.message(Message::Zoom(2.0));
+    let s = split_of(&h);
+    assert_eq!((s.panes[0].camera.zoom, s.panes[1].camera.zoom), (za, 2.0));
+    // Page down pages B.
+    let m = key(&h, Named::PageDown);
+    h.message(m);
+    let s = split_of(&h);
+    assert_eq!(s.panes[0].pages.current_number(&s.panes[0].camera), 1);
+    // ★ stays with A until B's star is clicked.
+    assert_eq!(s.main, a);
+    click_on(&mut h, split::head_id("main", 1));
+    assert_eq!(split_of(&h).main, b);
+    // Swapped: each pane keeps its ★ and its being active.
+    h.message(Message::Split(split::Msg::Swap));
+    let s = split_of(&h);
+    assert_eq!((s.panes[0].key, s.panes[1].key, s.main, s.active), (b, a, b, b));
+    // B alone (⤢); Esc shows both again, then closes the one beside ★, then the library.
+    click_on(&mut h, split::head_id("alone", 0));
+    assert_eq!(split_of(&h).maxed, Some(b));
+    let esc = key(&h, Named::Escape);
+    h.message(esc.clone());
+    assert_eq!(split_of(&h).maxed, None);
+    h.message(esc.clone());
+    let s = split_of(&h);
+    assert_eq!((s.panes.len(), s.panes[0].key, s.main, s.active), (1, b, b, b));
+    h.message(esc);
+    assert!(matches!(h.app.screen, Screen::Library));
+}
+
+#[test]
+fn the_divider_snaps_and_dragged_to_an_edge_closes_that_pane() {
+    use n0te_desktop::split;
+    let (mut h, _root, _demo, other) = two_notebooks("split-divider");
+    h.message(Message::Split(split::Msg::Beside(other.clone(), None)));
+    h.events(&[]);
+    let a = split_of(&h).panes[0].key;
+    // Dragged a bit left of the middle, let go: it rests at a third.
+    h.press_at(Point::new(800.0, 450.0));
+    h.move_to(Point::new(560.0, 450.0));
+    assert!(split_of(&h).dragging.is_some());
+    h.release();
+    let s = split_of(&h);
+    assert_eq!((s.dragging, s.fraction), (None, 1.0 / 3.0));
+    h.events(&[]);
+    let cb = split_of(&h).panes[1].camera;
+    assert!((cb.origin.x - 536.0).abs() < 1.0, "{cb:?}");
+    // ✕ on the main pane: the other stays, now ★ and active.
+    click_on(&mut h, split::head_id("close", 0));
+    let s = split_of(&h);
+    let b = s.panes[0].key;
+    assert_eq!((s.panes.len(), s.main, s.active), (1, b, b));
+    assert!(b != a);
+    // Again beside it; dragged to the right edge it says it will close, and that pane goes.
+    h.message(Message::Split(split::Msg::Beside(other.clone(), None)));
+    h.events(&[]);
+    let cut = (1600.0 * split_of(&h).fraction).floor();
+    assert_eq!(cut, 533.0, "the divider stays where it was left");
+    h.press_at(Point::new(cut, 450.0));
+    h.move_to(Point::new(1560.0, 450.0));
+    assert!(h.find("Loslassen schließt").is_some() || h.find("LOSLASSEN SCHLIESST").is_some(), "the pane says it closes");
+    h.release();
+    let s = split_of(&h);
+    assert_eq!((s.panes.len(), s.panes[0].key, s.main, s.active), (1, b, b, b));
+}
+
+#[test]
+fn live_events_reach_every_pane_of_their_notebook_and_the_main_pane_leads() {
+    use n0te_desktop::live::LiveEvent;
+    use n0te_desktop::split;
+    let (mut h, root, demo, other) = two_notebooks("split-live");
+    h.message(Message::Split(split::Msg::Again));
+    h.events(&[]);
+    h.events(&[]);
+    let s = split_of(&h);
+    let (a, b) = (s.panes[0].key, s.panes[1].key);
+    let first = s.panes[0].pages.pages[0].placed.sheet_id.clone();
+    let last = *s.panes[1].pages.mains().last().unwrap();
+    let last_sheet = s.panes[1].pages.pages[last].placed.sheet_id.clone();
+    h.message(in_pane(b, Message::Jump(last_sheet.clone())));
+    let before_b = split_of(&h).panes[1].camera;
+    // A stroke from the tablet and its frame show in both panes; following moves ★'s only.
+    h.app.live_session = Some(n0te_desktop::app::LiveSession { device: "tab".into(), name: "Tablet".into(), follow_them: true, they_follow: false });
+    let samples: Vec<u8> = [100.0f32, 600.0, 0.5, 0.0, 140.0, 610.0, 0.5, 8.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+    h.message(Message::Live(LiveEvent::Stroke { device: "tab".into(), notebook: demo.clone(), sheet: first.clone(), stroke: 1, brush: (2.0, 0.5, 0xFF111111, 0), samples, done: false }));
+    h.message(Message::Live(LiveEvent::Presence { device: "tab".into(), notebook: demo.clone(), sheet: Some(first.clone()), viewport: [100.0, 500.0, 400.0, 700.0], zoom: 2.0, laser: None }));
+    let s = split_of(&h);
+    for p in &s.panes {
+        assert_eq!((p.pages.live.borrow().len(), p.pages.remote.borrow().len()), (1, 1));
+    }
+    let ca = s.panes[0].camera;
+    assert!((ca.zoom - ca.viewport.width / 300.0).abs() < 0.01, "A (★) follows: {ca:?}");
+    assert_eq!(s.panes[1].camera, before_b, "B stays");
+    // Where I look in the notebook: one frame, the main pane's; ★ on B, B's.
+    assert_eq!(h.app.presence_args(&demo).unwrap()[2], first);
+    h.message(Message::Split(split::Msg::Main(b)));
+    assert_eq!(h.app.presence_args(&demo).unwrap()[2], last_sheet);
+    // Summoned to the first page: the main pane goes there, A stays.
+    let ca = split_of(&h).panes[0].camera;
+    h.message(Message::Live(LiveEvent::Summoned { device: "owner".into(), notebook: demo.clone(), sheet: first.clone(), viewport: [0.0, 0.0, 300.0, 200.0] }));
+    let s = split_of(&h);
+    assert_eq!((s.panes[1].pages.current_number(&s.panes[1].camera), s.panes[0].camera), (1, ca));
+    // The other notebook into B (from A's ⧉): ★ stays in that place, A speaks for the demo now.
+    h.message(Message::Split(split::Msg::Beside(other.clone(), None)));
+    let s = split_of(&h);
+    let b2 = s.panes[1].key;
+    assert_eq!((s.panes[1].id.as_str(), s.main, s.active), (other.as_str(), b2, a));
+    assert_eq!(h.app.pane_showing(&demo), Some(a));
+    // A change to the other notebook reaches its pane only.
+    {
+        let lib = Library::open(&root).unwrap();
+        let n = lib.load_notebook(&other).unwrap();
+        n.add_sheet(None, 1, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+        lib.save_notebook(&n).unwrap();
+    }
+    let demo_pages = split_of(&h).panes[0].pages.total_pages;
+    h.message(Message::Live(LiveEvent::Changed { notebook: other.clone(), index: true, sheets: vec![] }));
+    let s = split_of(&h);
+    assert_eq!((s.panes[0].pages.total_pages, s.panes[1].pages.total_pages), (demo_pages, 2));
+    // The tablet opens the demo live: it comes into the main pane, sharing A's document.
+    h.message(Message::Live(LiveEvent::Open { device: "tab".into(), notebook: demo.clone() }));
+    let s = split_of(&h);
+    assert_eq!((s.panes[0].id.as_str(), s.panes[1].id.as_str(), s.main), (demo.as_str(), demo.as_str(), s.panes[1].key));
+    assert!(std::rc::Rc::ptr_eq(&s.panes[0].nb, &s.panes[1].nb));
+}
+
+#[test]
+fn a_page_dragged_out_of_the_outline_opens_beside_at_that_page() {
+    use n0te_desktop::sidebar;
+    let (mut h, _root, demo, _) = two_notebooks("split-drag");
+    let o = open(&h);
+    let i = o.pages.mains()[2];
+    let (node, number) = (o.pages.pages[i].placed.node.clone(), o.pages.pages[i].placed.number);
+    let row = h.bounds_of(sidebar::page_id(&node)).expect("its row");
+    h.press_at(row.center());
+    h.move_to(Point::new(row.center().x + 40.0, row.center().y));
+    h.move_to(Point::new(1400.0, 450.0));
+    assert!(split_of(&h).drag.is_some(), "dragging");
+    assert!(h.find("Daneben öffnen").is_some() || h.find("DANEBEN ÖFFNEN").is_some(), "where it would open");
+    h.release();
+    h.events(&[]);
+    h.events(&[]);
+    let s = split_of(&h);
+    assert!(s.drag.is_none() && s.panes.len() == 2);
+    assert_eq!(s.panes[1].id, demo);
+    assert_eq!(s.panes[1].pages.current_number(&s.panes[1].camera), number, "at the page dragged");
+    assert_eq!(s.panes[0].pages.current_number(&s.panes[0].camera), 1, "the first pane stays where it was");
+}
+
+#[test]
+fn an_upright_window_stacks_the_panes() {
+    let root = temp_root("split-upright");
+    let demo = demo::save_into(&Library::open(&root).unwrap());
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(900.0, 1400.0), 1.0).unwrap();
+    h.message(Message::Open(demo));
+    h.events(&[]);
+    h.message(Message::Split(n0te_desktop::split::Msg::Again));
+    h.events(&[]);
+    h.events(&[]);
+    let s = split_of(&h);
+    let (a, b) = (s.panes[0].camera, s.panes[1].camera);
+    assert!(b.origin.y >= a.origin.y + a.viewport.height, "one above the other: {a:?} {b:?}");
+    assert!((b.viewport.width - 900.0).abs() < 1.0 && b.viewport.height > 500.0, "the lower one gets the whole width: {b:?}");
 }

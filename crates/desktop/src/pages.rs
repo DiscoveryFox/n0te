@@ -728,6 +728,14 @@ impl Pages {
         if self.pages.is_empty() { cam } else { self.camera_for(0, &cam) }
     }
 
+    /// The page in the middle of the view, as wide as it is with a margin either side (pt):
+    /// what "fits the width" means when the view changes size.
+    pub fn column_at(&self, c: &Camera) -> f32 {
+        let (cx, cy) = (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0);
+        let w = self.sheet_at(cx, cy).or_else(|| self.pages.first().map(|p| &p.placed)).map(|p| p.rect.width()).unwrap_or(nl::A4_W);
+        w + 2.0 * COLUMN_MARGIN
+    }
+
     /// Keeps the content reachable: at most half a viewport of empty space around it.
     pub fn clamp(&self, mut c: Camera) -> Camera {
         c.zoom = c.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
@@ -761,6 +769,24 @@ impl Pages {
             }
         }
     }
+}
+
+/// Room either side of a page that counts as fitting the width (pt).
+const COLUMN_MARGIN: f32 = 24.0;
+
+/// The camera after its view changed size (the window, the outline or the split's panes): the
+/// page stays as big as it was, with more or less room around it, and a page that fitted the
+/// width still fits (narrower, it shrinks to the width). What was in the middle stays in the
+/// middle, what was near the top stays near the top. `column`: see [`Pages::column_at`].
+pub fn resized(c: Camera, viewport: Size, column: f32) -> Camera {
+    if c.viewport.width <= 0.0 || c.viewport.height <= 0.0 {
+        return Camera { viewport, ..c };
+    }
+    let anchor = 80.0f32.min(c.viewport.height / 2.0);
+    let (mx, ty) = (c.x + c.viewport.width / 2.0 / c.zoom, c.y + anchor / c.zoom);
+    let fitted = column * c.zoom <= c.viewport.width * 1.02;
+    let zoom = if fitted { c.zoom.min(viewport.width / column) } else { c.zoom }.clamp(MIN_ZOOM, MAX_ZOOM);
+    Camera { x: mx - viewport.width / 2.0 / zoom, y: ty - anchor / zoom, zoom, viewport, ..c }
 }
 
 /// Level of detail for a zoom: the next power of two at or above it.
@@ -869,13 +895,17 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
     ) {
         let state = tree.state.downcast_mut::<State>();
         let bounds = layout.bounds();
+        // No room (a pane being closed): nothing to report, the camera stays for later.
+        if bounds.width < 1.0 || bounds.height < 1.0 {
+            return;
+        }
         let cam = match state.pending {
             Some((id, seen, published)) if id == self.pages.id && seen == self.camera => published,
             _ => self.camera,
         };
         // Tell the app our size and place (first frame, resizes, sidebar); it owns the camera.
         if cam.viewport != bounds.size() || cam.origin != bounds.position() {
-            let next = if cam.viewport.width <= 0.0 { self.pages.initial_camera(bounds.size()) } else { self.pages.clamp(Camera { viewport: bounds.size(), ..cam }) };
+            let next = if cam.viewport.width <= 0.0 { self.pages.initial_camera(bounds.size()) } else { self.pages.clamp(resized(cam, bounds.size(), self.pages.column_at(&cam))) };
             let next = Camera { origin: bounds.position(), ..next };
             state.pending = Some((self.pages.id, self.camera, next));
             shell.publish((self.on_camera)(next));
@@ -1097,7 +1127,11 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     let p = &page.placed;
                     let color = if p.side == 0 && p.number == current { theme::p().accent } else { theme::p().muted };
                     if p.side == 0 {
-                        label(r, format!("{:02}", p.number), Point::new(at.x - 46.0, at.y), 40.0, color, 11.0, theme::MONO, text::Alignment::Right);
+                        // Not when it would stick out of a narrow view (a pane of the split):
+                        // the software renderer doesn't clip text to the view.
+                        if at.x - 46.0 - 24.0 >= bounds.x {
+                            label(r, format!("{:02}", p.number), Point::new(at.x - 46.0, at.y), 40.0, color, 11.0, theme::MONO, text::Alignment::Right);
+                        }
                     } else {
                         let w = rect.width() * cam.zoom;
                         label(r, p.label(), Point::new(at.x, at.y - 18.0), w, color, 11.0, theme::MONO, if p.side < 0 { text::Alignment::Left } else { text::Alignment::Right });
@@ -1309,6 +1343,25 @@ mod tests {
         let at_top = SheetSpec { height: 892.0, gaps: vec![(0.0, 50.0)], ..pdf.clone() };
         let p = pdf_parts(&at_top, r(0.0, 0.0, 595.0, 892.0));
         assert_eq!((p.len(), p[0].src, p[0].dst), (1, r(0.0, 0.0, 595.0, 842.0), r(0.0, 50.0, 595.0, 892.0)));
+    }
+
+    #[test]
+    fn a_resized_view_keeps_the_page_size_and_a_fitting_page_fits() {
+        let cam = Camera { x: -100.0, y: 300.0, zoom: 1.0, viewport: Size::new(800.0, 600.0), origin: Point::ORIGIN };
+        // Wider: the page stays as big, the middle stays in the middle, the top at the top.
+        let wide = resized(cam, Size::new(1200.0, 600.0), 643.0);
+        assert_eq!((wide.zoom, wide.x + 600.0, wide.y), (1.0, cam.x + 400.0, 300.0));
+        // Narrower than the page that fitted: it shrinks to the width, still centred.
+        let narrow = resized(cam, Size::new(400.0, 600.0), 643.0);
+        assert!((narrow.zoom - 400.0 / 643.0).abs() < 1e-5);
+        assert!((narrow.x + 200.0 / narrow.zoom - (cam.x + 400.0)).abs() < 1e-3);
+        assert!((narrow.y + 80.0 / narrow.zoom - (cam.y + 80.0)).abs() < 1e-3, "near the top stays near the top");
+        // Zoomed in past the width: the page keeps its size when the view gets narrower.
+        let close = Camera { zoom: 2.0, ..cam };
+        assert_eq!(resized(close, Size::new(400.0, 600.0), 643.0).zoom, 2.0);
+        // Taller or shorter only: nothing moves.
+        let short = resized(cam, Size::new(800.0, 500.0), 643.0);
+        assert_eq!((short.x, short.y, short.zoom), (cam.x, cam.y, cam.zoom));
     }
 
     #[test]

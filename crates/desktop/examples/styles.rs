@@ -6,7 +6,7 @@
 //! headings, search results and a found spot lighting up, a page with coordinate systems
 //! (constructions: a triangle with its circumcircle, a function with a tangent and a slider) and
 //! the panel for them, also with commands suggested while one is typed (on the GPU renderer if
-//! there is one: the software one draws no ink).
+//! there is one: the software one draws no ink), two notebooks side by side.
 //!
 //!   cargo run --profile fast -p n0te-desktop --example styles -- <out-dir> [theme ids…]
 
@@ -118,6 +118,7 @@ fn main() {
         h.message(Message::SearchClear);
         h.events(&[]);
         h.screenshot(out.join(format!("{}-7-headings.png", t.id)));
+        split_screens(&mut h, &out, t.id);
         // Coordinate systems on squared paper, then the dialog for one.
         let g = match gpu.as_mut() {
             Some(g) => g,
@@ -251,6 +252,38 @@ fn library_screens(h: &mut Harness, out: &std::path::Path, theme: &str, ids: &st
     shot(h, "l-drag-pin");
     h.app.shelf.drag = None;
     h.message(Message::Shelf(shelf::Msg::Select(false)));
+}
+
+/// Two side by side: the notebook once more beside itself at a later page (the active pane
+/// framed, ★ on the first), the ⧉ menu with two open, the divider held near the edge.
+fn split_screens(h: &mut Harness, out: &std::path::Path, theme: &str) {
+    use n0te_desktop::split::Msg;
+    let shot = |h: &mut Harness, name: &str| {
+        h.events(&[]);
+        h.screenshot(out.join(format!("{theme}-10{name}.png")));
+    };
+    let sheet = |h: &Harness, n: u32| match &h.app.screen {
+        n0te_desktop::app::Screen::Notebook(s) => s.pages.index_of_number(n).map(|i| s.pages.pages[i].placed.sheet_id.clone()),
+        _ => None,
+    };
+    let Some(first) = sheet(h, 2) else { return };
+    h.message(Message::Jump(first));
+    h.message(Message::Split(Msg::Again));
+    h.events(&[]);
+    let Some(later) = sheet(h, 6) else { return };
+    let second = match &h.app.screen {
+        n0te_desktop::app::Screen::Notebook(s) => s.panes[1].key,
+        _ => return,
+    };
+    h.message(Message::Pane(second, Box::new(Message::Jump(later))));
+    shot(h, "-split");
+    h.message(Message::Split(Msg::Menu(Some(Point::new(730.0, 30.0)))));
+    shot(h, "b-split-menu");
+    h.message(Message::Split(Msg::Menu(None)));
+    h.message(Message::Split(Msg::Drag(0.9)));
+    shot(h, "c-split-closing");
+    h.message(Message::Split(Msg::Release(0.5)));
+    h.message(Message::Split(Msg::Close(second)));
 }
 
 /// The outline: the list with page pictures and marked pages (the page in view further down),
