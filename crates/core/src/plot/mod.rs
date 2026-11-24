@@ -14,7 +14,7 @@ mod render;
 
 pub use expr::{Cmp, Curve, Expr, Func, NAMES_OF_FNS, check, fn_name, latex_to_expr, parse, parse_line, rename_refs};
 pub use font::{glyph, text_width};
-pub use geo::{Kind, LabelMode, Obj, PointStyle, Slider, Style, Val, ViewRange, definition, evaluate, latex_expr, latex_row, latex_val, fmt_expr, fmt_num, format_val, free_point, moved_on, moved_point, name_of, new_object, next_name, renamed};
+pub use geo::{Kind, LabelMode, Obj, PointStyle, Slider, Style, Val, ViewRange, definition, evaluate, latex_expr, latex_row, latex_val, fmt_expr, fmt_num, format_val, free_point, latex_input, moved_on, moved_point, name_of, new_object, next_name, renamed};
 pub use points::{PointKind, SpecialPoint, area, special_points, zeros_of};
 pub use render::{curve, hit, nice_step, pi_label, render, slider_track, tick_label};
 

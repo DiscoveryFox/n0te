@@ -582,6 +582,14 @@ pub fn plot_fit_y(plot: FfiPlot) -> Vec<f64> {
     n0te_core::plot::Plot::from(plot).fit_y().map(|(a, b)| vec![a, b]).unwrap_or_default()
 }
 
+/// A line being typed into the plot's input, set as LaTeX for the preview ("" while it doesn't read yet).
+#[uniffi::export]
+pub fn plot_input_latex(plot: FfiPlot, input: String) -> String {
+    let p = n0te_core::plot::Plot::from(plot);
+    let known: std::collections::HashSet<String> = p.objs.iter().map(|o| o.name()).collect();
+    n0te_core::plot::latex_input(&input, &known).unwrap_or_default()
+}
+
 /// LaTeX from a handwriting recogniser as input for the plot; Err: why it can't be drawn.
 #[uniffi::export]
 pub fn plot_from_latex(latex: String) -> R<String> {

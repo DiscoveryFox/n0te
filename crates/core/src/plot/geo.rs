@@ -2037,6 +2037,79 @@ fn pretty(n: &Node, ctx: u8) -> String {
     if prec < ctx { format!("({s})") } else { s }
 }
 
+/// A line being typed, set as LaTeX for the preview under the input (GeoGebra shows what it
+/// will be while typing): fractions stacked, powers raised, roots drawn, commands upright.
+/// None while it doesn't read yet. `known`: the construction's names.
+pub fn latex_input(src: &str, known: &HashSet<String>) -> Option<String> {
+    let input = lang::parse_input(src, known).ok()?;
+    let body = match &input.body {
+        Body::Expr(n) => tex(n, 0),
+        Body::Equation(l, r) => format!("{}={}", tex(l, 0), tex(r, 0)),
+    };
+    Some(match (&input.name, input.param) {
+        (Some(n), Some(p)) => format!("{}({p})={body}", latex_name(n)),
+        (Some(n), None) => format!("{}{{:}}\\;{body}", latex_name(n)),
+        _ => body,
+    })
+}
+
+/// A parsed input as LaTeX (see [`latex_input`]); `ctx`: the binding around it (brackets when weaker).
+fn tex(n: &Node, ctx: u8) -> String {
+    let (s, prec) = match n {
+        Node::Num(v) => (latex_num(*v), if *v < 0.0 { 3 } else { 5 }),
+        Node::Var(c) => (c.to_string(), 5),
+        Node::Name(s) => (match s.as_str() {
+            "pi" => "\\pi".into(),
+            "e" => "e".into(),
+            _ => latex_name(s),
+        }, 5),
+        Node::Neg(a) => (format!("-{}", tex(a, 3)), 3),
+        Node::Bin(Op::Add, a, b) => match &**b {
+            Node::Neg(c) => (format!("{}-{}", tex(a, 1), tex(c, 2)), 1),
+            _ => (format!("{}+{}", tex(a, 1), tex(b, 1)), 1),
+        },
+        Node::Bin(Op::Sub, a, b) => (format!("{}-{}", tex(a, 1), tex(b, 2)), 1),
+        Node::Bin(Op::Mul, a, b) => {
+            let (l, r) = (tex(a, 2), tex(b, 2));
+            // 2x, k sin(x): no dot; 2 · 3: a dot.
+            let dot = matches!(**b, Node::Num(_)) || r.starts_with(|c: char| c.is_ascii_digit() || c == '-');
+            (if dot { format!("{l}\\cdot {r}") } else { format!("{l}\\,{r}") }, 2)
+        }
+        Node::Bin(Op::Div, a, b) => (format!("\\frac{{{}}}{{{}}}", tex(a, 0), tex(b, 0)), 4),
+        Node::Bin(Op::Pow, a, b) => (format!("{}^{{{}}}", tex(a, 5), tex(b, 0)), 4),
+        Node::Call(name, primes, args) => {
+            let list = args.iter().map(|a| tex(a, 0)).collect::<Vec<_>>().join(",\\,");
+            let lower = name.to_lowercase();
+            (match lower.as_str() {
+                "sqrt" => format!("\\sqrt{{{list}}}"),
+                "nroot" if args.len() == 2 => format!("\\sqrt[{}]{{{}}}", tex(&args[1], 0), tex(&args[0], 0)),
+                "abs" => format!("\\left|{list}\\right|"),
+                "sin" | "cos" | "tan" | "ln" | "log" | "exp" => format!("\\{lower}{}", brackets(&list)),
+                _ if lang::command(name).is_some() => format!("\\mathrm{{{name}}}{}", brackets(&list)),
+                _ => format!("{}{}{}", latex_name(name), "'".repeat(*primes as usize), brackets(&list)),
+            }, 5)
+        }
+        Node::Point(a, b) => (format!("\\left({}\\,\\middle|\\,{}\\right)", tex(a, 0), tex(b, 0)), 5),
+        Node::Chain(items, cmps) => {
+            let mut out = tex(&items[0], 1);
+            for (c, it) in cmps.iter().zip(&items[1..]) {
+                let sym = match c {
+                    Cmp::Lt => "<",
+                    Cmp::Le => "\\le ",
+                    Cmp::Gt => ">",
+                    Cmp::Ge => "\\ge ",
+                    Cmp::Eq => "=",
+                };
+                out = format!("{out}{sym}{}", tex(it, 1));
+            }
+            (out, 0)
+        }
+        Node::Text(t) => (latex_text(t), 5),
+        Node::List(items) => (format!("\\left\\{{{}\\right\\}}", items.iter().map(|a| tex(a, 0)).collect::<Vec<_>>().join(",\\,")), 5),
+    };
+    if prec < ctx { brackets(&s) } else { s }
+}
+
 /// A point on an object (Punkt(f, 1.5)): its definition with the place on the object changed.
 pub fn moved_on(def: &str, t: f64) -> Option<String> {
     let eq = def.find('=')?;
@@ -2052,6 +2125,18 @@ pub fn moved_on(def: &str, t: f64) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn what_is_typed_is_set_as_latex_while_typing() {
+        let known: std::collections::HashSet<String> = ["f", "A", "B"].iter().map(|s| s.to_string()).collect();
+        let t = |s: &str| super::latex_input(s, &known);
+        assert_eq!(t("f(x) = x^2/3").as_deref(), Some("f(x)=\\frac{x^{2}}{3}"));
+        assert_eq!(t("g(x)=sqrt(x+1)").as_deref(), Some("g(x)=\\sqrt{x+1}"));
+        assert!(t("Gerade(A, B)").unwrap().contains("\\mathrm{Gerade}"));
+        assert!(t("2x+3").unwrap().starts_with("2\\,x+3"));
+        // Not readable yet (half typed): nothing.
+        assert_eq!(t("f(x) = (x+"), None);
+    }
+
     #[test]
     fn rows_are_set_as_latex() {
         let p = |defs: &[&str]| {
