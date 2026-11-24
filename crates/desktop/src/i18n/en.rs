@@ -703,6 +703,21 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync", "The sync service isn't running. Start it: systemctl --user enable --now n0te-sync"),
     ("Sync-Dienst läuft nicht", "sync service isn't running"),
     ("keine Antwort vom Sync-Dienst", "no answer from the sync service"),
+    // Updates (Windows)
+    ("Update ließ sich nicht starten", "The update couldn't start"),
+    ("n0te {} ist bereit", "n0te {} is ready"),
+    ("Neu starten", "Restart"),
+    ("n0te {} ist da", "n0te {} is out"),
+    ("Version {}", "Version {}"),
+    ("Sucht nach Updates …", "Looking for updates …"),
+    ("Version {}: aktuell", "Version {}: up to date"),
+    ("n0te {} ist bereit: installiert sich beim nächsten Start", "n0te {} is ready: it installs at the next start"),
+    ("n0te {} ist da (tragbare Version: bitte neu herunterladen)", "n0te {} is out (portable copy: please download it again)"),
+    ("Update-Suche ging nicht: {}", "Couldn't look for updates: {}"),
+    ("Updates", "Updates"),
+    ("Neue Versionen laden sich von GitHub und installieren sich beim nächsten Start.", "New versions download from GitHub and install at the next start."),
+    ("Automatisch aktualisieren", "Update automatically"),
+    ("Jetzt suchen", "Check now"),
 ];
 
 /// German texts that need other English words in some places: (context, German, English),

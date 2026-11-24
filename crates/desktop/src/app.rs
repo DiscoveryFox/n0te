@@ -191,6 +191,11 @@ pub enum Message {
     PenAttached(bool),
     /// The part of the one-second tick both programs share.
     TickRest,
+    /// Updates: look now, what a look found, install the ready one and start again.
+    CheckUpdate,
+    UpdateStatus(crate::updater::Status),
+    UpdateNow,
+    AutoUpdate(bool),
     WaylandDisplay(Option<usize>),
     Gesture(Gesture),
     Glide(Instant),
@@ -436,6 +441,11 @@ pub struct App {
     last_key: PaneKey,
     /// n0te Tablet: tools, the stroke being written, selection, undo (unused in n0te Laptop).
     pub tablet: crate::tablet::Tablet,
+    /// Updates (Windows): what the last look found, and when it ran.
+    pub update: crate::updater::Status,
+    update_at: Option<Instant>,
+    /// When the app started (the first update look waits a little).
+    started: Instant,
 }
 
 /// The library folder, the one the sync service uses: `$N0TE_LIBRARY`, else
@@ -543,6 +553,9 @@ impl App {
             undo_delete: None,
             last_key: 0,
             tablet: Default::default(),
+            update: crate::updater::Status::Idle,
+            update_at: None,
+            started: Instant::now(),
         };
         // Folders made here that are still empty (the settings keep them).
         app.shelf.made = app.settings.lib_folders.iter().cloned().collect();
@@ -1107,6 +1120,24 @@ impl App {
                 }
                 return gestures;
             }
+            Message::CheckUpdate => return self.check_update(),
+            Message::UpdateStatus(st) => self.update = st,
+            Message::UpdateNow => {
+                let mode = if crate::mode() == crate::Mode::Tablet { "tablet" } else { "laptop" };
+                if crate::updater::install_now(mode) {
+                    return iced::exit();
+                }
+                self.say(tr("Update ließ sich nicht starten"));
+            }
+            Message::AutoUpdate(on) => {
+                self.settings.auto_update = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+                if on {
+                    return self.check_update();
+                }
+            }
             Message::Pen(e) => return self.on_pen(e),
             Message::Tablet(m) => return self.on_tablet(m),
             Message::PenAttached(_) => {}
@@ -1215,6 +1246,17 @@ impl App {
             }
             Message::DoneText => self.finish_text(),
             Message::Tick => {
+                let due = self.update_at.map_or(self.persist_settings, |t| t.elapsed().as_secs() > 6 * 3600);
+                if crate::updater::supported() && self.settings.auto_update && due && self.update != crate::updater::Status::Checking {
+                    let first = self.update_at.is_none();
+                    // The first look a little after start, not while the window opens.
+                    if !first || self.started.elapsed().as_secs() > 20 {
+                        let t = self.check_update();
+                        let rest = self.handle(Message::TickRest);
+                        let tablet = if crate::mode() == crate::Mode::Tablet { self.tablet_tick() } else { Task::none() };
+                        return Task::batch([t, rest, tablet]);
+                    }
+                }
                 if crate::mode() == crate::Mode::Tablet {
                     let t = self.tablet_tick();
                     let rest = self.handle(Message::TickRest);
@@ -3057,6 +3099,21 @@ impl App {
     }
 
     /// Global shortcuts (keys no focused widget consumed).
+    /// Looks for an update on a worker thread (Windows; downloads it when there is one).
+    fn check_update(&mut self) -> Task<Message> {
+        if !crate::updater::supported() || self.update == crate::updater::Status::Checking {
+            return Task::none();
+        }
+        self.update_at = Some(Instant::now());
+        self.update = crate::updater::Status::Checking;
+        let repo = self.settings.update_repo.clone();
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(crate::updater::check(&repo));
+        });
+        Task::perform(rx, |r| Message::UpdateStatus(r.unwrap_or(crate::updater::Status::Idle)))
+    }
+
     fn shortcut(&mut self, key: Key, m: keyboard::Modifiers) -> Task<Message> {
         // The palette takes the arrows and Esc while it is open.
         if self.palette.is_some() {
@@ -3632,6 +3689,35 @@ impl App {
             section(tr("Geräte"), tr("Sync mit dem Tablet, direkt und ohne Server."), self.devices_view()),
         ]
         .spacing(18);
+        // Windows: updates from GitHub (install once, new versions come by themselves).
+        let body = if crate::updater::supported() {
+            use crate::updater::Status;
+            let state = match &self.update {
+                Status::Idle => trf("Version {}", &[&crate::updater::VERSION]),
+                Status::Checking => tr("Sucht nach Updates …").to_string(),
+                Status::UpToDate => trf("Version {}: aktuell", &[&crate::updater::VERSION]),
+                Status::Ready(v) => trf("n0te {} ist bereit: installiert sich beim nächsten Start", &[v]),
+                Status::Available(v, _) => trf("n0te {} ist da (tragbare Version: bitte neu herunterladen)", &[v]),
+                Status::Failed(e) => trf("Update-Suche ging nicht: {}", &[e]),
+            };
+            body.push(rule()).push(section(
+                tr("Updates"),
+                tr("Neue Versionen laden sich von GitHub und installieren sich beim nächsten Start."),
+                column![
+                    iced::widget::toggler(self.settings.auto_update).label(tr("Automatisch aktualisieren")).on_toggle(Message::AutoUpdate).size(20).text_size(14).spacing(12).style(theme::switch),
+                    row![
+                        text(state).size(13).color(theme::p().muted),
+                        Space::new().width(Length::Fill),
+                        button(theme::btn_small(tr("Jetzt suchen"))).padding(theme::pad()).on_press_maybe((self.update != Status::Checking).then_some(Message::CheckUpdate)).style(theme::ghost),
+                    ]
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(10)
+                .into(),
+            ))
+        } else {
+            body
+        };
         let col = column![
             row![theme::heading(tr("Einstellungen"), 24.0), Space::new().width(Length::Fill), button(theme::btn_small(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowSettings(false)).style(theme::ghost)].align_y(Alignment::Center),
             iced::widget::scrollable(body).style(theme::scroll_dark).height(Length::Shrink),
@@ -3821,7 +3907,22 @@ impl App {
             .into(),
             None => text(theme::cased(tr("Strg K: Befehle · F1: Tastenkürzel"))).font(theme::meta_font()).size(11.5).color(theme::p().muted).into(),
         };
-        container(row![left, Space::new().width(Length::Fill)].align_y(Alignment::Center))
+        let update: Element<'_, Message> = match &self.update {
+            crate::updater::Status::Ready(v) => row![
+                text(trf("n0te {} ist bereit", &[v])).font(theme::meta_font()).size(12).color(theme::p().accent),
+                Space::new().width(8),
+                button(theme::btn_small(tr("Neu starten"))).padding([0, 8]).on_press(Message::UpdateNow).style(theme::ghost),
+            ]
+            .align_y(Alignment::Center)
+            .into(),
+            crate::updater::Status::Available(v, page) => button(text(trf("n0te {} ist da", &[v])).font(theme::meta_font()).size(12).color(theme::p().accent))
+                .padding([0, 8])
+                .on_press(Message::OpenPath(std::path::PathBuf::from(page)))
+                .style(theme::ghost)
+                .into(),
+            _ => Space::new().into(),
+        };
+        container(row![left, Space::new().width(Length::Fill), update].align_y(Alignment::Center))
             .padding([4, 14])
             .height(26)
             .width(Length::Fill)

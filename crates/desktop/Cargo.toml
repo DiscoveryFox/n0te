@@ -26,11 +26,15 @@ raw-window-handle = "0.6"
 # Touchpad gestures (pinch, glide after a swipe) straight from Wayland: winit has none on Linux.
 # n0te Tablet's pen on Windows: WM_POINTER through a window subclass (tablet/pen.rs).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_TabletPC", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_TabletPC", "Win32_UI_WindowsAndMessaging"] }
 # Handwriting search: the system's ink recognizer (tablet/recognize.rs).
 windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Foundation_Numerics", "UI_Input_Inking"] }
 windows-collections = "0.3"
 windows-numerics = "0.3"
+# Updates from GitHub releases (updater.rs): the reqwest/rustls iroh already uses, ring as crypto.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31"

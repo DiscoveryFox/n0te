@@ -5,6 +5,23 @@ n0te Laptop, n0te Tablet and n0te-sync. Each `## [version]` section below become
 that GitHub release. The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [0.32.1] - 2026-11-24
+
+Install once, then n0te keeps itself up to date.
+
+### Added
+
+- Windows (n0te Laptop and n0te Tablet): automatic updates from this repo's releases. A while
+  after start and every few hours n0te looks for a new version, downloads the installer for
+  your PC (x64 or ARM64), checks its SHA-256 and installs it at the next start; "Restart" in
+  the status bar installs it right away. The installer keeps the programs you chose and starts
+  n0te again. Settings → Updates switches it off. A portable copy only says a new version is out.
+- Android: updates come from this repo by default (Settings → Updates), no setup needed.
+
+### Changed
+
+- Faster builds: CI checks build in a quick profile, release programs use thin LTO.
+
 ## [0.32.0] - 2026-11-24
 
 The first public release: the Android tablet app, n0te Laptop for Windows and Linux, and a

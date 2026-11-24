@@ -243,7 +243,7 @@ class SettingsActivity : ComponentActivity() {
      */
     @Composable
     private fun UpdateSettings() {
-        var repo by remember { mutableStateOf(Settings.str("update_repo", "")) }
+        var repo by remember { mutableStateOf(Settings.str("update_repo", Updater.DEFAULT_REPO)) }
         var token by remember { mutableStateOf(Settings.str("update_token", "")) }
         var mode by remember { mutableStateOf(Updater.mode) }
         var pre by remember { mutableStateOf(Updater.prerelease) }

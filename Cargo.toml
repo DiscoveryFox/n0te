@@ -4,7 +4,7 @@ members = ["crates/core", "crates/desktop", "crates/ffi", "crates/pdf", "crates/
 
 [workspace.package]
 edition = "2024"
-version = "0.32.0"
+version = "0.32.1"
 publish = false
 
 [workspace.dependencies]
@@ -34,3 +34,20 @@ lto = false
 codegen-units = 16
 incremental = true
 strip = false
+
+# CI checks (build + tests share it): dependencies optimized (they come from the cache), the
+# workspace's own crates barely, so a push builds in minutes rather than half an hour.
+[profile.ci]
+inherits = "dev"
+debug = "line-tables-only"
+incremental = false
+
+[profile.ci.package."*"]
+opt-level = 2
+
+# The Windows and Linux programs of a release: fully optimized but with thin LTO (fat LTO with
+# one codegen unit takes far too long for the desktop crates; the Android library keeps it).
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 16

@@ -4,6 +4,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() -> iced::Result {
+    // A downloaded update installs before the window opens (the installer starts us again).
+    if n0te_desktop::updater::apply_pending("tablet") {
+        return Ok(());
+    }
     let arg = std::env::args_os().nth(1);
     if let Some(link) = arg.as_ref().and_then(|a| a.to_str()) {
         n0te_desktop::set_start_link(link);

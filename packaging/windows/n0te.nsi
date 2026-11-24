@@ -53,6 +53,11 @@ Name "${APP}"
 OutFile "${OUTFILE}"
 InstallDir "$LOCALAPPDATA\Programs\n0te"
 InstallDirRegKey HKCU "Software\n0te" "InstallDir"
+
+; Self-updates (the apps' updater runs "setup.exe /S /UPDATE /RELAUNCH=laptop|tablet"):
+; /UPDATE keeps the programs that are installed and closes running n0te windows first;
+; /RELAUNCH= starts that program again when the update is in.
+Var Relaunch
 BrandingText "n0te ${VERSION} (${ARCH})"
 ShowInstDetails show
 ShowUninstDetails show
@@ -244,6 +249,38 @@ SectionEnd
 ; --- functions -----------------------------------------------------------------------------
 
 Function .onInit
+  ${GetParameters} $R0
+  ClearErrors
+  ${GetOptions} $R0 "/RELAUNCH=" $Relaunch
+  ${If} ${Errors}
+    StrCpy $Relaunch ""
+  ${EndIf}
+  ClearErrors
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${IfNot} ${Errors}
+    ; The app that asked has quit already; others are asked to close, then made to.
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /IM n0te-laptop.exe /IM n0te-tablet.exe'
+    Pop $0
+    Sleep 1500
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM n0te-laptop.exe /IM n0te-tablet.exe'
+    Pop $0
+    ; Keep what is installed: a program that isn't there stays away, autostart as it was.
+    ReadRegStr $R2 HKCU "Software\n0te" "InstallDir"
+    ${If} $R2 != ""
+      ${IfNot} ${FileExists} "$R2\n0te-laptop.exe"
+      ${AndIf} ${FileExists} "$R2\n0te-tablet.exe"
+        !insertmacro UnselectSection ${SecLaptop}
+      ${EndIf}
+      ${IfNot} ${FileExists} "$R2\n0te-tablet.exe"
+      ${AndIf} ${FileExists} "$R2\n0te-laptop.exe"
+        !insertmacro UnselectSection ${SecTablet}
+      ${EndIf}
+      ReadRegStr $R3 HKCU "${RUN_KEY}" "n0te-sync"
+      ${If} $R3 == ""
+        !insertmacro UnselectSection ${SecAutostart}
+      ${EndIf}
+    ${EndIf}
+  ${EndIf}
   ${IfNot} ${AtLeastWin10}
     MessageBox MB_ICONSTOP|MB_OK "$(NeedWin10)" /SD IDOK
     Abort
@@ -274,6 +311,16 @@ Function .onSelChange
       !insertmacro SelectSection ${SecTablet}
     ${Else}
       !insertmacro SelectSection ${SecLaptop}
+    ${EndIf}
+  ${EndIf}
+FunctionEnd
+
+; After a self-update: the program that asked for it starts again.
+Function .onInstSuccess
+  ${If} $Relaunch == "laptop"
+  ${OrIf} $Relaunch == "tablet"
+    ${If} ${FileExists} "$INSTDIR\n0te-$Relaunch.exe"
+      Exec '"$INSTDIR\n0te-$Relaunch.exe"'
     ${EndIf}
   ${EndIf}
 FunctionEnd

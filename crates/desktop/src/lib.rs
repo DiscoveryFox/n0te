@@ -22,6 +22,7 @@ pub mod sidebar;
 pub mod split;
 pub mod tablet;
 pub mod theme;
+pub mod updater;
 pub mod widgets;
 
 pub use app::{App, Message};

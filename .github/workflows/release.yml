@@ -82,11 +82,11 @@ jobs:
         with:
           key: ${{ matrix.target }}
           save-if: false
-      - name: Build n0te Laptop, n0te Tablet, n0te-sync (release)
-        run: cargo build --locked --release --target ${{ matrix.target }} -p n0te-desktop -p n0te-sync --bins
+      - name: Build n0te Laptop, n0te Tablet, n0te-sync (dist profile, thin LTO)
+        run: cargo build --locked --profile dist --target ${{ matrix.target }} -p n0te-desktop -p n0te-sync --bins
       - name: Collect the exes
         run: |
-          out=target/${{ matrix.target }}/release
+          out=target/${{ matrix.target }}/dist
           mkdir -p dist
           cp "$out/n0te.exe" dist/n0te-laptop.exe
           cp "$out/n0te-tablet.exe" "$out/n0te-sync.exe" dist/

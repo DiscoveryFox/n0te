@@ -23,9 +23,12 @@ import java.util.concurrent.Executors
 /**
  * n0te updates from GitHub releases: looks for a newer n0te APK (when the app opens, every few
  * hours, or by hand), downloads it in the background, and installs it on a tap (Android asks
- * once more). The repo is set in the settings; nothing happens without one.
+ * once more). The repo is n0te's own ([DEFAULT_REPO]) unless the settings name another; an
+ * empty field there switches updates off.
  */
 object Updater {
+    /** Where n0te's releases are: every install updates from here without any setup. */
+    const val DEFAULT_REPO = "DiscoveryFox/n0te"
     /** A release with an n0te APK. */
     data class Release(
         val version: String, val tag: String, val title: String, val notes: String,
@@ -49,7 +52,7 @@ object Updater {
     var asked: String? = null
 
     private val REPO = Regex("^[\\w.-]+/[\\w.-]+$")
-    val repo: String get() = Settings.str("update_repo", "").trim().removePrefix("https://github.com/").trimEnd('/')
+    val repo: String get() = Settings.str("update_repo", DEFAULT_REPO).trim().removePrefix("https://github.com/").trimEnd('/')
     val token: String get() = Settings.str("update_token", "").trim()
     /** "open": when the app opens; "periodic": also every 6 hours while it runs; "manual". */
     val mode: String get() = Settings.str("update_mode", "open")

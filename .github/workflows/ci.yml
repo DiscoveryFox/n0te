@@ -8,7 +8,10 @@ name: CI
 on:
   push:
     branches: [main]
+    # Text-only changes don't need a build.
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
   workflow_dispatch:
 
 permissions:
@@ -91,10 +94,15 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: pdfium (pinned, hash-checked)
         run: scripts/fetch-pdfium.sh win-${{ matrix.arch }}
-      - name: Build n0te Laptop, n0te Tablet, n0te-sync (release)
-        # The quicker "fast" profile (no fat LTO, parallel codegen): CI checks that it builds and
-        # runs; release.yml builds the optimized programs.
-        run: cargo build --locked --profile fast --target ${{ matrix.target }} -p n0te-desktop -p n0te-sync --bins
+      - name: Build n0te Laptop, n0te Tablet, n0te-sync
+        # The "ci" profile (dependencies optimized and cached, own crates quick to build), shared
+        # with the tests below. ARM64 is type-checked only here; release.yml builds it for real.
+        run: |
+          if [[ "${{ matrix.arch }}" == arm64 ]]; then
+            cargo check --locked --profile ci --target ${{ matrix.target }} -p n0te-desktop -p n0te-sync --bins
+          else
+            cargo build --locked --profile ci --target ${{ matrix.target }} -p n0te-desktop -p n0te-sync --bins
+          fi
       - name: Tests
         if: matrix.arch == 'x64'
         # The Windows port is in progress (phase 2: sync IPC, paths): failures show up in the run
@@ -102,18 +110,19 @@ jobs:
         continue-on-error: true
         env:
           N0TE_PDFIUM_LIB: ${{ github.workspace }}\third_party\pdfium\win-x64\bin\pdfium.dll
-          CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
           # The UI tests check German texts; the runner's Windows is English.
           N0TE_LANG: de
-        run: cargo test --locked --no-fail-fast --target ${{ matrix.target }} -p n0te-core -p n0te-pdf -p n0te-platform -p n0te-desktop -p n0te-sync
+        run: cargo test --locked --no-fail-fast --profile ci --target ${{ matrix.target }} -p n0te-core -p n0te-pdf -p n0te-platform -p n0te-desktop -p n0te-sync
       - name: Collect the exes
+        if: matrix.arch == 'x64'
         run: |
-          out=target/${{ matrix.target }}/fast
+          out=target/${{ matrix.target }}/ci
           mkdir -p dist
           cp "$out/n0te.exe" dist/n0te-laptop.exe
           cp "$out/n0te-tablet.exe" "$out/n0te-sync.exe" dist/
           ls -l dist
       - uses: actions/upload-artifact@v4
+        if: matrix.arch == 'x64'
         with:
           name: n0te-windows-${{ matrix.arch }}-exes
           path: dist/*.exe
@@ -138,9 +147,8 @@ jobs:
           REQUIRE_INSTALLER: "1"
         run: |
           version="$(scripts/version.sh cargo)-dev.${GITHUB_RUN_NUMBER}"
-          for arch in x64 arm64; do
-            packaging/windows/package.sh "$version" "$arch" "exes/n0te-windows-$arch-exes" dist
-          done
+          # The installer script is the same for both; CI packages the x64 build.
+          packaging/windows/package.sh "$version" x64 exes/n0te-windows-x64-exes dist
           ls -l dist
       - uses: actions/upload-artifact@v4
         with:

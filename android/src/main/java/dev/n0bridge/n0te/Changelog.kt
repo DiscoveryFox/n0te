@@ -11,6 +11,10 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.32.1", "24. Nov. 2026", "Updates von selbst", listOf(
+            "Updates kommen jetzt von selbst aus n0tes GitHub-Repo (DiscoveryFox/n0te), ohne etwas einzustellen",
+            "In den Einstellungen unter Updates lässt sich ein anderes Repo eintragen; ein leeres Feld schaltet Updates ab",
+        )),
         Entry("0.32.0", "24. Nov. 2026", "Platz zur Seite", listOf(
             "Platz einfügen geht jetzt auch zur Seite: Stift setzen und nach rechts ziehen, alles rechts davon rückt weiter, die Seite wird breiter wenn nötig; nach links nimmt den Platz wieder heraus",
             "Wohin der Stift zuerst zieht, entscheidet die Richtung (ein kleines Kreuz zeigt die Stelle, bis es klar ist)",

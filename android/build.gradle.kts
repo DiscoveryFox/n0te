@@ -19,8 +19,8 @@ android {
         applicationId = "dev.n0bridge.n0te"
         minSdk = 29
         targetSdk = 35
-        versionCode = 66
-        versionName = "0.32.0"
+        versionCode = 67
+        versionName = "0.32.1"
         // The tablet: arm64. Emulator tests add x86_64 (-Pn0te.abis="arm64-v8a x86_64").
         ndk { abiFilters += (project.findProperty("n0te.abis") as String? ?: "arm64-v8a").split(" ") }
     }

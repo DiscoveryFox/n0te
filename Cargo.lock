@@ -3797,7 +3797,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-core"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "blake3",
  "loro",
@@ -3807,7 +3807,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-desktop"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "embed-resource",
  "iced",
@@ -3817,7 +3817,10 @@ dependencies = [
  "n0te-platform",
  "png 0.18.1",
  "raw-window-handle",
+ "reqwest",
+ "rustls",
  "serde_json",
+ "sha2 0.10.9",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
@@ -3829,7 +3832,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-ffi"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "jni-sys 0.3.1",
  "n0te-core",
@@ -3841,7 +3844,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-pdf"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "flate2",
  "n0te-core",
@@ -3851,7 +3854,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-platform"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -3859,7 +3862,7 @@ dependencies = [
 
 [[package]]
 name = "n0te-sync"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "blake3",
  "bytes",
@@ -5334,6 +5337,7 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -6860,7 +6864,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.32.0"
+version = "0.32.1"
 dependencies = [
  "uniffi",
 ]

@@ -36,6 +36,10 @@ pub struct Settings {
     pub split_seen: bool,
     /// "auto" (Windows: the system's language; Linux: German), "de" or "en".
     pub language: String,
+    /// Windows: new versions download and install by themselves.
+    pub auto_update: bool,
+    /// Where updates come from (owner/repo on GitHub).
+    pub update_repo: String,
 }
 
 /// How many open times the settings keep.
@@ -71,6 +75,8 @@ impl Default for Settings {
             outline_pictures: false,
             split_seen: false,
             language: "auto".into(),
+            auto_update: true,
+            update_repo: crate::updater::DEFAULT_REPO.into(),
         }
     }
 }
@@ -109,6 +115,8 @@ impl Settings {
                 "outline_view" => s.outline_pictures = v == "pictures",
                 "split_seen" => s.split_seen = v == "1",
                 "language" => s.language = if matches!(v, "de" | "en") { v.to_string() } else { "auto".into() },
+                "auto_update" => s.auto_update = v != "0",
+                "update_repo" if v.contains('/') => s.update_repo = v.trim().trim_start_matches("https://github.com/").trim_end_matches('/').to_string(),
                 _ => {}
             }
         }
@@ -143,7 +151,7 @@ impl Settings {
         let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
         let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -160,6 +168,8 @@ impl Settings {
             if self.outline_pictures { "pictures" } else { "list" },
             if self.split_seen { 1 } else { 0 },
             self.language,
+            u8::from(self.auto_update),
+            self.update_repo,
         )
     }
 
