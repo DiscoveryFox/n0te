@@ -887,6 +887,8 @@ fn side_stops(len: f32) -> Vec<f32> {
 }
 
 #[cfg(test)]
+// The random shapes use the Kotlin tests' own constants (6.28 …), so they stay the same strokes.
+#[allow(clippy::approx_constant)]
 pub(crate) mod tests {
     //! The JVM tests of the Android app, ported case by case (ShapesTest.kt, ShapesFuzzTest.kt,
     //! ShapesIntentTest.kt). The strokes come from [`JavaRandom`] with the Kotlin seeds and the
