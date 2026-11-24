@@ -72,11 +72,12 @@ class PlotsTest {
         assertTrue(info[0].draggable)
         assertEquals("f(x) = x²", info[2].shown)
         assertTrue(info.all { it.error == null })
-        // New letters become sliders, like in GeoGebra; the typed object is the one selected.
+        // New letters become sliders, like in GeoGebra (with x, y; two letters alone make a curve,
+        // see twoLettersMakeACurveWithASwitchToSliders); the typed object is the one selected.
         val withSliders = GraphSession("sheet", Plots.fresh(300f, 400f, 595.28f, 841.89f, FfiBackground.GRID, sq).copy(id = "t"), true) {}
-        assertNull(withSliders.input("b = 4 + 3a"))
-        assertEquals(listOf("a", "b"), plotInfo(withSliders.draft).map { it.name })
-        assertEquals("b", withSliders.nameOf(withSliders.selected!!))
+        assertNull(withSliders.input("y = m x + c"))
+        assertEquals(listOf("m", "c", "f"), plotInfo(withSliders.draft).map { it.name })
+        assertEquals("f", withSliders.nameOf(withSliders.selected!!))
         // A wrong input says why.
         val err = runCatching { plotAdd(p, "Gerade(A)") }.exceptionOrNull()
         assertTrue(err?.message?.isNotBlank() == true)
@@ -135,5 +136,71 @@ class PlotsTest {
         s.view { it.copy(xMin = it.xMin - 3, xMax = it.xMax - 3) }
         s.resetView()
         assertEquals(x0, s.draft.xMin, 1e-9)
+    }
+
+    @Test fun anAxisDraggedStretchesOnlyItselfAndSnapsToTheSquaresPerAxis() {
+        val s = GraphSession("sheet", Plots.fresh(300f, 400f, 595.28f, 841.89f, FfiBackground.GRID, sq).copy(id = "a"), true) {}
+        s.squares = sq
+        val p = s.draft
+        // The 2 on the x axis pulled to where the 1 was: twice as much x, y as it was.
+        val two = plotToPage(p, 2.0, 0.0); val one = plotToPage(p, 1.0, 0.0)
+        assertTrue(s.down(two[0], two[1] + 1f, null, 4f))
+        s.move(one[0], two[1] + 1f)
+        s.up()
+        s.settle()
+        assertEquals(-12.0, s.draft.xMin, 1e-9); assertEquals(12.0, s.draft.xMax, 1e-9)
+        assertEquals(p.yMin, s.draft.yMin, 1e-9); assertEquals(p.yMax, s.draft.yMax, 1e-9)
+        // Pulled a little less: on squared paper each axis rounds to its own units per square.
+        s.undo()
+        s.down(two[0], two[1] + 1f, null, 4f)
+        s.move(one[0] + 3f, two[1] + 1f)
+        s.up()
+        s.settle()
+        assertEquals(2.0, (s.draft.xMax - s.draft.xMin) / s.draft.w * sq, 1e-9)
+        assertEquals(1.0, (s.draft.yMax - s.draft.yMin) / s.draft.h * sq, 1e-9)
+    }
+
+    @Test fun aDomainIsSetInTheSettingsAndItsEndsDragInTheGraph() {
+        val s = GraphSession("sheet", Plots.fresh(300f, 400f, 595.28f, 841.89f, FfiBackground.BLANK, 0f).copy(id = "d"), true) {}
+        assertNull(s.input("f(x) = x^2, 0 ≤ x ≤ 2"))
+        val f = s.infos.single()
+        assertEquals(0.0, f.domainFrom!!, 1e-9); assertEquals(2.0, f.domainTo!!, 1e-9)
+        assertTrue(f.latex, f.latex.endsWith("0 \\le x \\le 2"))
+        assertNull(s.setDomain(f.id, -1.0, null))
+        assertEquals("f(x) = x^2, x ≥ -1", s.draft.objs.single().def)
+        assertTrue(s.setDomain(f.id, 3.0, 1.0) != null)
+        assertNull(s.setDomain(f.id, 0.0, 2.0))
+        // The end at x = 2 dragged to 1: the domain follows (on the grid's steps).
+        val end = plotToPage(s.draft, 2.0, 4.0); val to = plotToPage(s.draft, 1.0, 1.0)
+        s.down(end[0], end[1], f.id, 5f)
+        s.move(to[0], to[1])
+        s.up()
+        assertEquals("f(x) = x^2, 0 ≤ x ≤ 1", s.draft.objs.single().def)
+        s.undo()
+        assertEquals("f(x) = x^2, 0 ≤ x ≤ 2", s.draft.objs.single().def)
+    }
+
+    @Test fun twoLettersMakeACurveWithASwitchToSliders() {
+        val s = GraphSession("sheet", Plots.fresh(300f, 400f, 595.28f, 841.89f, FfiBackground.BLANK, 0f).copy(id = "c"), true) {}
+        assertNull(s.input("a = 3b"))
+        val a = s.infos.single()
+        assertEquals(true, a.curve)
+        assertEquals("Funktion", a.kind)
+        assertEquals("b" to "a", s.draft.xName to s.draft.yName)
+        s.asCurve(a.id, false)
+        assertEquals(listOf("a = 3b", "b = 1"), s.draft.objs.map { it.def })
+        assertEquals(false, s.infoOf(a.id)!!.curve)
+        s.asCurve(a.id, true)
+        assertEquals(listOf("a(b) = 3b"), s.draft.objs.map { it.def })
+        // Handwriting read on the tablet: x2 is x².
+        assertEquals("f(x)=x^2+1", uniffi.n0te_ffi.plotFromHandwriting("f(x)=x2+1"))
+    }
+
+    @Test fun theKeyboardComingUpKeepsTheGraphWhereItIs() {
+        val p = Plots.fresh(300f, 400f, 595.28f, 841.89f, FfiBackground.BLANK, 0f)
+        val shorter = GraphSession.framed(p, p.x, p.y, p.w, p.h * 0.6f, keepTop = true)
+        assertEquals(p.xMin, shorter.xMin, 1e-9); assertEquals(p.xMax, shorter.xMax, 1e-9)
+        assertEquals(p.yMax, shorter.yMax, 1e-9)
+        assertEquals((p.yMax - p.yMin) / p.h, (shorter.yMax - shorter.yMin) / shorter.h, 1e-9)
     }
 }

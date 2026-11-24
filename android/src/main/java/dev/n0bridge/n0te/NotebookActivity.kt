@@ -3189,7 +3189,7 @@ class NotebookActivity : ComponentActivity() {
                 }
                 override fun down(x: Float, y: Float, tol: Float) {
                     downHit = uniffi.n0te_ffi.plotHit(s.draft, x, y, tol)
-                    s.down(x, y, downHit)
+                    s.down(x, y, downHit, tol)
                 }
                 override fun move(x: Float, y: Float) = s.move(x, y)
                 override fun up(x: Float, y: Float, tap: Boolean) {
@@ -3230,22 +3230,48 @@ class NotebookActivity : ComponentActivity() {
         fun graphFromSelection() {
             val sel = selection ?: return
             if (sel.multi) { flash("Graph: bitte nur auf einer Seite auswählen"); return }
-            val png = view.selectionPng() ?: return
             val bounds = android.graphics.RectF(sel.bounds)
-            val asked = SyncHub.requestLatex(png) { latex, _, error ->
-                if (error != null) { flash("Graph: $error"); return@requestLatex }
-                val expr = runCatching { uniffi.n0te_ffi.plotFromLatex(latex) }.getOrElse { flash("Graph: ${GraphSession.errText(it)}"); return@requestLatex }
-                val near = view.plotNear(sel.sheetId, bounds)
+            // A new row of the graph nearest to it (or a new graph beside it); false: it doesn't read as one.
+            fun place(expr: String): Boolean {
+                val near = nearestPlot(sel.sheetId, bounds)
                 if (near != null) {
-                    val withIt = runCatching { uniffi.n0te_ffi.plotAdd(near, expr) }.getOrElse { flash("Graph: ${GraphSession.errText(it)}"); return@requestLatex }
+                    val withIt = runCatching { uniffi.n0te_ffi.plotAdd(near, expr) }.getOrElse { return false }
                     startGraph(sel.sheetId, near, false)
                     graph?.set(withIt)
                 } else {
+                    if (runCatching { uniffi.n0te_ffi.plotAdd(Plots.fresh(0f, 0f, 0f, 0f, uniffi.n0te_ffi.FfiBackground.BLANK, 0f), expr) }.isFailure) return false
                     view.insertPlotBeside(sel.sheetId, bounds, expr, Plots.nextColor(emptyList())) { id, p -> startGraph(id, p, false) }
                 }
-                flash("Gelesen: $expr")
+                flash("In den Graphen: $expr")
+                return true
             }
-            flash(if (asked) "Lese die Funktion … (auf dem Laptop)" else "Laptop nicht verbunden — die Funktion wird dort gelesen")
+            // The tablet's own reading of the lines it is in (holding one word of "y = 2x + 1" is enough).
+            fun readHere(why: String?) {
+                model?.readText(sel.sheetId, sel.ids) { text ->
+                    val expr = uniffi.n0te_ffi.plotFromHandwriting(text)
+                    when {
+                        text.isBlank() -> flash(why ?: if (Handwriting.ready) "Graph: die Schrift ist noch nicht gelesen, gleich noch einmal" else "Graph: Handschrift lesen ist aus (Einstellungen › Handschrift)")
+                        !place(expr) -> flash("Graph: „$text“ ist keine Funktion")
+                    }
+                }
+            }
+            // The laptop reads formulas best (LaTeX); without it, or when its reading doesn't fit, the tablet's.
+            val png = view.selectionPng()
+            val asked = png != null && SyncHub.requestLatex(png) { latex, _, error ->
+                val expr = if (error == null) runCatching { uniffi.n0te_ffi.plotFromLatex(latex) }.getOrNull() else null
+                if (expr == null || !place(expr)) readHere(error?.let { "Graph: $it" })
+            }
+            if (asked) flash("Lese die Funktion … (auf dem Laptop)") else readHere(null)
+        }
+
+        /** The coordinate system on [sheetId] nearest to [r] (page points), if one is close (beside it or around it). */
+        fun nearestPlot(sheetId: String, r: android.graphics.RectF): uniffi.n0te_ffi.FfiPlot? {
+            fun gap(p: uniffi.n0te_ffi.FfiPlot): Float {
+                val dx = maxOf(p.x - r.right, r.left - (p.x + p.w), 0f)
+                val dy = maxOf(p.y - r.bottom, r.top - (p.y + p.h), 0f)
+                return kotlin.math.hypot(dx, dy)
+            }
+            return model?.sheets?.get(sheetId)?.images?.mapNotNull { it.plot }?.filter { gap(it) < 160f }?.minByOrNull { gap(it) }
         }
 
         /** Marking the selected strokes as a heading: its words (the recogniser's reading to start with). */
@@ -3500,7 +3526,9 @@ class NotebookActivity : ComponentActivity() {
                 LabeledBtn(Glyph.TRASH, "Löschen") { view.deleteSelection() }
                 LabeledBtn(Glyph.LAPTOP, "Laptop") { sendSelectionToLaptop() }
                 LabeledBtn(Glyph.TEXT, "LaTeX") { recognizeSelection() }
-                LabeledBtn(Glyph.PLOT, "Graph") { graphFromSelection() }
+                // Handwriting next to a graph (f(x) = x², y = 2x + 1) goes into it as a new row.
+                val intoGraph = selection?.let { s -> !s.multi && nearestPlot(s.sheetId, android.graphics.RectF(s.bounds)) != null } == true
+                LabeledBtn(Glyph.PLOT, if (intoGraph) "In den Graphen" else "Graph") { graphFromSelection() }
                 selection?.takeIf { !it.multi }?.let { sel ->
                     LabeledBtn(Glyph.HEADING, "Überschrift") {
                         headingText = androidx.compose.ui.text.input.TextFieldValue("")

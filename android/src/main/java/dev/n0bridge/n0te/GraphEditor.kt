@@ -476,6 +476,13 @@ private fun AlgebraRow(s: GraphSession, tick: Int, o: uniffi.n0te_ffi.FfiObj, in
             }
             if (selected) GIconBtn(Glyph.TRASH, size = 38.dp) { s.remove(o.id) }
         }
+        // a = 3b: drawn as a curve of the letters, or a number with a slider — one tap switches.
+        info.curve?.let { curve ->
+            Row(Modifier.padding(start = 40.dp, end = 12.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                SmallChoice("als Kurve", curve) { if (!curve) s.asCurve(o.id, true) }
+                SmallChoice("als Schieberegler", !curve) { if (curve) s.asCurve(o.id, false) }
+            }
+        }
         // A slider right in the list.
         val sl = o.style.slider
         val v = info.sliderValue
@@ -591,6 +598,15 @@ private fun ObjectSettings(s: GraphSession, tick: Int, o: uniffi.n0te_ffi.FfiObj
                 }
             }
             if (st.special.toInt() != 0) ToggleRow("Mit Koordinaten", st.coords) { set { it.copy(coords = !it.coords) } }
+
+            // Where it is defined (f(x) = x², 0 ≤ x ≤ 2): empty is open; the ends also drag in the graph.
+            Caption("Definitionsbereich", Modifier.padding(top = 6.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text("von", color = Ui.Muted, fontSize = 13.sp); OptNumField("${o.id}<", info.domainFrom) { v -> err = s.setDomain(o.id, v, info.domainTo) }
+                Text("bis", color = Ui.Muted, fontSize = 13.sp); OptNumField("${o.id}>", info.domainTo) { v -> err = s.setDomain(o.id, info.domainFrom, v) }
+                if (info.domainFrom != null || info.domainTo != null) SmallChoice("Überall", false) { err = s.setDomain(o.id, null, null) }
+            }
+            Text("Leer: ohne Grenze. Die Enden lassen sich im Graphen ziehen.", color = Ui.Muted, fontSize = 11.sp)
         }
         st.slider?.let { sl ->
             Caption("Schieberegler", Modifier.padding(top = 6.dp))
@@ -624,6 +640,25 @@ private fun LabeledSlider(label: String, value: Float, range: ClosedFloatingPoin
 private fun NumField(v: Double, onSet: (Double) -> Unit) {
     var text by remember(v) { mutableStateOf(Plots.format(v)) }
     Field(text, "", number = true, modifier = Modifier.width(64.dp), onChange = { t -> text = t; Plots.number(t)?.let(onSet) })
+}
+
+/**
+ * A number that may be left empty ([v] null: none). What is typed stays as typed while it
+ * means [v]; a change from elsewhere (an end dragged in the graph) shows at once.
+ */
+@Composable
+private fun OptNumField(key: String, v: Double?, onSet: (Double?) -> Unit) {
+    var text by remember(key) { mutableStateOf(v?.let(Plots::format) ?: "") }
+    var last by remember(key) { mutableStateOf(v) }
+    if (v != last) {
+        last = v
+        val typed = if (text.isBlank()) null else Plots.number(text)
+        if (typed != v) text = v?.let(Plots::format) ?: ""
+    }
+    Field(text, "", number = true, modifier = Modifier.width(72.dp), onChange = { t ->
+        text = t
+        if (t.isBlank()) onSet(null) else Plots.number(t)?.let(onSet)
+    })
 }
 
 @Composable
@@ -662,7 +697,7 @@ private fun GraphicsProps(s: GraphSession, tick: Int) {
                 if (!p.pi) uniffi.n0te_ffi.plotPiRange(p).let { r -> s.view { it.copy(pi = true, xMin = r[0], xMax = r[1]) } } else s.view { it.copy(pi = false) }
             }
         }
-        Text("Im Graphen: ins Leere ziehen verschiebt, zwei Finger zoomen.", color = Ui.Muted, fontSize = 11.sp)
+        Text("Im Graphen: ins Leere ziehen verschiebt, zwei Finger zoomen, an einer Achse ziehen streckt nur sie.", color = Ui.Muted, fontSize = 11.sp)
 
         Caption("Achsen und Raster", Modifier.padding(top = 6.dp))
         ToggleRow("Achsen", p.axes) { s.view { it.copy(axes = !it.axes) } }

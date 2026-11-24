@@ -102,7 +102,7 @@ class GraphCanvasView(context: Context, var session: GraphSession, private val f
                 capture = true; pinch = 0f; moved = false
                 downX = ev.x; downY = ev.y; downAt = ev.eventTime
                 hit = uniffi.n0te_ffi.plotHit(s.draft, px(0), py(0), 14f * density / k)
-                s.down(px(0), py(0), hit)
+                s.down(px(0), py(0), hit, 14f * density / k)
             }
             MotionEvent.ACTION_POINTER_DOWN -> if (capture && ev.pointerCount == 2) {
                 pinch = hypot(ev.getX(0) - ev.getX(1), ev.getY(0) - ev.getY(1))

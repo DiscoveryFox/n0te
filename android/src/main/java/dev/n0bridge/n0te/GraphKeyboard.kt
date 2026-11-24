@@ -301,7 +301,7 @@ private val PAGES: List<Pair<String, List<List<Key>>>> = listOf(
         listOf(wrap("sin", "sin(", ")"), wrap("cos", "cos(", ")"), wrap("tan", "tan(", ")"), wrap("ln", "ln(", ")"), GAP, wrap("eˣ", "e^(", ")"), wrap("10ˣ", "10^(", ")"), wrap("lg", "lg(", ")"), wrap("√", "√(", ")"), wrap("|x|", "|", "|"), GAP, BACK),
         listOf(wrap("sin⁻¹", "arcsin(", ")"), wrap("cos⁻¹", "arccos(", ")"), wrap("tan⁻¹", "arctan(", ")"), t("x²", "²"), GAP, t("f(x) =", "f(x) = "), t("g(x) =", "g(x) = "), t("f′(x)", "f'(x)"), t("x"), t("y"), GAP, LEFT, RIGHT),
         listOf(tpl("Ableitung", "Ableitung(f)"), tpl("Integral", "Integral(f, 0, 1)"), tpl("Nullstelle", "Nullstelle(f)"), tpl("Extremum", "Extremum(f)"), GAP, tpl("Schneide", "Schneide(f, g)"), tpl("Tangente", "Tangente(A, f)"), tpl("Wenn", "Wenn(x < 0, -x, x²)"), tpl("Punkt", "Punkt(f, 1)"), t(",", ", "), GAP, OPEN, CLOSE),
-        listOf(tpl("Gerade", "Gerade(A, B)"), tpl("Strecke", "Strecke(A, B)"), tpl("Kreis", "Kreis(M, 2)"), tpl("Vieleck", "Vieleck(A, B, C)"), GAP, t("π"), t("e"), t("°"), t("="," = "), t("t"), GAP, ENTER),
+        listOf(tpl("Gerade", "Gerade(A, B)"), tpl("Strecke", "Strecke(A, B)"), tpl("Kreis", "Kreis(M, 2)"), tpl("Vieleck", "Vieleck(A, B, C)"), GAP, t("π"), t("e"), t("a≤x≤b", ", 0 ≤ x ≤ 2"), t("="," = "), t("t"), GAP, ENTER),
     ),
     "ABC" to listOf(
         "qwertzuiopü".map { c -> Key(c.toString()) { f, k -> f.insert(if (k.shift) c.uppercase() else c.toString()); k.shift = false } } + listOf(BACK),

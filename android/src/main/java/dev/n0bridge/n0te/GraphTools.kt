@@ -9,7 +9,7 @@ import uniffi.n0te_ffi.FfiPlot
  * German ones (a little shorter), so who knows GeoGebra finds them; [steps] say what to tap next.
  */
 enum class GTool(val label: String, val hint: String, val needs: List<GNeed>, val steps: List<String>, val command: (List<String>) -> String?) {
-    MOVE("Bewegen", "Antippen wählt aus · Punkte und Schieberegler ziehen · ins Leere ziehen verschiebt die Ansicht", emptyList(), emptyList(), { null }),
+    MOVE("Bewegen", "Antippen wählt aus · Punkte und Schieberegler ziehen · an einer Achse ziehen streckt sie · ins Leere ziehen verschiebt die Ansicht", emptyList(), emptyList(), { null }),
     VIEW("Ansicht verschieben", "Ziehen verschiebt die Ansicht, zwei Finger zoomen", emptyList(), listOf("Ziehen verschiebt die Ansicht, zwei Finger zoomen"), { null }),
 
     POINT("Punkt", "Ein neuer Punkt, frei oder auf einer Kurve", listOf(GNeed.PLACE), listOf("Tippen setzt einen Punkt · auf einer Kurve liegt er darauf"), { null }),
@@ -252,6 +252,17 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
         set(uniffi.n0te_ffi.plotSetDef(draft, id, plain(def))); null
     } catch (e: Exception) { errText(e) }
 
+    /** A function's domain from [from] to [to] (null: open that way); null: done, else what is wrong. */
+    fun setDomain(id: String, from: Double?, to: Double?): String? = try {
+        set(uniffi.n0te_ffi.plotSetDomain(draft, id, from, to)); null
+    } catch (e: Exception) { errText(e) }
+
+    /** The row's switch: [curve] a curve of the letters (a(b) = 3b), else a number with a slider (a = 3b). */
+    fun asCurve(id: String, curve: Boolean) {
+        runCatching { set(if (curve) uniffi.n0te_ffi.plotAsCurve(draft, id) else uniffi.n0te_ffi.plotAsSliders(draft, id)) }
+            .onFailure { error = errText(it); onChange() }
+    }
+
     /** How a typed line looks set (LaTeX), for the preview under the input; "" while it doesn't read yet. */
     fun preview(text: String): String {
         if (text.isBlank()) return ""
@@ -401,22 +412,36 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
 
     // --- dragging in the graph ------------------------------------------------------------
 
-    private enum class Drag { NONE, POINT, SLIDER, VIEW }
+    private enum class Drag { NONE, POINT, SLIDER, VIEW, DOMAIN, AXIS }
     private var drag = Drag.NONE
     private var dragId: String? = null
     private var lastX = 0f
     private var lastY = 0f
+    /** Dragging an end of a domain: which (0 from, 1 to); an axis: which (1 x, 2 y). */
+    private var dragSide: Int = 0
+    /** Stretching an axis: the plot when the pen went down, and where. */
+    private var axisFrom: FfiPlot? = null
+    private var axisDownX = 0f
+    private var axisDownY = 0f
 
-    /** A finger or the pen went down at page point (px, py) on [hit]. True if it drags something. */
-    fun down(px: Float, py: Float, hit: String?): Boolean {
+    /**
+     * A finger or the pen went down at page point (px, py) on [hit] ([tol]: page points that
+     * count as on something). True if it drags something: a slider, an end of a domain, a
+     * point, an axis (stretched alone, like in GeoGebra), else the view.
+     */
+    fun down(px: Float, py: Float, hit: String?, tol: Float = 6f): Boolean {
         lastX = px; lastY = py
-        drag = Drag.NONE; dragId = null
+        drag = Drag.NONE; dragId = null; axisFrom = null
         if (tool != GTool.MOVE && tool != GTool.VIEW) return false
         val info = infoOf(hit)
+        val end = if (tool == GTool.MOVE && info?.sliderValue == null) uniffi.n0te_ffi.plotDomainEndAt(draft, px, py, tol) else null
+        val axis = if (tool == GTool.MOVE && info == null && end == null) uniffi.n0te_ffi.plotAxisAt(draft, px, py, tol).toInt() else 0
         when {
             tool == GTool.VIEW -> drag = Drag.VIEW
             info?.sliderValue != null -> { drag = Drag.SLIDER; dragId = hit }
+            end != null -> { drag = Drag.DOMAIN; dragId = end.id; dragSide = end.side.toInt(); selected = end.id }
             info?.draggable == true -> { drag = Drag.POINT; dragId = hit }
+            axis != 0 -> { drag = Drag.AXIS; dragSide = axis; axisFrom = draft; axisDownX = px; axisDownY = py }
             else -> drag = Drag.VIEW
         }
         beginGesture()
@@ -444,6 +469,17 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
                 val dx = (px - lastX) * ux; val dy = (py - lastY) * uy
                 if (dx != 0.0 || dy != 0.0) viewMoved = true
                 set(draft.copy(xMin = draft.xMin - dx, xMax = draft.xMax - dx, yMin = draft.yMin + dy, yMax = draft.yMax + dy), quiet = true)
+            }
+            Drag.DOMAIN -> {
+                val x = uniffi.n0te_ffi.plotToPlot(draft, px, py)[0]
+                uniffi.n0te_ffi.plotDragDomainEnd(draft, dragId ?: return, dragSide.toUByte(), x)?.let { set(it, quiet = true) }
+            }
+            Drag.AXIS -> {
+                // Always from the plot as it was when the pen went down: the number grabbed stays under the pen.
+                val start = axisFrom ?: return
+                val stretched = if (dragSide == 1) uniffi.n0te_ffi.plotAxisDragged(start, 1.toUByte(), axisDownX, px) else uniffi.n0te_ffi.plotAxisDragged(start, 2.toUByte(), axisDownY, py)
+                viewMoved = true
+                set(stretched.copy(x = draft.x, y = draft.y, w = draft.w, h = draft.h), quiet = true)
             }
         }
         lastX = px; lastY = py
