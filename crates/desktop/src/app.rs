@@ -824,7 +824,13 @@ impl App {
     /// Runs a message, then what it left to do in the background: headings to read (again), a
     /// search to run again after the notebook changed.
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let typing = self.editing.is_some();
         let task = self.handle(message);
+        // n0te Tablet: the touch keyboard comes up when typing starts, and goes when it ends
+        // (Windows; Windows doesn't do it by itself for iced's text fields).
+        if crate::mode() == crate::Mode::Tablet && self.persist_settings && typing != self.editing.is_some() {
+            if self.editing.is_some() { crate::tablet::keyboard::show() } else { crate::tablet::keyboard::hide() };
+        }
         // Between messages they are for the active pane.
         if let Screen::Notebook(s) = &mut self.screen {
             let active = s.active;
@@ -4148,8 +4154,8 @@ async fn send_with_n0bridge(path: PathBuf) -> Result<String, String> {
 mod n0bridge_tests {
     #[test]
     fn finds_the_tablet_id() {
-        let out = "Tablet_s7_fe_flinn   id=b2b36918c88ef31d [tablet,terminal] app=0.14.6 akku=97%\nnothing-phone-3a-pro id=0c86c3a983ca106c [phone,primary,auth] app=0.14.2\n";
-        assert_eq!(super::tablet_id(out).as_deref(), Some("b2b36918c88ef31d"));
+        let out = "Tablet_s7_fe_alex   id=a1b2c3d4e5f60718 [tablet,terminal] app=0.14.6 akku=97%\nphone-3a           id=0f1e2d3c4b5a6978 [phone,primary,auth] app=0.14.2\n";
+        assert_eq!(super::tablet_id(out).as_deref(), Some("a1b2c3d4e5f60718"));
         assert_eq!(super::tablet_id("phone id=1 [phone,primary]\n"), None);
     }
 }

@@ -626,7 +626,7 @@ fn as_a_guest_jump_follow_and_get_summoned_and_the_panels_draw() {
         let o = open(&h);
         (o.id.clone(), o.pages.pages[3].placed.sheet_id.clone())
     };
-    h.app.joined = vec![Joined { notebook: nb.clone(), owner: "dev-owner".into(), owner_name: "Flinn".into(), write: false, online: true }];
+    h.app.joined = vec![Joined { notebook: nb.clone(), owner: "dev-owner".into(), owner_name: "Alex".into(), write: false, online: true }];
     let cam = |h: &Harness| open(h).camera;
     let presence = |r: [f32; 4]| LiveEvent::Presence { device: "dev-owner".into(), notebook: nb.clone(), sheet: Some(sheet.clone()), viewport: r, zoom: 1.0, laser: None };
 

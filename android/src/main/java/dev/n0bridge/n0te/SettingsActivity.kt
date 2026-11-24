@@ -360,7 +360,7 @@ class SettingsActivity : ComponentActivity() {
             // The name the laptop and guests see (applies when the app starts again).
             var name by remember { mutableStateOf(Settings.displayName) }
             Text("Name für Laptop und Gäste", color = Ui.Chalk, fontSize = 14.sp)
-            Field(name, "z. B. Flinns Tablet") { name = it; Settings.set("display_name", it.trim()) }
+            Field(name, "z. B. Alex’ Tablet") { name = it; Settings.set("display_name", it.trim()) }
             if (name.trim() != SyncHub.startedName) Text("Gilt nach dem nächsten Start der App.", color = Ui.Muted, fontSize = 12.sp)
             if (SyncHub.devices.isEmpty()) Text("Noch kein Laptop gekoppelt. Am Laptop: n0te → Einstellungen → Geräte → Tablet koppeln, dann hier QR scannen (oder den Code einfügen).", color = Ui.Muted, fontSize = 13.sp)
             SyncHub.devices.forEach { d ->

@@ -17,8 +17,8 @@
 
 > **Deutsch:** n0te ist eine Notiz-App: mit dem Stift auf dem Android-Tablet schreiben, dieselben
 > Notizbücher am Laptop (Windows, Linux) lesen, tippen, durchsuchen und exportieren, direkt
-> synchronisiert, ohne Konto und ohne Server. Die Apps sind heute auf Deutsch, Englisch kommt
-> dazu. Diese Seite ist auf Englisch; Downloads unter
+> synchronisiert, ohne Konto und ohne Server. n0te Laptop und n0te Tablet gibt es auf Deutsch
+> und Englisch (folgt der Sprache von Windows), die Android-App ist auf Deutsch. Diese Seite ist auf Englisch; Downloads unter
 > [Releases](https://github.com/DiscoveryFox/n0te/releases), Änderungen im [CHANGELOG](CHANGELOG.md).
 
 ![n0te Laptop: a lecture notebook with the outline as page pictures, a page with its side page](docs/screenshots/notebook.png)

@@ -393,8 +393,8 @@ fn the_owner_summons_guests_to_its_view_but_not_the_other_way() {
 fn two_memberships_of_one_notebook_left_by_an_older_version_become_one() {
     let r = root("dup");
     std::fs::create_dir_all(r.join("sync")).unwrap();
-    let rec = |invite: &str, role: &str| serde_json::json!({ "link": "n0te://invite/x", "invite": invite, "notebook": "nb1", "title": "T", "role": role, "owner": "own1", "owner_name": "Flinn", "revoked": false });
-    let other = serde_json::json!({ "link": "n0te://invite/y", "invite": "c", "notebook": "nb2", "title": "U", "role": "Read", "owner": "own1", "owner_name": "Flinn", "revoked": false });
+    let rec = |invite: &str, role: &str| serde_json::json!({ "link": "n0te://invite/x", "invite": invite, "notebook": "nb1", "title": "T", "role": role, "owner": "own1", "owner_name": "Alex", "revoked": false });
+    let other = serde_json::json!({ "link": "n0te://invite/y", "invite": "c", "notebook": "nb2", "title": "U", "role": "Read", "owner": "own1", "owner_name": "Alex", "revoked": false });
     std::fs::write(r.join("sync/joined.json"), serde_json::to_vec(&vec![rec("a", "Read"), other, rec("b", "ReadWrite")]).unwrap()).unwrap();
     let e = engine(&r, "Tablet");
     let j: Vec<(String, String)> = e.joined().into_iter().map(|j| (j.invite, j.notebook)).collect();
