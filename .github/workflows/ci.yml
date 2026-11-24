@@ -103,7 +103,9 @@ jobs:
         env:
           N0TE_PDFIUM_LIB: ${{ github.workspace }}\third_party\pdfium\win-x64\bin\pdfium.dll
           CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
-        run: cargo test --locked --target ${{ matrix.target }} -p n0te-core -p n0te-pdf -p n0te-platform -p n0te-desktop -p n0te-sync
+          # The UI tests check German texts; the runner's Windows is English.
+          N0TE_LANG: de
+        run: cargo test --locked --no-fail-fast --target ${{ matrix.target }} -p n0te-core -p n0te-pdf -p n0te-platform -p n0te-desktop -p n0te-sync
       - name: Collect the exes
         run: |
           out=target/${{ matrix.target }}/fast

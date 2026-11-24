@@ -52,6 +52,10 @@ pub fn set_from(setting: &str) {
 
 /// The system's language: German if it is German, else English.
 pub fn system() -> Lang {
+    // Unit tests check German texts whatever the machine's language.
+    if cfg!(test) {
+        return Lang::De;
+    }
     if let Ok(v) = std::env::var("N0TE_LANG") {
         return if v.starts_with("de") { Lang::De } else { Lang::En };
     }
