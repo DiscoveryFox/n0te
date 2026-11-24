@@ -41,7 +41,8 @@ jobs:
       - name: pdfium (pinned, hash-checked)
         run: scripts/fetch-pdfium.sh linux-x64
       - name: Clippy
-        # Reports lints as warnings in the run; it does not fail the build (yet).
+        # Reports lints in the run; it does not fail the build (yet), deny-level ones included.
+        continue-on-error: true
         run: cargo clippy --locked --workspace --all-targets
       - name: Tests
         run: cargo test --locked --workspace

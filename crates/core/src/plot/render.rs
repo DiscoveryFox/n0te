@@ -1013,7 +1013,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                     draw!(piece, 0.0);
                 }
                 if let Some(t) = label_text(o, v) {
-                    let q = p.to_page(c.0 + r * 0.7071, c.1 + r * 0.7071);
+                    let q = p.to_page(c.0 + r * std::f64::consts::FRAC_1_SQRT_2, c.1 + r * std::f64::consts::FRAC_1_SQRT_2);
                     labels.push(Label { x: q.0, y: q.1, off: cap * 0.35, text: t, color: o.style.color });
                 }
             }
