@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+<title>n0te Tablet (16-24 px)</title>
+<rect x="4" y="4" width="184" height="184" rx="40" fill="#0B0B0C"/>
+<g transform="matrix(0.7071 0.7071 -0.7071 0.7071 84.7868 -45.1787)">
+<rect x="91" y="18" width="42" height="15" rx="3" fill="#D71921"/>
+<path d="M92 38 H132 C142 58 143 76 136 90 L112 136 L88 90 C81 76 82 58 92 38 Z" fill="#D71921"/>
+<circle cx="112" cy="78" r="7.5" fill="#0B0B0C"/>
+<rect x="110" y="84" width="4" height="50" fill="#0B0B0C"/>
+</g>
+
+</svg>

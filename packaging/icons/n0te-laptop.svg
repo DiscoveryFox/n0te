@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+<title>n0te Laptop</title>
+<rect x="4" y="4" width="184" height="184" rx="40" fill="#0B0B0C"/>
+<path d="M50 34 H122 L144 56 V158 H50 Z" fill="#F2F2F4"/>
+<path d="M122 34 V56 H144 Z" fill="#A9A9AF"/>
+<circle cx="68" cy="76" r="3.6" fill="#0B0B0C"/><circle cx="80" cy="76" r="3.6" fill="#0B0B0C"/><circle cx="92" cy="76" r="3.6" fill="#0B0B0C"/><circle cx="104" cy="76" r="3.6" fill="#0B0B0C"/><circle cx="116" cy="76" r="3.6" fill="#0B0B0C"/><circle cx="128" cy="76" r="3.6" fill="#0B0B0C"/><circle cx="68" cy="92" r="3.6" fill="#0B0B0C"/><circle cx="80" cy="92" r="3.6" fill="#0B0B0C"/><circle cx="92" cy="92" r="3.6" fill="#0B0B0C"/><circle cx="104" cy="92" r="3.6" fill="#0B0B0C"/><circle cx="116" cy="92" r="3.6" fill="#0B0B0C"/><circle cx="68" cy="108" r="3.6" fill="#0B0B0C"/><circle cx="80" cy="108" r="3.6" fill="#0B0B0C"/><circle cx="92" cy="108" r="3.6" fill="#0B0B0C"/><circle cx="104" cy="108" r="3.6" fill="#0B0B0C"/><circle cx="116" cy="108" r="3.6" fill="#0B0B0C"/><circle cx="128" cy="108" r="3.6" fill="#0B0B0C"/><circle cx="68" cy="124" r="3.6" fill="#0B0B0C"/><circle cx="80" cy="124" r="3.6" fill="#0B0B0C"/><circle cx="92" cy="124" r="3.6" fill="#0B0B0C"/>
+<circle cx="160" cy="40" r="9" fill="#D71921"/>
+</svg>

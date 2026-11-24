@@ -71,6 +71,7 @@ pub fn run_as(mode: Mode, import: Option<std::path::PathBuf>) -> iced::Result {
         .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
+        .window(iced::window::Settings { icon: window_icon(mode), ..Default::default() })
         .window_size((1440.0, 900.0))
         .antialiasing(true)
         .default_font(theme::SANS);
@@ -78,4 +79,26 @@ pub fn run_as(mode: Mode, import: Option<std::path::PathBuf>) -> iced::Result {
         app = app.font(font);
     }
     app.run()
+}
+
+/// The program's own icon for its windows (Windows, X11; Wayland takes it from the .desktop
+/// file): the white page for n0te Laptop, the red nib for n0te Tablet. Rendered from
+/// packaging/icons/*.svg by packaging/icons/render.sh.
+pub fn window_icon(mode: Mode) -> Option<iced::window::Icon> {
+    let png: &[u8] = match mode {
+        Mode::Laptop => include_bytes!("../../../packaging/icons/n0te-laptop.png"),
+        Mode::Tablet => include_bytes!("../../../packaging/icons/n0te-tablet.png"),
+    };
+    iced::window::icon::from_file_data(png, None).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn both_programs_have_a_window_icon() {
+        assert!(window_icon(Mode::Laptop).is_some());
+        assert!(window_icon(Mode::Tablet).is_some());
+    }
 }

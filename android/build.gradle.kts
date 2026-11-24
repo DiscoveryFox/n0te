@@ -29,8 +29,17 @@ android {
         create("releaseDev") {
             enableV2Signing = true
             enableV3Signing = true
+            // Release builds on GitHub Actions: the key from the repo's secrets (the workflow
+            // writes it to a file and sets these). Updates only install over an app signed with
+            // the same key, so that must be the key the installed app has. Locally: as before.
+            val ciStore = System.getenv("N0TE_SIGNING_STORE_FILE")
             val ks = file("${System.getProperty("user.home")}/.android/debug.keystore")
-            if (ks.exists()) {
+            if (!ciStore.isNullOrBlank()) {
+                storeFile = file(ciStore)
+                storePassword = System.getenv("N0TE_SIGNING_STORE_PASSWORD")
+                keyAlias = System.getenv("N0TE_SIGNING_KEY_ALIAS")
+                keyPassword = System.getenv("N0TE_SIGNING_KEY_PASSWORD")
+            } else if (ks.exists()) {
                 storeFile = ks
                 storePassword = "android"
                 keyAlias = "androiddebugkey"

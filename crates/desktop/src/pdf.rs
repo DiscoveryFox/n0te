@@ -80,6 +80,9 @@ pub fn find_pdfium() -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("N0TE_PDFIUM_LIB") {
             c.push(p.into());
         }
+        // A development checkout: scripts/fetch-pdfium.sh win-x64 | win-arm64.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/pdfium");
+        c.push(repo.join(if cfg!(target_arch = "aarch64") { "win-arm64" } else { "win-x64" }).join("bin/pdfium.dll"));
     }
     #[cfg(not(windows))]
     {

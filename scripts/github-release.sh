@@ -7,6 +7,10 @@
 # ~/.local/share/n0bridge/releases (run make n0te-apk and copy it there first, as for tablet
 # updates), the notes from the newest Changelog.kt entry. --pre marks it as a pre-release.
 # The APK must be signed with the same key as the installed app (the laptop's debug key).
+#
+# Not for DiscoveryFox/n0te: there a tag v<version> makes the whole release (.github/workflows/
+# release.yml). To add a locally signed APK to such a release instead:
+#   gh release upload v<version> n0te-<version>-android.apk --repo DiscoveryFox/n0te
 set -euo pipefail
 repo="${1:?usage: github-release.sh OWNER/REPO [--pre]}"
 pre="${2:-}"

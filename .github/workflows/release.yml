@@ -1,0 +1,246 @@
+# A tag v<version> releases the whole suite: n0te Laptop + n0te Tablet + n0te-sync for Windows
+# x64 and ARM64 (installer, portable zip) and, when the signing secrets are set, the Android APK.
+# The tag must match the Cargo workspace version and the Android versionName, and CHANGELOG.md
+# must have a finished "## [<version>]" section: it becomes the release notes.
+#
+# Cutting a release: docs/DEVELOPMENT.md, "Cutting a release".
+#
+# Android signing (repository secrets): ANDROID_KEYSTORE_B64 (the keystore file, base64),
+# ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, ANDROID_KEY_PASSWORD. The tablet's in-app updater
+# only installs an APK signed with the same key as the installed app, so it must be that key.
+# Without the secrets the release has no APK. Optional repository variable ANDROID_CERT_SHA256:
+# the expected signer certificate's SHA-256 (hex, colons optional); the build fails if the
+# signed APK has another one.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  version:
+    name: Check the version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+      - id: check
+        name: Tag = Cargo version = Android versionName, CHANGELOG section present
+        run: |
+          version="$(scripts/version.sh check "$GITHUB_REF_NAME")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then echo "prerelease=true"; else echo "prerelease=false"; fi >> "$GITHUB_OUTPUT"
+          echo "Releasing n0te $version"
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - arch: arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: clang on PATH (ring needs it for ARM64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          if (Get-Command clang -ErrorAction SilentlyContinue) { clang --version; exit 0 }
+          $llvm = 'C:\Program Files\LLVM\bin'
+          if (-not (Test-Path "$llvm\clang.exe")) { throw "clang not found" }
+          Add-Content -Path $env:GITHUB_PATH -Value $llvm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+          save-if: false
+      - name: Build n0te Laptop, n0te Tablet, n0te-sync (release)
+        run: cargo build --locked --release --target ${{ matrix.target }} -p n0te-desktop -p n0te-sync --bins
+      - name: Collect the exes
+        run: |
+          out=target/${{ matrix.target }}/release
+          mkdir -p dist
+          cp "$out/n0te.exe" dist/n0te-laptop.exe
+          cp "$out/n0te-tablet.exe" "$out/n0te-sync.exe" dist/
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: n0te-windows-${{ matrix.arch }}-exes
+          path: dist/*.exe
+          if-no-files-found: error
+
+  windows-packages:
+    name: Windows installer + zip
+    needs: [version, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: NSIS
+        run: sudo apt-get update -q && sudo apt-get install -yq --no-install-recommends nsis
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: n0te-windows-*-exes
+          path: exes
+      - name: Package
+        env:
+          REQUIRE_INSTALLER: "1"
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          for arch in x64 arm64; do
+            packaging/windows/package.sh "$VERSION" "$arch" "exes/n0te-windows-$arch-exes" dist
+          done
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: n0te-windows-packages
+          path: |
+            dist/*-setup.exe
+            dist/*-portable.zip
+          if-no-files-found: error
+
+  android:
+    name: Android APK (signed)
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      signed: ${{ steps.key.outputs.signed }}
+    env:
+      NDK_VERSION: 27.2.12479018
+      VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - id: key
+        name: Signing key from the secrets
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_B64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [[ -n "$KEYSTORE_B64" && -n "$STORE_PASSWORD" && -n "$KEY_ALIAS" && -n "$KEY_PASSWORD" ]]; then
+            printf '%s' "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/n0te-release.keystore"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::No Android signing secrets: this release gets no APK (an APK signed with another key could not update the installed app)."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.key.outputs.signed == 'true'
+        uses: actions/checkout@v5
+      - if: steps.key.outputs.signed == 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - if: steps.key.outputs.signed == 'true'
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.9.0"
+          cache-read-only: true
+      - if: steps.key.outputs.signed == 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - if: steps.key.outputs.signed == 'true'
+        name: Android NDK ${{ env.NDK_VERSION }}
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      - if: steps.key.outputs.signed == 'true'
+        name: Build the signed APK
+        working-directory: android
+        env:
+          N0TE_SIGNING_STORE_FILE: ${{ runner.temp }}/n0te-release.keystore
+          N0TE_SIGNING_STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          N0TE_SIGNING_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          N0TE_SIGNING_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon
+      - if: steps.key.outputs.signed == 'true'
+        name: Check the signer, name the APK
+        env:
+          WANT_CERT: ${{ vars.ANDROID_CERT_SHA256 }}
+        run: |
+          rm -f "$RUNNER_TEMP/n0te-release.keystore"
+          apks=(android/build/outputs/apk/release/*.apk)
+          [[ ${#apks[@]} == 1 && -f "${apks[0]}" ]] || { echo "expected one APK: ${apks[*]}"; exit 1; }
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          certs="$("$apksigner" verify --print-certs "${apks[0]}")"
+          echo "$certs"
+          got="$(sed -n 's/.*certificate SHA-256 digest: //p' <<<"$certs" | head -1 | tr -d ':' | tr 'A-F' 'a-f')"
+          want="$(tr -d ': ' <<<"$WANT_CERT" | tr 'A-F' 'a-f')"
+          if [[ -n "$want" && "$got" != "$want" ]]; then
+            echo "::error::APK signed with $got, expected $want (ANDROID_CERT_SHA256)"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "${apks[0]}" "dist/n0te-$VERSION-android.apk"
+      - if: steps.key.outputs.signed == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: n0te-android-apk
+          path: dist/*.apk
+          if-no-files-found: error
+
+  publish:
+    name: GitHub release
+    needs: [version, windows-packages, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: n0te-windows-packages
+          path: dist
+      - if: needs.android.outputs.signed == 'true'
+        uses: actions/download-artifact@v4
+        with:
+          name: n0te-android-apk
+          path: dist
+      - name: Checksums and notes
+        run: |
+          (cd dist && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          {
+            scripts/version.sh notes "$VERSION"
+            echo
+            echo "---"
+            echo
+            echo "**Downloads:** Windows installer \`-setup.exe\` (x64 for Intel/AMD PCs, arm64 for Snapdragon PCs; no administrator rights needed) or the portable zip; \`-android.apk\` for the Android tablet app. Checksums: \`SHA256SUMS.txt\`."
+            echo "The Windows programs are not code-signed yet, so SmartScreen may warn about an unknown publisher (More info → Run anyway)."
+          } > notes.md
+          cat notes.md
+      - name: Publish
+        run: |
+          pre=()
+          [[ "${{ needs.version.outputs.prerelease }}" == true ]] && pre=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "n0te $VERSION" --notes-file notes.md "${pre[@]}"
