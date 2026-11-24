@@ -4,5 +4,9 @@
 /android/.gradle/
 /android/.kotlin/
 /android/local.properties
+# Windows packages (packaging/windows/package.sh <...> dist) and signing keys, never committed.
+/dist/
+*.keystore
+*.jks
 # n0bridge's root .gitignore ignores every bin/ (Go binaries); this one holds Rust sources.
 !/crates/desktop/src/bin/
