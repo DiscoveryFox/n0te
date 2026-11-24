@@ -793,10 +793,6 @@ pub(crate) fn points_of(samples: &[u8]) -> Vec<InkPoint> {
     points(samples)
 }
 
-pub(crate) fn to_ffi_stroke(s: n0te_core::sheet::Stroke) -> FfiStroke {
-    to_ffi(s)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiBackground {
     Blank,
@@ -971,6 +967,26 @@ fn pack(v: &[f32]) -> Vec<u8> {
         out.extend_from_slice(&x.to_le_bytes());
     }
     out
+}
+
+/// Strokes with their outlines ([`to_ffi`]), worked out on several threads when there are
+/// many (a page of handwriting loaded, thousands of strokes pasted): the outlines are most of
+/// the work, and each stroke's is its own. Keeps the order.
+pub(crate) fn to_ffi_all(strokes: Vec<n0te_core::sheet::Stroke>) -> Vec<FfiStroke> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(8);
+    if strokes.len() < 256 || threads < 2 {
+        return strokes.into_iter().map(to_ffi).collect();
+    }
+    let per = strokes.len().div_ceil(threads);
+    let mut chunks: Vec<Vec<n0te_core::sheet::Stroke>> = Vec::with_capacity(threads);
+    let mut it = strokes.into_iter().peekable();
+    while it.peek().is_some() {
+        chunks.push(it.by_ref().take(per).collect());
+    }
+    std::thread::scope(|scope| {
+        let work: Vec<_> = chunks.into_iter().map(|c| scope.spawn(move || c.into_iter().map(to_ffi).collect::<Vec<_>>())).collect();
+        work.into_iter().flat_map(|w| w.join().expect("outline thread")).collect()
+    })
 }
 
 fn to_ffi(s: n0te_core::sheet::Stroke) -> FfiStroke {
@@ -1255,10 +1271,12 @@ pub struct SheetHandle {
 impl SheetHandle {
     /// Strokes intersecting the rectangle, with outlines ready to fill.
     pub fn strokes_in(&self, x0: f32, y0: f32, x1: f32, y1: f32) -> Vec<FfiStroke> {
-        lock(&self.sheet).strokes_in(Some(Rect::new(x0, y0, x1, y1))).into_iter().map(to_ffi).collect()
+        let strokes = lock(&self.sheet).strokes_in(Some(Rect::new(x0, y0, x1, y1)));
+        to_ffi_all(strokes)
     }
     pub fn all_strokes(&self) -> Vec<FfiStroke> {
-        lock(&self.sheet).strokes().into_iter().map(to_ffi).collect()
+        let strokes = lock(&self.sheet).strokes();
+        to_ffi_all(strokes)
     }
     /// Stores a finished stroke and returns it with its outline.
     pub fn add_stroke(&self, brush: FfiBrush, samples: Vec<u8>) -> R<FfiStroke> {

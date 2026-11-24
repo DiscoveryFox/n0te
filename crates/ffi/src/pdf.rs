@@ -8,7 +8,7 @@
 //! val sheets = notebook.importPdf(pdf, bytes, groupNode, 0u)         // one sheet per page
 //! pdf.requestTiles(listOf(FfiTileRequest(blob, page, scale, x, y, w, h, priority, view, gen)))
 //! pdf.cancelTiles(view, gen)                                         // or just request with gen+1
-//! val bytes = notebook.exportPdf(pdf, null)                          // all sheets, reading order
+//! val bytes = notebook.exportPdf(pdf, null, false)                   // all sheets, reading order
 //! ```
 //! Page coordinates are points from the top-left of the displayed page; a page rendered at
 //! `scale` is `pdfPagePixels(width, height, scale)` pixels and tiles are rectangles of that.
@@ -237,7 +237,8 @@ impl NotebookHandle {
         Ok((ink(&s), s.text_boxes_with_body(width), s.images()))
     }
 
-    fn export_bytes(&self, pdf: &PdfService, sheet_ids: Option<Vec<String>>) -> R<(Vec<u8>, u32)> {
+    fn export_bytes(&self, pdf: &PdfService, sheet_ids: Option<Vec<String>>, sides_at_end: bool) -> R<(Vec<u8>, u32)> {
+        let order = if sides_at_end { n0te_pdf::notebook::ExportOrder::SidesAtEnd } else { n0te_pdf::notebook::ExportOrder::Inline };
         let pages = {
             let nb = lock(&self.nb);
             let id = nb.id();
@@ -245,6 +246,7 @@ impl NotebookHandle {
             n0te_pdf::notebook::export_sheets_with_images(
                 &nb,
                 sheet_ids.as_deref(),
+                order,
                 |sheet| self.content_for_export(&id, sheet, specs.get(sheet).map(|s| s.width).unwrap_or(595.0)),
                 |blob| self.lib.inner.blob(blob).ok(),
             )?
@@ -271,16 +273,17 @@ impl NotebookHandle {
     }
 
     /// Exports all sheets (`sheet_ids` = null) or the given ones as a PDF, in reading order
-    /// (side sheets next to their main sheet: left ones, the sheet, right ones). PDF sheets keep
+    /// (side sheets next to their main sheet: left ones, the sheet, right ones; with
+    /// `sides_at_end` all main sheets first, then the side sheets in that order). PDF sheets keep
     /// their page, other sheets become pages of their size, boards a page around their ink.
     /// Open sheets are exported with their unsaved strokes.
-    pub fn export_pdf(&self, pdf: Arc<PdfService>, sheet_ids: Option<Vec<String>>) -> R<Vec<u8>> {
-        Ok(self.export_bytes(&pdf, sheet_ids)?.0)
+    pub fn export_pdf(&self, pdf: Arc<PdfService>, sheet_ids: Option<Vec<String>>, sides_at_end: bool) -> R<Vec<u8>> {
+        Ok(self.export_bytes(&pdf, sheet_ids, sides_at_end)?.0)
     }
 
     /// Like `export_pdf`, written to `path` (atomically). Returns the number of pages.
-    pub fn export_pdf_to_file(&self, pdf: Arc<PdfService>, sheet_ids: Option<Vec<String>>, path: String) -> R<u32> {
-        let (bytes, pages) = self.export_bytes(&pdf, sheet_ids)?;
+    pub fn export_pdf_to_file(&self, pdf: Arc<PdfService>, sheet_ids: Option<Vec<String>>, sides_at_end: bool, path: String) -> R<u32> {
+        let (bytes, pages) = self.export_bytes(&pdf, sheet_ids, sides_at_end)?;
         n0te_core::store::write_atomic(std::path::Path::new(&path), &bytes)?;
         Ok(pages)
     }
@@ -356,7 +359,7 @@ mod tests {
         let sheet = nb.clone().open_sheet(sheets[1].sheet_id.clone()).unwrap();
         let samples: Vec<f32> = (0..=40).flat_map(|i| [100.0 + i as f32 * 7.5, 300.0, 0.5, i as f32 * 8.0]).collect();
         sheet.add_stroke(FfiBrush { width: 6.0, thinning: 0.0, color: 0xFFD7_1921, kind: 0 }, pack(&samples)).unwrap();
-        let out = nb.export_pdf(pdf.clone(), Some(vec![sheets[1].sheet_id.clone()])).unwrap();
+        let out = nb.export_pdf(pdf.clone(), Some(vec![sheets[1].sheet_id.clone()]), false).unwrap();
         let doc = PdfEngine::load(pdfium()).unwrap().open(out).unwrap();
         assert_eq!(doc.page_count(), 1);
         let img = doc.render_page(0, 595).unwrap();
@@ -364,9 +367,9 @@ mod tests {
         assert_eq!(&img.data[i..i + 4], &[0xD7, 0x19, 0x21, 255]);
 
         let path = dir.join("out.pdf");
-        assert_eq!(nb.export_pdf_to_file(pdf.clone(), None, path.to_string_lossy().into_owned()).unwrap(), 2);
+        assert_eq!(nb.export_pdf_to_file(pdf.clone(), None, true, path.to_string_lossy().into_owned()).unwrap(), 2);
         assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF"));
-        assert!(nb.export_pdf(pdf.clone(), Some(vec!["unknown".into()])).is_err());
+        assert!(nb.export_pdf(pdf.clone(), Some(vec!["unknown".into()]), false).is_err());
 
         drop((pdf, sheet, doc));
         std::fs::remove_dir_all(dir).unwrap();

@@ -85,6 +85,8 @@ pub enum Message {
     ImportPdf(PathBuf),
     ShowExport(bool),
     ExportMode(ExportWhat),
+    /// PDF export: side pages at the end (else right after their page); remembered.
+    ExportSidesAtEnd(bool),
     Export(ExportWhat),
     TogglePick(String),
     OpenPath(PathBuf),
@@ -1196,6 +1198,12 @@ impl App {
                 self.export_mode = ExportWhat::All;
             }
             Message::ExportMode(m) => self.export_mode = m,
+            Message::ExportSidesAtEnd(on) => {
+                self.settings.export_sides_at_end = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+            }
             Message::TogglePick(node) => {
                 if let Some(p) = &mut self.export
                     && !p.remove(&node)
@@ -3082,7 +3090,8 @@ impl App {
             return self.say(tr("Keine Seite gewählt"));
         }
         let title = o.nb.title();
-        match pdf.export(&self.lib, &o.nb, selected.as_deref()) {
+        let order = if self.settings.export_sides_at_end { n0te_pdf::notebook::ExportOrder::SidesAtEnd } else { n0te_pdf::notebook::ExportOrder::Inline };
+        match pdf.export(&self.lib, &o.nb, selected.as_deref(), order) {
             Ok((bytes, pages)) => {
                 let path = free_path(&self.export_dir, &title, "pdf");
                 match n0te_core::store::write_atomic(&path, &bytes) {
@@ -3297,7 +3306,7 @@ impl App {
         } else if self.show_settings {
             Some(self.settings_view())
         } else if let (Screen::Notebook(o), Some(picked)) = (&self.screen, &self.export) {
-            Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera)))
+            Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera), self.settings.export_sides_at_end))
         } else if let (Screen::Notebook(_), Some(e)) = (&self.screen, &self.plot_edit) {
             // Esc in a field cancels too (the field would only let go of the focus). Its
             // messages go to the pane it was opened in.

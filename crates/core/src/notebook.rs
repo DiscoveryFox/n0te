@@ -275,6 +275,16 @@ pub enum Side {
     Right,
 }
 
+/// Where side sheets go in an export ([`Notebook::sheet_order_by`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ExportOrder {
+    /// Right after their main sheet: its left ones (outermost first), the sheet, its right ones.
+    #[default]
+    Inline,
+    /// All main sheets first, then the side sheets in their main sheets' order.
+    SidesAtEnd,
+}
+
 impl Side {
     fn as_str(&self) -> &'static str {
         match self {
@@ -690,14 +700,33 @@ impl Notebook {
     /// Every sheet id in reading order, side sheets right after their main sheet (left side
     /// first, from the outermost), independent of collapsed groups. This is the PDF export order.
     pub fn sheet_order(&self) -> Vec<String> {
+        self.sheet_order_by(ExportOrder::Inline)
+    }
+
+    /// Every sheet id in reading order with the side sheets where `order` puts them: right
+    /// after their main sheet ([`Notebook::sheet_order`]), or all at the end, in the order of
+    /// their main sheets (per main sheet its left ones, outermost first, then its right ones).
+    pub fn sheet_order_by(&self, order: ExportOrder) -> Vec<String> {
         let mut out = Vec::new();
+        let mut sides = Vec::new();
         for row in self.outline(true) {
             if let OutlineRow::Sheet { sheet_id, left, right, .. } = row {
-                out.extend(left.iter().rev().map(|s| s.sheet_id.clone()));
-                out.push(sheet_id);
-                out.extend(right.iter().map(|s| s.sheet_id.clone()));
+                let left = left.into_iter().rev().map(|s| s.sheet_id);
+                let right = right.into_iter().map(|s| s.sheet_id);
+                match order {
+                    ExportOrder::Inline => {
+                        out.extend(left);
+                        out.push(sheet_id);
+                        out.extend(right);
+                    }
+                    ExportOrder::SidesAtEnd => {
+                        out.push(sheet_id);
+                        sides.extend(left.chain(right));
+                    }
+                }
             }
         }
+        out.extend(sides);
         out
     }
 
@@ -1040,6 +1069,11 @@ mod tests {
         assert_eq!(titles(&nb, false), vec!["S[1|2]", "G:Wöchentliche Aufgaben(2)", "  G:Week01+(2)"]);
         assert_eq!(titles(&nb, true).len(), 5);
         assert_eq!(nb.sheet_order().len(), 6);
+        // Side sheets at the end: the three main sheets first, in the same order.
+        let (inline, at_end) = (nb.sheet_order(), nb.sheet_order_by(ExportOrder::SidesAtEnd));
+        assert_eq!(at_end.len(), 6);
+        assert_eq!(at_end[..3], [inline[1].clone(), inline[4].clone(), inline[5].clone()]);
+        assert_eq!(at_end[3..], [inline[0].clone(), inline[2].clone(), inline[3].clone()]);
         // A side sheet of a side sheet, or a sheet inside a sheet, is refused.
         assert!(nb.add_sheet(Some(&s1), 0, &SheetSpec::board()).is_err());
         assert!(nb.move_node(&weekly, Some(&w1), 0).is_err());

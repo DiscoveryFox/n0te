@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.widthIn
@@ -32,7 +33,8 @@ import androidx.compose.ui.unit.sp
 
 /**
  * "Teilen → n0te" (Samsung Gallery, the screenshot toolbar, any app): pictures or a PDF go into
- * a notebook picked here, placed where that notebook was last open.
+ * a notebook picked here, placed where that notebook was last open. "Öffnen mit → n0te" (a PDF
+ * in Files, a download, a mail): the PDF becomes a new notebook, or goes into one picked here.
  */
 class ShareActivity : ComponentActivity() {
     private class Nb(val id: String, val title: String, val folder: String, val modified: Long)
@@ -45,9 +47,29 @@ class ShareActivity : ComponentActivity() {
         when (intent?.action) {
             Intent.ACTION_SEND -> (intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))?.let { out += it }
             Intent.ACTION_SEND_MULTIPLE -> intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.let { out += it }
+            Intent.ACTION_VIEW -> intent.data?.let { out += it }
         }
         if (out.isEmpty()) intent?.clipData?.let { c -> for (i in 0 until c.itemCount) c.getItemAt(i).uri?.let { out += it } }
         return out
+    }
+
+    /** The file's name as the other app shows it ("Skript.pdf"), else the last part of its path if that is a file name. */
+    private fun displayName(uri: Uri): String? =
+        runCatching {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+        }.getOrNull()?.takeIf { it.isNotBlank() } ?: uri.lastPathSegment?.substringAfterLast('/')?.takeIf { '.' in it }
+
+    /** One PDF (opened with n0te, or shared alone): it can also become a notebook of its own. */
+    private val pdf: Uri? by lazy {
+        shared().singleOrNull()?.takeIf { uri ->
+            val type = intent?.type ?: runCatching { contentResolver.getType(uri) }.getOrNull()
+            type == "application/pdf" || displayName(uri)?.endsWith(".pdf", ignoreCase = true) == true
+        }
+    }
+
+    /** The new notebook's name: the file's, without ".pdf". */
+    private val pdfTitle: String by lazy {
+        pdf?.let { displayName(it) }?.let { if (it.endsWith(".pdf", ignoreCase = true)) it.dropLast(4) else it }?.trim()?.ifBlank { null } ?: "PDF"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,16 +114,64 @@ class ShareActivity : ComponentActivity() {
         }
     }
 
+    /** The PDF as a new notebook named after the file (one page per PDF page), then opened. */
+    private fun asNotebook(uri: Uri) {
+        if (busy) return
+        val svc = N0te.pdf ?: return android.widget.Toast.makeText(this, "PDF-Unterstützung nicht geladen", android.widget.Toast.LENGTH_LONG).show()
+        busy = true
+        val title = pdfTitle
+        N0te.background({
+            // Read here: the permission to read it belongs to this window.
+            val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("nicht lesbar")
+            if (bytes.size < 5 || String(bytes, 0, 5, Charsets.ISO_8859_1) != "%PDF-") error("keine PDF-Datei")
+            val nb = N0te.library.createNotebook(title)
+            // A PDF pdfium can't read leaves no empty notebook behind.
+            runCatching { nb.importPdf(svc, bytes, null, 0u) }.onFailure { runCatching { N0te.library.trashNotebook(nb.id()) }; throw it }
+            nb.save()
+            nb.id()
+        }) { r ->
+            busy = false
+            r.onSuccess { id ->
+                Settings.set("lib_opened", LibraryOrg.openedNow(Settings.str("lib_opened", ""), id, System.currentTimeMillis()))
+                startActivity(Intent(this, NotebookActivity::class.java).putExtra(NotebookActivity.EXTRA_ID, id))
+                finish()
+            }.onFailure { android.widget.Toast.makeText(this, "PDF öffnen fehlgeschlagen: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+        }
+    }
+
     @Composable
     private fun Screen() = N0teType {
         val n = shared().size
+        val pdf = pdf
         Column(Modifier.fillMaxSize().background(Ui.Black).statusBarsPadding().padding(horizontal = 28.dp, vertical = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Heading(if (n == 1) "In welches Notizbuch?" else "$n Dateien: in welches Notizbuch?", 26.sp)
-                Spacer(Modifier.weight(1f))
+                Heading(
+                    when {
+                        pdf != null -> "„$pdfTitle“ öffnen"
+                        n == 1 -> "In welches Notizbuch?"
+                        else -> "$n Dateien: in welches Notizbuch?"
+                    },
+                    26.sp, Modifier.weight(1f),
+                )
                 Btn("Abbrechen", BtnKind.QUIET) { finish() }
             }
-            Text(if (busy) "Wird übernommen …" else "Es kommt dorthin, wo das Notizbuch zuletzt offen war.", color = if (busy) Ui.Red else Ui.Muted, fontSize = 14.sp)
+            if (busy) Text("Wird übernommen …", color = Ui.Red, fontSize = 14.sp)
+            if (pdf != null) {
+                Row(Modifier.widthIn(max = 760.dp).fillMaxWidth().cardBox().clickable { asNotebook(pdf) }.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                    GlyphIcon(Glyph.PDF, Ui.Red, 22.dp)
+                    Column(Modifier.weight(1f).padding(start = 14.dp)) {
+                        Text("Neues Notizbuch", color = Ui.Chalk, fontSize = 16.sp, fontFamily = Voice.titleFont, fontWeight = FontWeight.Medium)
+                        Text("„$pdfTitle“, eine Seite pro PDF-Seite", color = Ui.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    GlyphIcon(Glyph.RIGHT, Ui.Muted, 18.dp)
+                }
+                Spacer(Modifier.height(4.dp))
+                Caption("In Notizbuch einfügen")
+            }
+            if (!busy) Text(
+                if (pdf != null) "Die Seiten kommen nach der Seite, an der das Notizbuch zuletzt offen war." else "Es kommt dorthin, wo das Notizbuch zuletzt offen war.",
+                color = Ui.Muted, fontSize = 14.sp,
+            )
             val list = notebooks
             if (list == null) Text("Lade …", color = Ui.Muted) else LazyColumn(Modifier.widthIn(max = 760.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { nb ->

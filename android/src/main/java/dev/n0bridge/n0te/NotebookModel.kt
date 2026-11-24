@@ -22,15 +22,29 @@ import java.nio.ByteOrder
 /**
  * A stroke as drawn on a page. [ends]: where it starts and ends with the way it runs there (see
  * FfiStroke.ends: x0, y0, dx0, dy0, x1, y1, dx1, dy1, length), for attaching arrowheads.
+ * [width]: the brush's width (points).
  */
-class InkStroke(val id: String, val outline: FloatArray, val color: Int, val bounds: RectF, val kind: Int = 0, layers: List<FloatArray> = emptyList(), val ends: FloatArray = FloatArray(0)) {
-    val path: Path = pathOf(outline)
-    val layerPaths: List<Path> = layers.map { pathOf(it) }
+class InkStroke private constructor(
+    val id: String, val outline: FloatArray, val color: Int, val bounds: RectF, val kind: Int, val ends: FloatArray, val width: Float,
+    val path: Path, val layerPaths: List<Path>,
+) {
+    constructor(id: String, outline: FloatArray, color: Int, bounds: RectF, kind: Int = 0, layers: List<FloatArray> = emptyList(), ends: FloatArray = FloatArray(0), width: Float = 0f) :
+        this(id, outline, color, bounds, kind, ends, width, pathOf(outline), layers.map { pathOf(it) })
+
+    /**
+     * Moved by ([dx], [dy]): what the core has after moving it (to its rounding of the points),
+     * without asking it: a selection of thousands of strokes put down at once.
+     */
+    fun moved(dx: Float, dy: Float): InkStroke = InkStroke(
+        id, FloatArray(outline.size) { outline[it] + if (it % 2 == 0) dx else dy }, color, RectF(bounds).apply { offset(dx, dy) }, kind,
+        FloatArray(ends.size) { ends[it] + when (it) { 0, 4 -> dx; 1, 5 -> dy; else -> 0f } }, width,
+        Path(path).apply { offset(dx, dy) }, layerPaths.map { Path(it).apply { offset(dx, dy) } },
+    )
 
     companion object {
         fun of(s: FfiStroke): InkStroke {
             val f = floatsOf(s.outline)
-            return InkStroke(s.id, f, s.brush.color.toInt(), RectF(s.bounds[0], s.bounds[1], s.bounds[2], s.bounds[3]), s.brush.kind.toInt(), s.layers.map { floatsOf(it) }, s.ends.toFloatArray())
+            return InkStroke(s.id, f, s.brush.color.toInt(), RectF(s.bounds[0], s.bounds[1], s.bounds[2], s.bounds[3]), s.brush.kind.toInt(), s.layers.map { floatsOf(it) }, s.ends.toFloatArray(), s.brush.width)
         }
 
         fun pathOf(f: FloatArray): Path {
@@ -253,7 +267,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.loading = true
         N0te.background({
             val h = nb.openSheet(id)
-            Triple(h, h.allStrokes().map { InkStroke.of(it) }, h.textBoxesWithBody(pageWidth))
+            Triple(h, inkStrokes(h.allStrokes()), h.textBoxesWithBody(pageWidth))
         }) { r ->
             st.loading = false
             r.getOrNull()?.let { (h, strokes, texts) ->
@@ -274,7 +288,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun addStroke(sheetId: String, brush: FfiBrush, samples: ByteArray, preview: FloatArray, previewLayers: List<FloatArray> = emptyList()) {
         val st = state(sheetId)
         val tmpId = "tmp-${SystemClock.uptimeMillis()}-${st.strokes.size}"
-        st.strokes += InkStroke(tmpId, preview, brush.color.toInt(), boundsOf(preview), brush.kind.toInt(), previewLayers)
+        st.strokes += InkStroke(tmpId, preview, brush.color.toInt(), boundsOf(preview), brush.kind.toInt(), previewLayers, width = brush.width)
         st.invalidateNode()
         onChanged()
         withHandle(st) { h ->
@@ -313,14 +327,21 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
 
     fun recolor(sheetId: String, ids: Collection<String>, color: Int) {
         val st = state(sheetId)
-        withHandle(st) { h -> N0te.background({ h.recolor(ids.toList(), color.toUInt()); reloadStrokes(h) }) { r -> applyReload(st, r); pushUndo(sheetId); markDirty(sheetId) } }
+        withHandle(st) { h -> N0te.background({ h.recolor(ids.toList(), color.toUInt()); reloadSome(h, ids) }) { r -> applySome(st, r); pushUndo(sheetId); markDirty(sheetId) } }
     }
 
     fun transform(sheetId: String, ids: Collection<String>, dx: Float, dy: Float, scale: Float, ox: Float, oy: Float, done: () -> Unit) {
         val st = state(sheetId)
+        // Only moved: the strokes here are moved along (the core's outlines would be the same).
+        val moved = scale == 1f
         withHandle(st) { h ->
-            N0te.background({ h.transform(ids.toList(), dx, dy, scale, ox, oy); reloadStrokes(h) }) { r ->
-                applyReload(st, r)
+            N0te.background({ h.transform(ids.toList(), dx, dy, scale, ox, oy); if (moved) null else reloadSome(h, ids) }) { r ->
+                val some = when {
+                    r.isFailure -> Changed(emptySet(), emptyList())
+                    moved -> ids.toHashSet().let { set -> Changed(set, st.strokes.filter { it.id in set }.map { it.moved(dx, dy) }) }
+                    else -> r.getOrThrow()!!
+                }
+                applySome(st, Result.success(some))
                 pushUndo(sheetId)
                 markDirty(sheetId)
                 done()
@@ -332,8 +353,8 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun stretch(sheetId: String, ids: Collection<String>, ax: Float, ay: Float, kx: Float, ky: Float, done: () -> Unit) {
         val st = state(sheetId)
         withHandle(st) { h ->
-            N0te.background({ h.stretch(ids.toList(), ax, ay, kx, ky); reloadStrokes(h) }) { r ->
-                applyReload(st, r)
+            N0te.background({ h.stretch(ids.toList(), ax, ay, kx, ky); reloadSome(h, ids) }) { r ->
+                applySome(st, r)
                 pushUndo(sheetId)
                 markDirty(sheetId)
                 done()
@@ -345,8 +366,8 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun spin(sheetId: String, ids: Collection<String>, ax: Float, ay: Float, re: Float, im: Float, done: () -> Unit) {
         val st = state(sheetId)
         withHandle(st) { h ->
-            N0te.background({ h.spin(ids.toList(), ax, ay, re, im); reloadStrokes(h) }) { r ->
-                applyReload(st, r)
+            N0te.background({ h.spin(ids.toList(), ax, ay, re, im); reloadSome(h, ids) }) { r ->
+                applySome(st, r)
                 pushUndo(sheetId)
                 markDirty(sheetId)
                 done()
@@ -591,7 +612,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun pasteStrokes(sheetId: String, data: List<uniffi.n0te_ffi.FfiStrokeData>, dx: Float, dy: Float, then: (List<InkStroke>) -> Unit = {}) {
         val st = state(sheetId)
         withHandle(st) { h ->
-            N0te.background({ h.addStrokes(data, dx, dy, 1f, 0f, 0f).map { InkStroke.of(it) } }) { r ->
+            N0te.background({ inkStrokes(h.addStrokes(data, dx, dy, 1f, 0f, 0f)) }) { r ->
                 r.getOrNull()?.let { added ->
                     st.strokes.addAll(added)
                     st.invalidateNode()
@@ -614,7 +635,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
             withHandle(dst) { hd ->
                 N0te.background({
                     val data = hs.strokeData(ids.toList())
-                    val added = hd.addStrokes(data, dx + shiftX, dy + shiftY, k, ox, oy).map { InkStroke.of(it) }
+                    val added = inkStrokes(hd.addStrokes(data, dx + shiftX, dy + shiftY, k, ox, oy))
                     // Images go along (scaled about the same point, then shifted).
                     for (im in hs.images().filter { it.id in ids }) {
                         val nx = ox + (im.x - ox) * k + dx + shiftX; val ny = oy + (im.y - oy) * k + dy + shiftY
@@ -624,10 +645,11 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
                     }
                     hs.remove(ids.toList())
                     dst.images = hd.images()
-                    added to reloadStrokes(hs)
+                    added
                 }) { r ->
-                    r.getOrNull()?.let { (added, srcList) ->
-                        applyReload(src, Result.success(srcList))
+                    r.getOrNull()?.let { added ->
+                        // Gone from the source: the rest of it stays as it is.
+                        applySome(src, Result.success(Changed(ids.toHashSet(), emptyList())))
                         dst.strokes.addAll(added)
                         dst.invalidateNode()
                         pushUndo(listOf(to, from))
@@ -657,7 +679,32 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         withHandle(st) { h -> N0te.background({ h.hitPath(bytesOf(path), radius) }) { r -> then(r.getOrNull().orEmpty()) } }
     }
 
-    private fun reloadStrokes(h: SheetHandle): List<InkStroke> = h.allStrokes().map { InkStroke.of(it) }
+    /** The core's strokes as drawn; many at once (a page, a paste) on several threads. */
+    private fun inkStrokes(src: List<FfiStroke>): List<InkStroke> =
+        if (src.size < 256) src.map { InkStroke.of(it) }
+        else src.parallelStream().map { InkStroke.of(it) }.collect(java.util.stream.Collectors.toList())
+
+    private fun reloadStrokes(h: SheetHandle): List<InkStroke> = inkStrokes(h.allStrokes())
+
+    /** Strokes [ids] as the core has them now (moved, turned, recoloured), with which ones were asked for. */
+    private class Changed(val ids: Set<String>, val strokes: List<InkStroke>)
+
+    /** Only [ids] again from the core (I/O thread): the page's other strokes stay as they are. */
+    private fun reloadSome(h: SheetHandle, ids: Collection<String>) = Changed(ids.toHashSet(), inkStrokes(h.strokesById(ids.toList())))
+
+    /** [r]'s strokes in the places of the ones asked for (one the core no longer has goes). */
+    private fun applySome(st: SheetState, r: Result<Changed>) {
+        val c = r.getOrNull() ?: return
+        val byId = c.strokes.associateBy { it.id }
+        val out = ArrayList<InkStroke>(st.strokes.size)
+        for (s in st.strokes) if (s.id !in c.ids) out += s else byId[s.id]?.let { out += it }
+        st.strokes = out
+        st.handle?.let { h -> st.images = runCatching { h.images() }.getOrDefault(st.images) }
+        st.hidden.clear()
+        st.floating = emptySet()
+        st.invalidateNode()
+        onChanged()
+    }
 
     private fun applyReload(st: SheetState, r: Result<List<InkStroke>>) {
         r.getOrNull()?.let {
@@ -802,10 +849,11 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         N0te.background({ nb.outline(true) }) { r -> r.getOrNull()?.let(then) }
     }
 
-    fun exportPdf(sheetIds: List<String>?, file: java.io.File, then: (Result<Int>) -> Unit) {
+    /** Exports [sheetIds] (null: all) to [file]; [sidesAtEnd]: side pages after all main pages, else right after theirs. */
+    fun exportPdf(sheetIds: List<String>?, file: java.io.File, sidesAtEnd: Boolean, then: (Result<Int>) -> Unit) {
         val svc = N0te.pdf ?: return then(Result.failure(IllegalStateException("PDF nicht verfügbar")))
         flush()
-        N0te.background({ nb.exportPdfToFile(svc, sheetIds, file.absolutePath).toInt() }, then)
+        N0te.background({ nb.exportPdfToFile(svc, sheetIds, sidesAtEnd, file.absolutePath).toInt() }, then)
     }
 
     /** Where a node sits: its parent group (null = main column), index and the siblings (I/O thread). */

@@ -181,13 +181,28 @@ impl SheetHandle {
             })
             .collect();
         let ids = s.add_strokes(&data)?;
-        let mut out = Vec::new();
+        let mut stored = Vec::with_capacity(ids.len());
         for id in ids {
             if let Some(st) = s.stroke(&id)? {
-                out.push(crate::to_ffi_stroke(st));
+                stored.push(st);
             }
         }
-        Ok(out)
+        // The outlines without holding the sheet.
+        drop(s);
+        Ok(crate::to_ffi_all(stored))
+    }
+    /// The strokes `ids` as stored now, with their outlines (after a move, a turn, a new
+    /// colour: only those are drawn anew); ids of no stroke are left out.
+    pub fn strokes_by_id(&self, ids: Vec<String>) -> R<Vec<crate::FfiStroke>> {
+        let s = lock(&self.sheet);
+        let mut stored = Vec::with_capacity(ids.len());
+        for id in &ids {
+            if let Some(st) = s.stroke(id)? {
+                stored.push(st);
+            }
+        }
+        drop(s);
+        Ok(crate::to_ffi_all(stored))
     }
     /// Stroke ids inside the lasso polygon (packed LE f32 x,y pairs).
     pub fn lasso(&self, polygon: Vec<u8>) -> Vec<String> {
@@ -336,6 +351,41 @@ mod tests {
         nb.set_size(ids[0].clone(), 842.0, 595.0).unwrap();
         assert!(nb.set_size(ids[0].clone(), 1.0, 595.0).is_err());
         assert_eq!(nb.sheet_order(), vec![ids[1].clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn many_strokes_pasted_come_back_in_order_and_only_the_moved_ones_reload() {
+        let dir = std::env::temp_dir().join(format!("n0te-ffi-many-{}", n0te_core::ids::new_id(5)));
+        let lib = NoteLibrary::open(dir.to_string_lossy().into_owned()).unwrap();
+        let nb = lib.create_notebook("x".into()).unwrap();
+        let spec = crate::FfiSheetSpec { width: 595.0, height: 842.0, background: crate::FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0, gaps: vec![] };
+        let ids = nb.add_sheet(None, 0, spec).unwrap();
+        let sheet: Arc<SheetHandle> = nb.clone().open_sheet(ids[1].clone()).unwrap();
+        let pack = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+        // Enough to be outlined on several threads; each one a little further right.
+        let items: Vec<crate::FfiStrokeData> = (0..700)
+            .map(|i| {
+                let x = i as f32 * 0.5;
+                crate::FfiStrokeData { brush: FfiBrush { width: 2.0, thinning: 0.5, color: 0xFF000000, kind: 0 }, samples: pack(&[x, 10.0, 0.5, 0.0, x + 3.0, 20.0, 0.5, 8.0, x + 6.0, 12.0, 0.5, 16.0]) }
+            })
+            .collect();
+        let added = sheet.add_strokes(items, 0.0, 0.0, 1.0, 0.0, 0.0).unwrap();
+        assert_eq!(added.len(), 700);
+        assert!(added.windows(2).all(|w| w[0].bounds[0] < w[1].bounds[0]), "in the order given");
+        assert!(added.iter().all(|s| !s.outline.is_empty() && s.ends.len() == 9));
+        // The same outlines as one at a time.
+        let one = sheet.strokes_by_id(vec![added[123].id.clone()]).unwrap();
+        assert_eq!(one[0].outline, added[123].outline);
+        // Moved: only those come back, moved; an unknown id is left out.
+        let moved: Vec<String> = added[100..400].iter().map(|s| s.id.clone()).collect();
+        sheet.transform(moved.clone(), 50.0, 0.0, 1.0, 0.0, 0.0).unwrap();
+        let mut ask = moved.clone();
+        ask.push("nope".into());
+        let back = sheet.strokes_by_id(ask).unwrap();
+        assert_eq!(back.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), moved);
+        assert!((back[0].bounds[0] - added[100].bounds[0] - 50.0).abs() < 0.01);
+        assert_eq!(sheet.all_strokes().len(), 700);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

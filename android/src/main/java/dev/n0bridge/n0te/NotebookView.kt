@@ -356,6 +356,9 @@ class NotebookView(context: Context) : View(context) {
     private var endWhich = 0
     private var endX = 0f
     private var endY = 0f
+    /** The line's end pulled sideways: it turns (else only its length changes); the angle step it snapped to. */
+    private var endTurning = false
+    private var endSnapDeg: Int? = null
     private var selDx = 0f
     private var selDy = 0f
     private var selScale = 1f
@@ -863,7 +866,11 @@ class NotebookView(context: Context) : View(context) {
         val r = 12f * density / scale
         // Ink lies on top: a stroke under the finger first (its whole word), else the box there.
         val s = st.strokes.lastOrNull { it.id !in st.hidden && RectF(it.bounds).apply { inset(-r, -r) }.contains(tx, ty) && polygonNear(it.outline, tx, ty, r) }
-        if (s != null) {
+        if (s != null && LineGrip.straight(s.ends, LineGrip.HOLD_MIN)) {
+            // A straight line on its own (even right by the writing): its ends get the grips
+            // that make it longer or shorter.
+            selectStrokes(p.sheetId, listOf(s))
+        } else if (s != null) {
             val boxes = st.strokes.filter { it.id !in st.hidden && it.kind != 2 }.map { InkLines.Box(it.id, it.bounds.left, it.bounds.top, it.bounds.right, it.bounds.bottom) }
             val ids = InkLines.word(boxes, s.id).toSet()
             selectStrokes(p.sheetId, st.strokes.filter { it.id in ids }.ifEmpty { listOf(s) })
@@ -1023,6 +1030,8 @@ class NotebookView(context: Context) : View(context) {
         val sel = selection!!
         for (part in sel.parts) model?.state(part.sheetId)?.let { it.floating = emptySet(); it.invalidateNode() }
         selection = null
+        for (e in selInk.values) e.node.discardDisplayList()
+        selInk.clear()
         listener?.onSelectionChanged(null)
         invalidate()
     }
@@ -1403,13 +1412,37 @@ class NotebookView(context: Context) : View(context) {
         for (part in sel.parts) model?.recolor(part.sheetId, part.ids, color)
     }
 
-    /** The selection rendered as a PNG (white background), for the laptop clipboard. */
+    /**
+     * The selection rendered as a PNG (white background), for the laptop clipboard: all of it,
+     * scaled down to fit when it is big ([SelectionPicture]).
+     */
     fun selectionPng(): ByteArray? {
         val sel = selection ?: return null
         val m = model ?: return null
-        val b = selUnion(sel).apply { inset(-8f, -8f) }
-        val k = 3f
-        val bmp = android.graphics.Bitmap.createBitmap((b.width() * k).toInt().coerceIn(16, 4096), (b.height() * k).toInt().coerceIn(16, 4096), android.graphics.Bitmap.Config.ARGB_8888)
+        // What is there now (the selection's box can lag behind a move or resize), in world points.
+        val b = RectF()
+        var widest = 0f
+        for (part in sel.parts) {
+            val p = placedFor(part.sheetId) ?: continue
+            val st = m.sheets[part.sheetId] ?: continue
+            val r = RectF()
+            for (s in st.strokes) if (s.id in part.ids) { if (r.isEmpty) r.set(s.bounds) else r.union(s.bounds); widest = max(widest, s.width) }
+            for (im in st.images) if (im.id in part.ids) { if (r.isEmpty) r.set(im.x, im.y, im.x + im.w, im.y + im.h) else r.union(im.x, im.y, im.x + im.w, im.y + im.h) }
+            if (r.isEmpty) r.set(part.bounds)
+            r.offset(p.rect.left, p.rect.top)
+            if (b.isEmpty) b.set(r) else b.union(r)
+        }
+        if (b.isEmpty) b.set(selUnion(sel))
+        val pad = SelectionPicture.margin(widest)
+        b.inset(-pad, -pad)
+        var size = SelectionPicture.size(b.width(), b.height())
+        val bmp = try {
+            android.graphics.Bitmap.createBitmap(size.width, size.height, android.graphics.Bitmap.Config.ARGB_8888)
+        } catch (_: OutOfMemoryError) {
+            size = SelectionPicture.size(b.width(), b.height(), maxPixels = SelectionPicture.MAX_PIXELS / 4)
+            android.graphics.Bitmap.createBitmap(size.width, size.height, android.graphics.Bitmap.Config.ARGB_8888)
+        }
+        val k = size.scale
         val c = Canvas(bmp)
         c.drawColor(Color.WHITE) // the laptop gets a white background whatever the theme
         c.scale(k, k)
@@ -1510,9 +1543,46 @@ class NotebookView(context: Context) : View(context) {
     // Drawing
     // ========================================================================================
 
+    /**
+     * While a selection is carried (nothing else on the screen moves): everything but it as one
+     * picture at screen resolution, recorded as the drag starts, so a frame is that picture and
+     * the selection's own (see [SelInk]) however much ink lies around.
+     */
+    private var still: RenderNode? = null
+    private var stillAt = FloatArray(0)
+    private var recordingStill = false
+
+    /** Draws a frame of a selection being carried from [still]; false when this frame is drawn as usual. */
+    private fun drawCarried(c: Canvas, m: NotebookModel): Boolean {
+        if (action != Action.MOVE_SEL || board != null || !c.isHardwareAccelerated || recordingStill) {
+            if (!recordingStill) still?.takeIf { it.hasDisplayList() }?.discardDisplayList()
+            return false
+        }
+        val n = still ?: RenderNode("carried").also { still = it }
+        val at = floatArrayOf(tx, ty, scale, width.toFloat(), height.toFloat())
+        if (!n.hasDisplayList() || !at.contentEquals(stillAt)) {
+            n.setPosition(0, 0, width, height)
+            n.setUseCompositingLayer(true, null)
+            val rc = n.beginRecording(width, height)
+            recordingStill = true
+            try { onDraw(rc) } finally { recordingStill = false }
+            n.endRecording()
+            stillAt = at
+        }
+        c.drawRenderNode(n)
+        c.save()
+        c.translate(tx, ty)
+        c.scale(scale, scale)
+        drawLassoAndSelection(c, m)
+        c.restore()
+        return true
+    }
+
     override fun onDraw(c: Canvas) {
+        val m = model
+        if (m != null && drawCarried(c, m)) return
         c.drawColor(bgColor)
-        val m = model ?: return
+        if (m == null) return
         val texel = Pencil.texelFor(scale)
         if (texel != pencilTexel || Pencil.generation != pencilGeneration) {
             // The pencil grain is baked into the recorded pages: re-record those with pencil ink.
@@ -1601,7 +1671,8 @@ class NotebookView(context: Context) : View(context) {
                 c.restore()
             }
         }
-        drawLassoAndSelection(c, m)
+        // Carried, the selection is drawn over the still picture of the rest.
+        if (!recordingStill) drawLassoAndSelection(c, m)
         drawFlash(c)
         drawPlotBox(c)
         drawTextFrames(c, m)
@@ -2154,7 +2225,7 @@ class NotebookView(context: Context) : View(context) {
             val len = st?.strokes?.firstOrNull { it.id == sel.ids.first() }?.ends?.getOrNull(8)
             m.strokeEnds(sel.sheetId, sel.ids.first()) { e ->
                 val chord = e?.let { hypot(it[2] - it[0], it[3] - it[1]) } ?: 0f
-                if (selection === sel && e != null && chord > 4f && (len == null || chord >= len * 0.92f)) { selEnds = e; invalidate() }
+                if (selection === sel && e != null && LineGrip.straight(chord, len)) { selEnds = e; invalidate() }
             }
         }
         if (sel.ids.size != 1) selEnds = null
@@ -2184,11 +2255,7 @@ class NotebookView(context: Context) : View(context) {
             c.save()
             c.translate(p.rect.left, p.rect.top)
             c.concat(selMatrix(sel))
-            haloPaint.strokeWidth = 4.5f / scale / selScale
-            for (im in st.images) if (im.id in st.floating) drawBox(c, im)
-            for (im in st.images) if (im.id in sel.ids) c.drawRect(im.x, im.y, im.x + im.w, im.y + im.h, haloPaint)
-            for (s in st.strokes) if (s.id in sel.ids) c.drawPath(s.path, haloPaint)
-            if (st.floating.isNotEmpty()) for (s in st.strokes) if (s.id in st.floating) drawStroke(c, s)
+            drawSelectedInk(c, st, sel.ids, 4.5f / scale / selScale)
             c.restore()
         }
         selPaint.strokeWidth = 1f / scale
@@ -2231,6 +2298,59 @@ class NotebookView(context: Context) : View(context) {
 
     private val endRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFFFFFF.toInt(); style = Paint.Style.FILL; setShadowLayer(3f, 0f, 1f, 0x55000000) }
 
+    /**
+     * A selection's look on one page: the red outline of what is selected and, while it moves,
+     * the strokes and pictures themselves. Recorded once (per selection, zoom and change of the
+     * page) at screen resolution into a layer of its own, which a frame then only moves, scales
+     * or turns: thousands of selected strokes cost a frame what one picture does.
+     */
+    private class SelInk(val node: RenderNode) {
+        var version = -1
+        var ids: Set<String>? = null
+        var floating: Set<String>? = null
+        var halo = 0f
+        var zoom = 0f
+        var texel = 0f
+    }
+    private val selInk = HashMap<String, SelInk>()
+
+    /** [ids] of [st] drawn as selected (canvas in page points, the selection's move applied). */
+    private fun drawSelectedInk(c: Canvas, st: SheetState, ids: Set<String>, halo: Float) {
+        if (!c.isHardwareAccelerated) { recordSelectedInk(c, st, ids, halo); return }
+        val e = selInk.getOrPut(st.id) { SelInk(RenderNode("selection-${st.id}")) }
+        // Recorded in screen pixels (a layer drawn at the page's zoom stays sharp).
+        val z = scale
+        if (!e.node.hasDisplayList() || e.version != st.version || e.ids !== ids || e.floating !== st.floating || e.halo != halo || e.zoom != z || e.texel != pencilTexel) {
+            val b = RectF()
+            for (s in st.strokes) if (s.id in ids) { if (b.isEmpty) b.set(s.bounds) else b.union(s.bounds) }
+            for (im in st.images) if (im.id in ids) { if (b.isEmpty) b.set(im.x, im.y, im.x + im.w, im.y + im.h) else b.union(im.x, im.y, im.x + im.w, im.y + im.h) }
+            b.inset(-halo - 2f, -halo - 2f)
+            val l = kotlin.math.floor(b.left * z).toInt(); val t = kotlin.math.floor(b.top * z).toInt()
+            val r = kotlin.math.ceil(b.right * z).toInt(); val bt = kotlin.math.ceil(b.bottom * z).toInt()
+            e.node.setPosition(l, t, r, bt)
+            // A layer only up to a size the GPU takes easily (else the strokes are drawn each frame).
+            e.node.setUseCompositingLayer(r - l <= SEL_LAYER_MAX && bt - t <= SEL_LAYER_MAX && (r - l).toLong() * (bt - t) <= SEL_LAYER_PIXELS, null)
+            val rc = e.node.beginRecording()
+            rc.translate(-l.toFloat(), -t.toFloat())
+            rc.scale(z, z)
+            recordSelectedInk(rc, st, ids, halo)
+            e.node.endRecording()
+            e.version = st.version; e.ids = ids; e.floating = st.floating; e.halo = halo; e.zoom = z; e.texel = pencilTexel
+        }
+        c.save()
+        c.scale(1f / z, 1f / z)
+        c.drawRenderNode(e.node)
+        c.restore()
+    }
+
+    private fun recordSelectedInk(c: Canvas, st: SheetState, ids: Set<String>, halo: Float) {
+        haloPaint.strokeWidth = halo
+        for (im in st.images) if (im.id in st.floating) drawBox(c, im)
+        for (im in st.images) if (im.id in ids) c.drawRect(im.x, im.y, im.x + im.w, im.y + im.h, haloPaint)
+        for (s in st.strokes) if (s.id in ids) c.drawPath(s.path, haloPaint)
+        if (st.floating.isNotEmpty()) for (s in st.strokes) if (s.id in st.floating) drawStroke(c, s)
+    }
+
     /** The selected parts' bounds together (world coordinates, without a running move). */
     private fun selUnion(sel: Selection): RectF {
         val u = RectF()
@@ -2245,7 +2365,6 @@ class NotebookView(context: Context) : View(context) {
     /** A selection over several pages: each part outlined (and drawn while moving), one box around all. */
     private fun drawMultiSelection(c: Canvas, m: NotebookModel, sel: Selection) {
         val u = selUnion(sel)
-        haloPaint.strokeWidth = 4.5f / scale / selScale
         for (part in sel.parts) {
             val p = placedFor(part.sheetId) ?: continue
             val st = m.sheets[part.sheetId] ?: continue
@@ -2253,10 +2372,7 @@ class NotebookView(context: Context) : View(context) {
             c.translate(p.rect.left + selDx, p.rect.top + selDy)
             // Scaled about the box's top-left, the same point for every page.
             c.scale(selScale, selScale, u.left - p.rect.left, u.top - p.rect.top)
-            for (im in st.images) if (im.id in st.floating) drawBox(c, im)
-            for (im in st.images) if (im.id in part.ids) c.drawRect(im.x, im.y, im.x + im.w, im.y + im.h, haloPaint)
-            for (s in st.strokes) if (s.id in part.ids) c.drawPath(s.path, haloPaint)
-            if (st.floating.isNotEmpty()) for (s in st.strokes) if (s.id in st.floating) drawStroke(c, s)
+            drawSelectedInk(c, st, part.ids, 4.5f / scale / selScale)
             c.restore()
         }
         val b = selectionRectWorld(sel)
@@ -3082,17 +3198,17 @@ class NotebookView(context: Context) : View(context) {
                 val sel = selection ?: return
                 val p = placedFor(sel.sheetId) ?: return
                 val e = selEnds ?: return
-                var nx = wx - p.rect.left; var ny = wy - p.rect.top
-                // Close to a multiple of 15°: snaps (straight, square, 45°).
+                // Along the line only its length changes; pulled clearly sideways it turns,
+                // snapping like a held line.
                 val ax = if (endWhich == 0) e[2] else e[0]; val ay = if (endWhich == 0) e[3] else e[1]
-                val len = hypot(nx - ax, ny - ay)
-                val ang = Math.toDegrees(kotlin.math.atan2((ny - ay).toDouble(), (nx - ax).toDouble()))
-                val snapped = Math.round(ang / 15.0) * 15.0
-                if (abs(ang - snapped) < 3.0) {
-                    nx = ax + len * kotlin.math.cos(Math.toRadians(snapped)).toFloat()
-                    ny = ay + len * kotlin.math.sin(Math.toRadians(snapped)).toFloat()
+                val ox = (if (endWhich == 0) e[0] else e[2]) - ax; val oy = (if (endWhich == 0) e[1] else e[3]) - ay
+                val d = LineGrip.drag(ox, oy, wx - p.rect.left - ax, wy - p.rect.top - ay, endTurning, END_TURN_DP * density / scale)
+                endTurning = d.turning
+                if (d.snapDeg != endSnapDeg) {
+                    if (d.snapDeg != null) performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                    endSnapDeg = d.snapDeg
                 }
-                endX = nx; endY = ny
+                endX = ax + d.x; endY = ay + d.y
                 if (!batch) invalidate()
             }
             Action.GRIP_SEL -> {
@@ -4110,8 +4226,7 @@ class NotebookView(context: Context) : View(context) {
         val len = hypot(dx, dy)
         if (len < 3f / aScale) return
         val deg = Math.toDegrees(kotlin.math.atan2(dy, dx).toDouble())
-        val s45 = Math.round(deg / 45.0) * 45.0; val s15 = Math.round(deg / 15.0) * 15.0
-        val snap = when { lineFree -> null; abs(deg - s45) < 6.0 -> s45; abs(deg - s15) < 3.0 -> s15; else -> null }
+        val snap = if (lineFree) null else LineGrip.snap(deg)
         if (snap != null) { dx = (len * kotlin.math.cos(Math.toRadians(snap))).toFloat(); dy = (len * kotlin.math.sin(Math.toRadians(snap))).toFloat() }
         val step = snap?.let { Math.round(it).toInt() }
         if (step != lineSnapDeg) {
@@ -4413,9 +4528,13 @@ class NotebookView(context: Context) : View(context) {
                     if (b.isEmpty) b.set(r) else b.union(r)
                 }
             }
+            // A page full of handwriting is thousands of outline edges: tested on the lasso's grid,
+            // strokes beside its box not at all.
+            val mask = LassoMask(lp)
+            val box = RectF(area).apply { offset(-p.rect.left, -p.rect.top) }
             for (s in st.strokes) {
                 val n = s.outline.size / 2
-                if (n == 0) continue
+                if (n == 0 || !RectF.intersects(s.bounds, box)) continue
                 // Half of it inside, measured along its length (not by its points: a line drawn
                 // as a shape has most of them packed at its round ends).
                 var inLen = 0f; var allLen = 0f
@@ -4424,9 +4543,9 @@ class NotebookView(context: Context) : View(context) {
                     val x0 = s.outline[2 * i]; val y0 = s.outline[2 * i + 1]; val x1 = s.outline[2 * j]; val y1 = s.outline[2 * j + 1]
                     val l = hypot(x1 - x0, y1 - y0)
                     allLen += l
-                    if (pointInPolygon((x0 + x1) / 2, (y0 + y1) / 2, lp)) inLen += l
+                    if (mask.contains((x0 + x1) / 2, (y0 + y1) / 2)) inLen += l
                 }
-                val inside = if (allLen > 0.5f) inLen >= allLen * 0.5f else pointInPolygon(s.outline[0], s.outline[1], lp)
+                val inside = if (allLen > 0.5f) inLen >= allLen * 0.5f else mask.contains(s.outline[0], s.outline[1])
                 if (inside) { ids += s.id; if (b.isEmpty) b.set(s.bounds) else b.union(s.bounds) }
             }
             if (ids.isNotEmpty()) parts += Selection(p.sheetId, ids, b)
@@ -4443,7 +4562,7 @@ class NotebookView(context: Context) : View(context) {
         if (!sel.multi) selEnds?.let { e ->
             for (i in 0..1) {
                 val sx = (p.rect.left + e[2 * i]) * scale + tx; val sy = (p.rect.top + e[2 * i + 1]) * scale + ty
-                if (hypot(x - sx, y - sy) < 22f * density) { endWhich = i; endX = e[2 * i]; endY = e[2 * i + 1]; return Action.END_SEL }
+                if (hypot(x - sx, y - sy) < 22f * density) { endWhich = i; endX = e[2 * i]; endY = e[2 * i + 1]; endTurning = false; endSnapDeg = null; return Action.END_SEL }
             }
         }
         val b = selectionRectWorld(sel)
@@ -4563,6 +4682,11 @@ class NotebookView(context: Context) : View(context) {
         const val HANDLE_PX = 9f
         const val MARGIN_PT = 40f
         const val HANDLE_R = 15f
+        /** A line's end dragged this far (dp) across the line turns it (closer, only its length changes). */
+        const val END_TURN_DP = 28f
+        /** The biggest layer a selection gets (pixels a side, pixels in all: 32 MB). */
+        const val SEL_LAYER_MAX = 4096
+        const val SEL_LAYER_PIXELS = 8L shl 20
         const val KIND_PENCIL = 1
         const val LAYOUT_ANIM_MS = 300f
         /** The magnifier strip's height (share of the view) and its "move on" part (share of its width). */
