@@ -158,7 +158,7 @@ SectionEnd
 
 Section "$(NameAutostart)" SecAutostart
   ; Written here directly (not through n0te-sync), so it works with any n0te-sync version.
-  WriteRegStr HKCU "${RUN_KEY}" "n0te-sync" '"$INSTDIR\n0te-sync.exe"'
+  WriteRegStr HKCU "${RUN_KEY}" "n0te-sync" '"$INSTDIR\n0te-sync.exe" run'
 SectionEnd
 
 ; After the components: take away what was unticked (an update may drop a program), then file
@@ -231,7 +231,7 @@ Section "-finish" SecFinish
 
   ; The helper runs again (hidden; it has no window of its own).
   ${If} ${SectionIsSelected} ${SecAutostart}
-    ExecShell "open" "$INSTDIR\n0te-sync.exe" "" SW_HIDE
+    ExecShell "open" "$INSTDIR\n0te-sync.exe" "run" SW_HIDE
   ${EndIf}
 SectionEnd
 
