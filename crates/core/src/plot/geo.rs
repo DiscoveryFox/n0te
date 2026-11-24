@@ -1503,12 +1503,16 @@ pub fn exact_fraction(v: f64) -> Option<(i64, i64)> {
     if !v.is_finite() || v.abs() > 1e6 || v == v.round() {
         return None;
     }
-    if ((v * 100.0).round() / 100.0 - v).abs() <= 1e-9 * v.abs().max(1.0) {
+    // What two places say (up to the noise of working it out) stays a decimal.
+    if ((v * 100.0).round() / 100.0 - v).abs() <= 1e-7 * v.abs().max(1.0) {
         return None;
+    }
+    fn gcd(a: i64, b: i64) -> i64 {
+        if b == 0 { a.abs() } else { gcd(b, a % b) }
     }
     (2..=100i64).find_map(|d| {
         let n = v * d as f64;
-        ((n - n.round()).abs() < 1e-7).then(|| (n.round() as i64, d))
+        ((n - n.round()).abs() < 1e-7 && gcd(n.round() as i64, d) == 1).then(|| (n.round() as i64, d))
     })
 }
 
@@ -1950,7 +1954,7 @@ pub fn row_latex(o: &Obj, v: &Val, known: &HashSet<String>) -> String {
             }
             _ => latex_row(&o.name(), v),
         },
-        (Val::Func(e), Some(p)) if !matches!(p, 'x' | 't') => format!("{n}({}) = {}", latex_var(p), latex_expr(e, &latex_var(p))),
+        (Val::Func(e), Some(p)) if p != 'x' => format!("{n}({}) = {}", latex_var(p), latex_expr(e, &latex_var(p))),
         _ => latex_row(&o.name(), v),
     }
 }

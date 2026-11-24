@@ -938,8 +938,8 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
             Val::Func(e) => {
                 let mut pieces = curve(e, p);
                 // The ends of its domain (x², 0 ≤ x < 2): a dot where it belongs, a ring where not
-                // (the curve stops at the ring).
-                let rr = (cap * 0.42).max(2.2) * 0.62;
+                // (the curve stops at the ring); big enough to read next to a thick line.
+                let rr = ((cap * 0.42).max(2.2) * 0.62).max(b.width * 0.9);
                 let ends: Vec<((f32, f32), bool)> = domain_ends(e)
                     .into_iter()
                     .filter(|&(x, y, _)| x >= p.x_min && x <= p.x_max && y >= p.y_min && y <= p.y_max)
@@ -969,7 +969,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
                             let a = j as f32 / 24.0 * std::f32::consts::TAU;
                             (x + a.cos() * rr, y + a.sin() * rr)
                         }).collect();
-                        out.push((pen(o, 0.7), hand.stroke(&ring, 0.0)));
+                        out.push((Brush { width: (b.width * 0.7).min(rr * 0.45), ..b }, hand.stroke(&ring, 0.0)));
                     }
                     ink.push((x, y));
                 }

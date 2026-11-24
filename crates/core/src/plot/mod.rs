@@ -1283,6 +1283,8 @@ mod tests {
         assert_eq!(fmt_num(0.5), "0,5");
         assert_eq!(exact_fraction(0.125), Some((1, 8)));
         assert_eq!(exact_fraction(2f64.sqrt()), None);
+        assert_eq!(exact_fraction(2.00000004), None, "a whole number worked out numerically");
+        assert_eq!(exact_fraction(1.0 / 3.0 + 1e-11), Some((1, 3)), "a third worked out numerically");
         let p = plot().add("g(x) = (x + 1)/3").unwrap();
         let known: HashSet<String> = p.objs.iter().map(|o| o.name()).collect();
         let label = row_text(&p.objs[0], &p.values()[0].clone().unwrap(), &known, true);
