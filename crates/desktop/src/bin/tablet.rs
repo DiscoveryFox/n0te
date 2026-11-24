@@ -4,6 +4,10 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 fn main() -> iced::Result {
-    let import = std::env::args_os().nth(1).map(std::path::PathBuf::from).filter(|p| p.extension().is_some_and(|x| x == "n0te"));
+    let arg = std::env::args_os().nth(1);
+    if let Some(link) = arg.as_ref().and_then(|a| a.to_str()) {
+        n0te_desktop::set_start_link(link);
+    }
+    let import = arg.map(std::path::PathBuf::from).filter(|p| p.extension().is_some_and(|x| x == "n0te"));
     n0te_desktop::run_as(n0te_desktop::Mode::Tablet, import)
 }

@@ -219,8 +219,9 @@ current one.
    from the release if you like (`Get-FileHash <file>` in PowerShell).
 
 The installer adds Start menu entries, opens `.n0te` files with n0te Laptop, registers `n0te://`
-invite links for n0te Tablet (or n0te Laptop) and starts n0te-sync at sign-in; joining by link and
-sync itself work on Windows once n0te-sync is ported (see the table above). Uninstall it under Settings → Apps; your notebooks in
+invite links for n0te Tablet (or n0te Laptop; a click on a link opens the join dialog with it)
+and starts n0te-sync at sign-in, which keeps your notebooks in sync even with the apps closed.
+Uninstall it under Settings → Apps; your notebooks in
 `%APPDATA%\n0te` stay.
 
 **Portable:** `n0te-<version>-windows-<arch>-portable.zip` has the same programs. Unpack and run

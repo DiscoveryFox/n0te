@@ -562,6 +562,11 @@ impl App {
         }
         app.connect_sync();
         let task = import.map(|p| Task::done(Message::Import(p))).unwrap_or_else(Task::none);
+        // Started from an invite link: the join dialog opens with it.
+        let task = match crate::start_link() {
+            Some(link) => Task::batch([task, Task::done(Message::JoinLink(link.to_string()))]),
+            None => task,
+        };
         // Touchpad gestures listen on the main window's Wayland display (its "opened" event
         // comes before subscriptions run).
         let gestures = iced::window::latest().and_then(|id| iced::window::run(id, crate::gestures::wayland_display)).map(Message::WaylandDisplay);

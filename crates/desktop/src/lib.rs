@@ -42,6 +42,21 @@ pub fn mode() -> Mode {
     *MODE.get().unwrap_or(&Mode::Laptop)
 }
 
+static START_LINK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// An invite link the program was started with (`n0te://invite/…`, e.g. a click on it in the
+/// browser: the installer registers n0te:// for the apps). The join dialog opens with it; joining
+/// still takes a click.
+pub fn set_start_link(link: &str) {
+    if link.starts_with("n0te://") {
+        let _ = START_LINK.set(link.trim().to_string());
+    }
+}
+
+pub fn start_link() -> Option<&'static str> {
+    START_LINK.get().map(String::as_str)
+}
+
 /// Sets the program's mode before the app starts (false if it was set already). [`run_as`]
 /// does this; tests of n0te Tablet call it first.
 pub fn set_mode(mode: Mode) -> bool {
