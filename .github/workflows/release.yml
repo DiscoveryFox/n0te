@@ -232,14 +232,9 @@ jobs:
       - name: Checksums and notes
         run: |
           (cd dist && sha256sum -- * > SHA256SUMS.txt && cat SHA256SUMS.txt)
-          {
-            scripts/version.sh notes "$VERSION"
-            echo
-            echo "---"
-            echo
-            echo "**Downloads:** Windows installer \`-setup.exe\` (x64 for Intel/AMD PCs, arm64 for Snapdragon PCs; no administrator rights needed) or the portable zip; \`-android.apk\` for the Android tablet app. Checksums: \`SHA256SUMS.txt\`."
-            echo "The Windows programs are not code-signed yet, so SmartScreen may warn about an unknown publisher (More info → Run anyway)."
-          } > notes.md
+          # The release notes are that version's changelog, nothing else (downloads and what n0te
+          # can do overall are in the README).
+          scripts/version.sh notes "$VERSION" > notes.md
           cat notes.md
       - name: Publish
         run: |

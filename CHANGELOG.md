@@ -2,12 +2,11 @@
 
 What changed in n0te. One version number covers the whole suite: the Android tablet app,
 n0te Laptop, n0te Tablet and n0te-sync. Each `## [version]` section below becomes the notes of
-that GitHub release. The Android app shows its changes in German too (Einstellungen →
+that GitHub release, so it lists only what changed in that version (what n0te can do overall:
+[README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
 ## [0.32.1] - 2026-11-24
-
-Install once, then n0te keeps itself up to date.
 
 ### Added
 
@@ -24,67 +23,39 @@ Install once, then n0te keeps itself up to date.
 
 ## [0.32.0] - 2026-11-24
 
-The first public release: the Android tablet app, n0te Laptop for Windows and Linux, and a
-first preview of n0te Tablet for Windows pen devices. From now on all of them share one
-version number.
+### Added
 
-### Android tablet app
+- n0te for Windows, x64 and ARM64: **n0te Laptop** (the laptop app, keyboard and mouse) and
+  **n0te Tablet** (new, for pen and touch devices), with an installer (no administrator rights,
+  pick either or both) and a portable zip.
+- n0te Tablet: the Windows pen (pressure, tilt, eraser end, side button, hover; press-and-hold
+  right click off on the page; resting palm ignored), the tablet's pen types and palettes,
+  eraser (strokes or area), lasso (move, scale, recolour, copy, cut, paste), text tool, laser,
+  undo and redo across pages, writing with a finger (setting).
+- n0te Tablet: shapes and arrowheads snap when the pen rests (the Android app's recognizers,
+  ported to the shared core).
+- n0te Tablet: handwriting search with Windows' own recognizer; the touch keyboard opens when
+  typing starts.
+- Windows: the n0te-sync helper starts at sign-in and keeps notebooks in sync with the apps
+  closed; pairing by showing a code / QR code or by pasting another device's code; `n0te://`
+  invite links open the join dialog.
+- n0te Laptop and n0te Tablet in English as well as German (follows the Windows language;
+  Settings → Sprache / Language).
+- Android: insert space sideways: put the pen down and drag right, everything to the right
+  moves over and the page grows wider if needed; dragging left takes the space out again. The
+  first direction the pen moves decides (a small cross marks the spot until it is clear).
+- Android: dragging down to insert space works with nothing below too: the page grows, so you
+  can keep writing.
 
-- Handwriting with low-latency ink and palm rejection; fountain pen, ballpoint, pencil, brush
-  and marker; eraser, lasso, ruler, undo.
-- Shapes, straight lines and arrows snap clean when you hold the pen at the end of a stroke.
-- Notebooks with pages, nested groups, side pages left and right, infinite boards, paper
-  patterns and page formats; an outline with page pictures and bookmarks.
-- PDFs: import, write on them, insert pages, export with the ink as vectors.
-- Text pages and text boxes with LaTeX formulas; GeoGebra-style graphs and constructions.
-- Search through handwriting (recognised on the tablet), typed text and PDF text.
-- Library with folders, tags, pins and a start page; two notebooks side by side.
-- Sync with the laptop, live sessions, guests via invite links, version history; updates
-  from GitHub releases.
+### Changed
 
-### n0te Laptop (Windows and Linux)
+- One version number for the Android app, n0te Laptop, n0te Tablet and n0te-sync; releases
+  are published here on GitHub.
 
-- The same notebooks with keyboard and mouse: library, outline, page view, PDF import and
-  export, text boxes, text pages and a notes column, formulas (with a local TeX installation),
-  graphs with an algebra view and input line, search, two notebooks side by side, command
-  palette, six themes.
-- Shows the tablet's ink; drawing ink stays on the tablet.
-- Sync, pairing, live sessions, guests and version history through the n0te-sync service, on
-  Linux and on Windows (a background helper that starts at sign-in). Pairing works by showing a
-  code / QR code or by pasting another device's code.
-- German and English: on Windows the language follows the system; a "Sprache / Language"
-  setting overrides it.
+### Known issues
 
-### n0te Tablet (Windows, preview)
-
-- A separate program for pen and touch devices, with its own icon and Start menu entry: the
-  n0te Laptop interface plus the tablet's tools.
-- The Windows pen: pressure, tilt, eraser end, side button, hover ring; Windows' press-and-hold
-  right click is off on the page; a resting palm is ignored. Optional: write with a finger.
-- The tablet's pens and palettes (fountain pen with its speed, nib and taper; ballpoint,
-  pencil, brush, marker), eraser (whole strokes or area), lasso (move, scale, recolour, copy,
-  cut, paste), text tool, laser pointer, undo and redo across pages.
-- Shapes and arrowheads snap when the pen rests, with the same recognizers as the Android app.
-- Handwriting search: Windows' own recognizer reads new lines (needs a language's handwriting
-  feature); the touch keyboard comes up when typing starts.
-- Invite links (`n0te://…`) open the join dialog.
-- Not yet: ruler, insert space, the writing magnifier, scribble to delete. This is the first
-  build: it has not been tried on many real pen devices yet, please report what you find.
-
-### Windows packages
-
-- Installer without administrator rights (per user): pick n0te Laptop, n0te Tablet or both;
-  Start menu entries, `.n0te` files open in n0te Laptop, `n0te://` invite links are registered
-  for n0te Tablet, n0te-sync starts at sign-in. Uninstalling keeps your notebooks.
-- Portable zip with the same programs. Builds for x64 and ARM64 (Snapdragon). Not code-signed
-  yet: SmartScreen may warn about an unknown publisher.
-
-### New on the tablet in this version
-
-- Insert space sideways: put the pen down and drag right, everything to the right moves over
-  and the page grows wider if needed; dragging left takes the space out again.
-- The first direction the pen moves decides (a small cross marks the spot until it is clear).
-- Dragging down works with nothing below too: the page grows, so you can keep writing.
+- The Windows programs are new and not code-signed yet (SmartScreen may warn); not yet in n0te
+  Tablet: ruler, insert space, the writing magnifier, scribble to delete.
 
 ## History before the public release
 

@@ -9,9 +9,9 @@ on:
   push:
     branches: [main]
     # Text-only changes don't need a build.
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".github/workflows/release.yml"]
   pull_request:
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".github/workflows/release.yml"]
   workflow_dispatch:
 
 permissions:

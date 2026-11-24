@@ -119,7 +119,10 @@ the GitHub release notes. The Android app keeps its own German list in
 
 1. `scripts/bump-version.sh 0.33.0` sets the workspace version, Android versionName, the next
    versionCode, updates `Cargo.lock` and adds a skeleton section to `CHANGELOG.md`.
-2. Write the `CHANGELOG.md` section (no `TODO` left) and the `Changelog.kt` entry.
+2. Write the `CHANGELOG.md` section (no `TODO` left) and the `Changelog.kt` entry. The section
+   is the release's notes as they are: only what changed in this version (Added / Changed /
+   Fixed / Known issues), no overview of n0te's features and no download instructions (those
+   live in the README).
 3. Commit, then tag and push:
 
    ```sh
