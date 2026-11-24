@@ -125,6 +125,39 @@ impl Library {
         Ok(())
     }
 
+    /// Saves a sheet without it counting as an edit: its file keeps its time (what only the
+    /// handwriting index for search changed). Other devices still hear of it.
+    pub fn save_sheet_quietly(&self, notebook: &str, sheet_id: &str, sheet: &Sheet) -> Result<()> {
+        let path = self.sheet_path(notebook, sheet_id)?;
+        let was = fs::metadata(&path).and_then(|m| m.modified()).ok();
+        self.save_sheet(notebook, sheet_id, sheet)?;
+        if let Some(t) = was
+            && let Ok(f) = fs::File::options().write(true).open(&path)
+        {
+            let _ = f.set_modified(t);
+        }
+        Ok(())
+    }
+
+    /// The pages changed last, across all notebooks (here or merged from another device),
+    /// newest first: notebook id, sheet id, when (ms since 1970). At most `limit`.
+    pub fn recent_sheets(&self, limit: usize) -> Result<Vec<(String, String, i64)>> {
+        let mut out = Vec::new();
+        for nb in self.notebook_ids()? {
+            let Ok(rd) = fs::read_dir(self.nb_dir(&nb)?.join("sheets")) else { continue };
+            for e in rd.flatten() {
+                let name = e.file_name();
+                let Some(sheet) = name.to_str().and_then(|n| n.strip_suffix(".loro")) else { continue };
+                let Ok(t) = e.metadata().and_then(|m| m.modified()) else { continue };
+                let ms = t.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+                out.push((nb.clone(), sheet.to_string(), ms));
+            }
+        }
+        out.sort_by(|a, b| b.2.cmp(&a.2));
+        out.truncate(limit);
+        Ok(out)
+    }
+
     /// Merges updates (or a snapshot) from another device into the notebook's index on disk,
     /// creating the notebook if it is new here. Returns whether anything changed.
     pub fn merge_notebook(&self, id: &str, bytes: &[u8]) -> Result<bool> {
@@ -474,6 +507,29 @@ pub fn write_atomic(path: &Path, data: &[u8]) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn recent_sheets_are_newest_first_and_quiet_saves_dont_count() {
+        let root = std::env::temp_dir().join(format!("n0te-recent-{}", crate::ids::new_id(9)));
+        let lib = Library::open(&root).unwrap();
+        let nb = lib.create_notebook("A").unwrap();
+        let (_, s1) = nb.add_sheet(None, 0, &crate::notebook::SheetSpec::a4(crate::notebook::Background::Grid)).unwrap();
+        let (_, s2) = nb.add_sheet(None, 1, &crate::notebook::SheetSpec::a4(crate::notebook::Background::Grid)).unwrap();
+        lib.save_notebook(&nb).unwrap();
+        let a = lib.load_sheet(&nb.id(), &s1).unwrap();
+        lib.save_sheet(&nb.id(), &s1, &a).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        let b = lib.load_sheet(&nb.id(), &s2).unwrap();
+        lib.save_sheet(&nb.id(), &s2, &b).unwrap();
+        let r = lib.recent_sheets(10).unwrap();
+        assert_eq!(r.iter().map(|x| x.1.clone()).collect::<Vec<_>>(), vec![s2.clone(), s1.clone()]);
+        // Saving the first one quietly (the search index) keeps it second.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        lib.save_sheet_quietly(&nb.id(), &s1, &a).unwrap();
+        assert_eq!(lib.recent_sheets(1).unwrap()[0].1, s2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use crate::ink::{Brush, InkPoint};
     use crate::notebook::{Background, SheetSpec};

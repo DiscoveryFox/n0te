@@ -983,6 +983,11 @@ impl NoteLibrary {
     }
 
     /// Moves a notebook to the trash folder (out of the library, still on disk).
+    /// The pages changed last across all notebooks, newest first (at most `limit`).
+    pub fn recent_sheets(&self, limit: u32) -> R<Vec<FfiRecentSheet>> {
+        Ok(self.inner.recent_sheets(limit as usize)?.into_iter().map(|(notebook, sheet, changed)| FfiRecentSheet { notebook, sheet, changed }).collect())
+    }
+
     pub fn trash_notebook(&self, id: String) -> R<()> {
         Ok(self.inner.trash_notebook(&id)?)
     }
@@ -1179,6 +1184,21 @@ impl SheetHandle {
         let id = self.notebook.id();
         Ok(self.notebook.lib.inner.save_sheet(&id, &self.sheet_id, &lock(&self.sheet))?)
     }
+
+    /// Saves without it counting as an edit (only the search index changed): the page keeps
+    /// its place under "Zuletzt bearbeitet".
+    pub fn save_quiet(&self) -> R<()> {
+        let id = self.notebook.id();
+        Ok(self.notebook.lib.inner.save_sheet_quietly(&id, &self.sheet_id, &lock(&self.sheet))?)
+    }
+}
+
+/// A page changed lately: its notebook, its sheet, when (ms since 1970).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiRecentSheet {
+    pub notebook: String,
+    pub sheet: String,
+    pub changed: i64,
 }
 
 #[derive(Debug, Clone, uniffi::Record)]
