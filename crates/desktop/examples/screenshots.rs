@@ -261,7 +261,7 @@ mod stand_in {
     use std::path::Path;
 
     pub fn start(scratch: &Path) {
-        let path = n0te_desktop::live::socket_path();
+        let path = n0te_platform::ipc::Endpoint::service().path().to_path_buf();
         assert!(path.starts_with(scratch), "the socket must be the run's own: {}", path.display());
         let listener = UnixListener::bind(&path).expect("socket");
         std::thread::spawn(move || {

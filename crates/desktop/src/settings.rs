@@ -131,6 +131,8 @@ impl Settings {
     /// [`OPENED_KEPT`] forgotten.
     pub fn opened_now(&mut self, id: &str, at: u64) {
         self.lib_opened.retain(|(i, _)| i != id);
+        // Strictly after the last one: two opens within a millisecond keep their order.
+        let at = self.lib_opened.first().map_or(at, |(_, last)| at.max(last + 1));
         self.lib_opened.insert(0, (id.to_string(), at));
         self.lib_opened.sort_by(|a, b| b.1.cmp(&a.1));
         self.lib_opened.truncate(OPENED_KEPT);
