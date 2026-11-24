@@ -4,6 +4,7 @@
 //! document per sheet (its objects: strokes, later text, images, …). Documents are Loro CRDTs,
 //! so every device keeps a full copy and concurrent edits merge without conflicts.
 
+pub mod arrows;
 pub mod error;
 pub mod format;
 pub mod ids;
@@ -13,6 +14,7 @@ pub mod notebook;
 pub mod pens;
 pub mod plot;
 pub mod search;
+pub mod shapes;
 pub mod sheet;
 pub mod store;
 
