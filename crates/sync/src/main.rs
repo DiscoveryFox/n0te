@@ -14,26 +14,41 @@
 //!   n0te-sync join <link> [--pin P] | leave <invite-id>
 //!   n0te-sync remove-device <id>
 //!   n0te-sync history <notebook> | restore <notebook> <unix-seconds> | checkpoint
+//!   n0te-sync autostart on|off|status     start the service at login (Windows)
 //!
-//! With the service running, commands go to it over a unix socket
-//! (`$XDG_RUNTIME_DIR/n0te-sync.sock`); otherwise they start a short-lived engine.
-//! Library: `$N0TE_LIBRARY`, else `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
+//! With the service running, commands go to it over a local socket
+//! (`$XDG_RUNTIME_DIR/n0te-sync.sock`; Windows: a named pipe of this user); otherwise they
+//! start a short-lived engine.
+//! Library: `$N0TE_LIBRARY`, else `$XDG_DATA_HOME/n0te` (~/.local/share/n0te; Windows: %APPDATA%\n0te).
+// Windows: no console window for the service (started at login or by the apps); commands
+// typed in a terminal borrow its console (`n0te_platform::attach_parent_console`).
+#![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use n0te_platform::ipc::{Endpoint, Listener, Stream};
+use n0te_platform::paths;
 use n0te_sync::history::local_time;
 use n0te_sync::{Engine, EngineOptions, Event, LiveBrush, Role};
 
-/// Open GUI sessions: every engine event goes to each as a JSON line.
+/// Handwriting → LaTeX for the tablet with n0bridge's recognizers (Linux tools).
+#[cfg(not(windows))]
 mod recognize;
+/// No recognizer on Windows (both are n0bridge's, which is Linux only).
+#[cfg(windows)]
+mod recognize {
+    pub fn recognize(_png: &[u8]) -> Result<(String, String), String> {
+        Err("Handschrift → LaTeX gibt es unter Windows nicht".into())
+    }
+}
 
 /// The running engine (for answers sent from event handlers).
 static ENGINE: std::sync::OnceLock<Arc<Engine>> = std::sync::OnceLock::new();
+/// Open GUI sessions: every engine event goes to each as a JSON line.
 static SUBS: std::sync::OnceLock<std::sync::Mutex<Vec<mpsc::Sender<String>>>> = std::sync::OnceLock::new();
 
 fn broadcast(line: String) {
@@ -78,21 +93,10 @@ fn event_json(e: &Event) -> Option<String> {
     Some(v.to_string())
 }
 
-fn library_root() -> PathBuf {
-    if let Some(p) = std::env::var_os("N0TE_LIBRARY") {
-        return PathBuf::from(p);
-    }
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("n0te")
-}
-
-/// Where a device's screenshot lands (next to the socket).
+/// Where a device's screenshot lands (the service's scratch folder, next to the socket).
 fn shot_path(device: &str) -> PathBuf {
     let short: String = device.chars().take(10).collect();
-    socket_path().with_file_name(format!("n0te-shot-{short}.jpg"))
+    paths::runtime_dir().join(format!("n0te-shot-{short}.jpg"))
 }
 
 /// Writes a file only this user can read.
@@ -100,6 +104,9 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::OpenOptionsExt;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
     let tmp = path.with_extension("tmp");
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create(true).truncate(true);
@@ -109,25 +116,23 @@ fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(tmp, path)
 }
 
-fn socket_path() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(d) => PathBuf::from(d).join("n0te-sync.sock"),
-        None => library_root().join("sync").join("n0te-sync.sock"),
-    }
-}
-
 fn device_name() -> String {
     std::env::var("N0TE_DEVICE_NAME").ok().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "Laptop".to_string())
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `n0te-sync run` too: its log then shows in the terminal it was typed in.
+    if !args.is_empty() {
+        n0te_platform::attach_parent_console();
+    }
     let code = match args.first().map(String::as_str) {
         None | Some("run") => service().map(|_| 0),
         Some("help" | "-h" | "--help") => {
             println!("{}", include_str!("main.rs").lines().take_while(|l| l.starts_with("//!")).map(|l| l.trim_start_matches("//!").trim_start_matches(' ')).collect::<Vec<_>>().join("\n"));
             Ok(0)
         }
+        Some("autostart") => autostart(args.get(1).map(String::as_str)),
         Some(_) => client(&args),
     };
     match code {
@@ -143,6 +148,53 @@ type Res<T> = std::result::Result<T, String>;
 
 fn log(msg: &str) {
     eprintln!("{msg}");
+    // Windows: the service has no console, so it also keeps a log file.
+    #[cfg(windows)]
+    if let Some(f) = LOG_FILE.get()
+        && let Ok(mut f) = f.lock()
+    {
+        let _ = writeln!(f, "{msg}");
+    }
+}
+
+/// The service's log on Windows: `n0te-sync.log` in its scratch folder, new at every start.
+#[cfg(windows)]
+static LOG_FILE: std::sync::OnceLock<std::sync::Mutex<std::fs::File>> = std::sync::OnceLock::new();
+
+/// `autostart on|off|status`: the service at login. Windows: a value `n0te-sync` under
+/// HKCU\Software\Microsoft\Windows\CurrentVersion\Run (`"…\n0te-sync.exe" run`).
+fn autostart(what: Option<&str>) -> Res<i32> {
+    #[cfg(windows)]
+    {
+        use n0te_platform::autostart;
+        const NAME: &str = "n0te-sync";
+        match what {
+            Some("on") => {
+                let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let mut line = std::ffi::OsString::from("\"");
+                line.push(exe.as_os_str());
+                line.push("\" run");
+                autostart::enable(NAME, &line).map_err(|e| e.to_string())?;
+                println!("Startet bei der Anmeldung: {}", line.to_string_lossy());
+            }
+            Some("off") => {
+                autostart::disable(NAME).map_err(|e| e.to_string())?;
+                println!("Startet nicht mehr bei der Anmeldung.");
+            }
+            None | Some("status") => match autostart::get(NAME).map_err(|e| e.to_string())? {
+                Some(line) => println!("an: {}", line.to_string_lossy()),
+                None => println!("aus"),
+            },
+            Some(other) => return Err(format!("autostart on|off|status, nicht {other}")),
+        }
+        Ok(0)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = what;
+        println!("Den Dienst startet hier systemd: systemctl --user enable --now n0te-sync");
+        Ok(0)
+    }
 }
 
 fn describe(e: &Event) -> Option<String> {
@@ -172,11 +224,20 @@ fn short(id: &str) -> &str {
 
 /// The service: engine + checkpoints + command socket.
 fn service() -> Res<()> {
-    let root = library_root();
+    let root = paths::library_root();
     std::fs::create_dir_all(root.join("sync")).map_err(|e| e.to_string())?;
     let lock = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(root.join("sync").join("service.lock")).map_err(|e| e.to_string())?;
     if lock.try_lock().is_err() {
         return Err("läuft schon".into());
+    }
+    #[cfg(windows)]
+    {
+        let dir = paths::runtime_dir();
+        if std::fs::create_dir_all(&dir).is_ok()
+            && let Ok(f) = std::fs::File::create(dir.join("n0te-sync.log"))
+        {
+            let _ = LOG_FILE.set(std::sync::Mutex::new(f));
+        }
     }
     let mut opts = EngineOptions::new(device_name());
     // Tests: no relays, no address lookup.
@@ -228,14 +289,8 @@ fn service() -> Res<()> {
         std::thread::sleep(Duration::from_secs(300));
     });
 
-    let sock = socket_path();
-    let _ = std::fs::remove_file(&sock);
-    let listener = UnixListener::bind(&sock).map_err(|e| format!("{}: {e}", sock.display()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
-    }
+    let endpoint = Endpoint::service();
+    let listener = Listener::bind(&endpoint).map_err(|e| format!("{endpoint}: {e}"))?;
     for conn in listener.incoming().flatten() {
         let engine = engine.clone();
         std::thread::spawn(move || {
@@ -246,7 +301,7 @@ fn service() -> Res<()> {
     Ok(())
 }
 
-fn serve(engine: &Engine, conn: UnixStream) -> std::io::Result<()> {
+fn serve(engine: &Engine, conn: Stream) -> std::io::Result<()> {
     let mut reader = BufReader::new(conn.try_clone()?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
@@ -264,7 +319,7 @@ fn serve(engine: &Engine, conn: UnixStream) -> std::io::Result<()> {
 
 /// A GUI session: the app sends live commands (one JSON array per line, no replies) and gets
 /// every engine event as a JSON line, until either side closes.
-fn session(engine: &Engine, conn: UnixStream, reader: BufReader<UnixStream>) -> std::io::Result<()> {
+fn session(engine: &Engine, conn: Stream, reader: BufReader<Stream>) -> std::io::Result<()> {
     let (tx, rx) = mpsc::channel::<String>();
     if let Some(subs) = SUBS.get() {
         subs.lock().expect("subs").push(tx.clone());
@@ -287,14 +342,14 @@ fn session(engine: &Engine, conn: UnixStream, reader: BufReader<UnixStream>) -> 
         }
     }
     drop(tx);
-    let _ = conn.shutdown(std::net::Shutdown::Both);
+    let _ = conn.shutdown();
     let _ = writer.join();
     Ok(())
 }
 
 /// A CLI command: through the service if it runs, else with a short-lived engine.
 fn client(args: &[String]) -> Res<i32> {
-    if let Ok(mut s) = UnixStream::connect(socket_path()) {
+    if let Ok(mut s) = Stream::connect(&Endpoint::service()) {
         writeln!(s, "{}", serde_json::to_string(args).expect("json")).map_err(|e| e.to_string())?;
         let mut line = String::new();
         BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
@@ -315,7 +370,7 @@ fn client(args: &[String]) -> Res<i32> {
     opts.listener = Some(Arc::new(move |e| {
         let _ = tx.lock().expect("tx").send(e);
     }));
-    let engine = Engine::start(library_root(), opts).map_err(|e| e.to_string())?;
+    let engine = Engine::start(paths::library_root(), opts).map_err(|e| e.to_string())?;
     let out = dispatch(&engine, args)?;
     println!("{out}");
     match args[0].as_str() {

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 n0te-core.workspace = true
+n0te-platform.workspace = true
 loro.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
@@ -23,4 +24,3 @@ rand = "0.9"
 data-encoding = "2"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 bytes = "1"
-libc = "0.2"
