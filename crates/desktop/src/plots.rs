@@ -177,45 +177,15 @@ impl NumField {
 // --- the algebra view ----------------------------------------------------------------------
 
 /// An object as the algebra view lists it, like GeoGebra: "f(x) = 0,5x² − 3", "A = (1 | 2)",
-/// "g: y = 2x + 1", "c: (x − 1)² + y² = 4", "a = 2"; an object with a mistake as typed.
-pub fn listing(o: &Obj, v: &Result<Val, String>) -> String {
-    let name = o.name();
+/// "g: y = 2x + 1", "c: (x − 1)² + y² = 4", "a = 2", "f(x) = x², 0 ≤ x ≤ 2", "a(b) = 3b",
+/// "c: r = 1 + cos(θ)"; exact fractions as ¹⁄₃; an object with a mistake as typed. `known`:
+/// the plot's names.
+pub fn listing(o: &Obj, v: &Result<Val, String>, known: &HashSet<String>) -> String {
     let Ok(v) = v else { return o.def.trim().to_string() };
     match v {
-        Val::Func(e) if labelled(&o.def) => format!("{name}: y = {}", plot::fmt_expr(e)),
-        Val::Func(e) => match fn_var(&o.def) {
-            Some('t') => format!("{name}(t) = {}", swap_x(&plot::fmt_expr(e), 't')),
-            _ => format!("{name}(x) = {}", plot::fmt_expr(e)),
-        },
-        Val::Line { .. } | Val::Lines(_) | Val::Circle(..) | Val::Implicit(_) => format!("{name}: {}", plot::format_val(v)),
-        Val::Text(t) => format!("{name} = „{t}“"),
-        _ => format!("{name} = {}", plot::format_val(v)),
+        Val::Text(t) => format!("{} = „{t}“", o.name()),
+        _ => plot::row_text(o, v, known, false),
     }
-}
-
-/// Whether a definition names its object with a label ("g: y = 2x + 1").
-fn labelled(def: &str) -> bool {
-    match (def.find(':'), def.find('=')) {
-        (Some(c), Some(e)) => c < e,
-        (Some(_), None) => true,
-        _ => false,
-    }
-}
-
-/// A function's variable as defined ("f(t) = …": t).
-fn fn_var(def: &str) -> Option<char> {
-    let head = def.split('=').next()?.trim();
-    let inner = head.strip_suffix(')')?.split_once('(')?.1.trim();
-    let mut c = inner.chars();
-    let v = c.next()?;
-    c.next().is_none().then_some(v)
-}
-
-/// `s` with every x that stands alone (not in a word like "exp") written as `to`.
-fn swap_x(s: &str, to: char) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    let word = |i: Option<usize>| i.and_then(|i| chars.get(i)).is_some_and(|c| c.is_alphabetic());
-    chars.iter().enumerate().map(|(i, &c)| if c == 'x' && !word(i.checked_sub(1)) && !word(Some(i + 1)) { to } else { c }).collect()
 }
 
 /// What an object is, as the properties name it.
@@ -527,6 +497,20 @@ pub enum Msg {
     MakeSlider(bool),
     /// A slider field (0 from, 1 to, 2 step) typed.
     SliderField(usize, String),
+    /// A domain field of the selected function (0 from, 1 to) typed (empty: open that way).
+    DomainField(usize, String),
+    /// The selected function defined everywhere again.
+    Everywhere,
+    /// The selected row's switch: as a curve of its letters (true) or a number with a slider.
+    AsCurve(bool),
+    /// An end of a function's domain (0 from, 1 to) dragged in the preview to a page point.
+    DragEnd(String, u8, f32, f32),
+    /// An axis grabbed in the preview at a page position along it (x for the x axis, y for y).
+    AxisGrab(plot::Axis, f32),
+    /// The grabbed axis dragged to a page position: only it stretches.
+    AxisTo(f32),
+    /// The axis let go.
+    AxisLet,
     // The coordinate system.
     /// Range field (0 x from, 1 x to, 2 y from, 3 y to) typed.
     Range(usize, String),
@@ -593,6 +577,12 @@ pub struct Editor {
     pub ranges: [NumField; 4],
     /// The selected slider's fields: from, to, step.
     pub slider_fields: [NumField; 3],
+    /// The selected function's domain fields (from, to; empty: open that way) and what is
+    /// wrong with them.
+    pub domain_fields: [String; 2],
+    pub domain_error: Option<String>,
+    /// An axis being stretched in the preview: which, where it was grabbed, the plot then.
+    axis_drag: Option<(plot::Axis, f32, Plot)>,
     /// The page's paper (for the preview).
     pub paper: (Background, f32),
     preview: RefCell<Option<(Plot, canvas::Cache)>>,
@@ -616,9 +606,23 @@ impl Editor {
             tab: Tab::Graphics,
             ranges,
             slider_fields: Default::default(),
+            domain_fields: Default::default(),
+            domain_error: None,
+            axis_drag: None,
             paper,
             preview: RefCell::new(None),
         }
+    }
+
+    /// The domain fields as the selected function's domain says.
+    fn show_domain(&mut self) {
+        let d = self.selected.as_deref().and_then(|id| self.plot.domain(id));
+        let field = |e: plot::End| e.map(|(v, _)| fmt_num(v)).unwrap_or_default();
+        self.domain_fields = match d {
+            Some((lo, hi)) => [field(lo), field(hi)],
+            None => Default::default(),
+        };
+        self.domain_error = None;
     }
 
     fn index(&self, id: &str) -> Option<usize> {
@@ -638,6 +642,7 @@ impl Editor {
                 Some(s) => [NumField::of(s.min, false), NumField::of(s.max, false), NumField::of(s.step, false)],
                 None => Default::default(),
             };
+            self.show_domain();
         }
         if self.selected.is_some() {
             self.tab = Tab::Object;
@@ -722,6 +727,7 @@ impl Editor {
             Ok(p) => {
                 self.plot = p;
                 self.editing = None;
+                self.show_domain();
                 true
             }
             Err(err) => {
@@ -1017,6 +1023,64 @@ impl Editor {
                     }
                 }
             }
+            Msg::DomainField(k, s) if k < 2 => {
+                self.domain_fields[k] = s;
+                let Some(id) = self.selected.clone() else { return Reply::None };
+                let read = |t: &str| if t.trim().is_empty() { Some(None) } else { number(t).map(Some) };
+                match (read(&self.domain_fields[0]), read(&self.domain_fields[1])) {
+                    (Some(lo), Some(hi)) => match self.plot.set_domain(&id, lo, hi) {
+                        Ok(p) => {
+                            self.plot = p;
+                            self.domain_error = None;
+                            self.moved(&id);
+                        }
+                        Err(e) => self.domain_error = Some(e),
+                    },
+                    _ => self.domain_error = Some(tr("Das ist keine Zahl").into()),
+                }
+            }
+            Msg::Everywhere => {
+                if let Some(id) = self.selected.clone()
+                    && let Ok(p) = self.plot.set_domain(&id, None, None)
+                {
+                    self.plot = p;
+                    self.moved(&id);
+                    self.show_domain();
+                }
+            }
+            Msg::AsCurve(curve) => {
+                let Some(id) = self.selected.clone() else { return Reply::None };
+                let r = if curve { self.plot.as_curve(&id) } else { self.plot.as_sliders(&id) };
+                if let Ok(p) = r {
+                    self.plot = p;
+                    self.moved(&id);
+                    let s = self.selected_index().and_then(|i| self.plot.objs[i].style.slider);
+                    self.slider_fields = s.map(|s| [NumField::of(s.min, false), NumField::of(s.max, false), NumField::of(s.step, false)]).unwrap_or_default();
+                    self.show_domain();
+                }
+            }
+            Msg::DragEnd(id, side, x, y) => {
+                let (px, _) = self.plot.to_plot(x, y);
+                if let Some(p) = self.plot.drag_domain_end(&id, side, px) {
+                    self.plot = p;
+                    self.moved(&id);
+                    if self.selected.as_deref() == Some(id.as_str()) {
+                        self.show_domain();
+                    } else {
+                        self.select(Some(id));
+                    }
+                }
+            }
+            Msg::AxisGrab(axis, at) => self.axis_drag = Some((axis, at, self.plot.clone())),
+            Msg::AxisTo(to) => {
+                if let Some((axis, from, start)) = &self.axis_drag {
+                    let p = start.axis_dragged(*axis, *from, to);
+                    (self.plot.x_min, self.plot.x_max, self.plot.y_min, self.plot.y_max) = (p.x_min, p.x_max, p.y_min, p.y_max);
+                    let pi = self.plot.pi;
+                    self.ranges = [NumField::of(p.x_min, pi), NumField::of(p.x_max, pi), NumField::of(p.y_min, false), NumField::of(p.y_max, false)];
+                }
+            }
+            Msg::AxisLet => self.axis_drag = None,
             Msg::Range(i, s) if i < 4 => {
                 self.ranges[i].text = s;
                 self.take_range(i / 2);
@@ -1072,7 +1136,7 @@ impl Editor {
             }
             Msg::Delete => return Reply::Delete,
             Msg::Cancel => return Reply::Cancel,
-            Msg::SliderField(..) | Msg::Range(..) => {}
+            Msg::SliderField(..) | Msg::Range(..) | Msg::DomainField(..) => {}
         }
         Reply::None
     }
@@ -1251,7 +1315,7 @@ impl Editor {
         let body: Element<'_, Msg> = match editing {
             Some(e) => text_input("", &e.text).id(edit_id()).on_input(Msg::EditText).on_submit(Msg::EditSubmit).font(theme::MONO).padding([6, 8]).size(14).style(theme::field).into(),
             None => {
-                let mut t = text(listing(o, v)).font(theme::SANS).size(15).wrapping(text::Wrapping::WordOrGlyph);
+                let mut t = text(listing(o, v, known)).font(theme::SANS).size(15).wrapping(text::Wrapping::WordOrGlyph);
                 if v.is_err() {
                     t = t.color(theme::p().muted);
                 }
@@ -1344,6 +1408,24 @@ impl Editor {
             }
             marks = marks.push(switch(s.coords, tr("Koordinaten dazu"), Msg::Coords));
             col = col.push(section(tr("Markieren"), marks.into()));
+            // Where it is defined (f(x) = x², 0 ≤ x ≤ 2); empty: open that way. The ends drag in the preview.
+            let field = |k: usize, label: &'static str| {
+                column![theme::caption(label), text_input(tr("offen"), &self.domain_fields[k]).on_input(move |t| Msg::DomainField(k, t)).font(theme::MONO).padding(6).size(13).width(Length::Fixed(74.0)).style(theme::field)].spacing(4)
+            };
+            let mut fields = row![field(0, tr("von")), field(1, tr("bis"))].spacing(10).align_y(Alignment::End);
+            if self.domain_fields.iter().any(|f| !f.trim().is_empty()) {
+                fields = fields.push(button(theme::btn_small(tr("Überall"))).padding([3, 9]).on_press(Msg::Everywhere).style(theme::secondary));
+            }
+            let mut domain = column![fields].spacing(6);
+            if let Some(e) = &self.domain_error {
+                domain = domain.push(text(e.clone()).size(12.5).color(theme::p().accent));
+            }
+            col = col.push(section(tr("Definitionsbereich"), domain.into()));
+        }
+        // a = 3b: a curve of its letters, or a number with a slider.
+        if let Some(curve) = self.plot.curve_switch(&o.id) {
+            let choice = |on: bool, label: &'static str, to: bool| button(theme::btn_small(label)).padding([3, 8]).on_press(Msg::AsCurve(to)).style(theme::option(on));
+            col = col.push(section(tr("Zeichnen"), row![choice(curve, tr("als Kurve"), true), choice(!curve, tr("als Schieberegler"), false)].spacing(5).into()));
         }
         if s.slider.is_some() {
             let field = |k: usize, label: &'static str| {
@@ -1779,23 +1861,40 @@ struct Preview<'a> {
     size: Size,
 }
 
-/// The object being dragged in the preview.
+/// How page points map into the preview's inside of `size` (its bounds less 1 px each side):
+/// page point (x, y) at o + (x, y) · k (None: nothing to show). The ink, scaled to fit.
+pub fn preview_fit(plot: &Plot, size: Size) -> Option<(Vector, f32)> {
+    let l = look(plot);
+    let r = look_bounds(plot, &l);
+    if r.width() <= 0.0 || r.height() <= 0.0 {
+        return None;
+    }
+    let pad = 15.0;
+    let k = ((size.width - 2.0 * pad) / r.width()).min((size.height - 2.0 * pad) / r.height()).max(0.01);
+    // The ink's middle in the preview's middle.
+    Some((Vector::new(size.width / 2.0 - (r.x0 + r.x1) / 2.0 * k, size.height / 2.0 - (r.y0 + r.y1) / 2.0 * k), k))
+}
+
+/// What is being dragged in the preview.
 #[derive(Default)]
-struct Dragging(Option<String>);
+enum Dragging {
+    #[default]
+    Nothing,
+    /// A point or a slider.
+    Object(String),
+    /// An end of a function's domain (0 from, 1 to).
+    End(String, u8),
+    /// An axis, stretched alone.
+    /// An axis, stretched alone; with how the preview mapped page points when it was grabbed
+    /// (the preview fits the ink again as it changes; the drag keeps to the first mapping).
+    Axis(plot::Axis, Vector, f32),
+}
 
 impl<'a> Preview<'a> {
     /// How page points map into a preview of `size`: page point (x, y) at o + (x, y) · k (None:
     /// nothing to show).
     fn fit(&self, size: Size) -> Option<(Vector, f32)> {
-        let l = look(self.plot);
-        let r = look_bounds(self.plot, &l);
-        if r.width() <= 0.0 || r.height() <= 0.0 {
-            return None;
-        }
-        let pad = 15.0;
-        let k = ((size.width - 2.0 * pad) / r.width()).min((size.height - 2.0 * pad) / r.height()).max(0.01);
-        // The ink's middle in the preview's middle.
-        Some((Vector::new(size.width / 2.0 - (r.x0 + r.x1) / 2.0 * k, size.height / 2.0 - (r.y0 + r.y1) / 2.0 * k), k))
+        preview_fit(self.plot, size)
     }
 
     /// The page point under a screen point, and the scale.
@@ -1879,42 +1978,71 @@ impl<'a> Widget<Msg, Theme, iced::Renderer> for Preview<'a> {
         let state = tree.state.downcast_mut::<Dragging>();
         match event {
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-                if let Some(p) = cursor.position_over(layout.bounds())
-                    && let Some(i) = self.object_at(inner, p)
-                {
+                let Some(p) = cursor.position_over(layout.bounds()) else { return };
+                let Some((x, y, k)) = self.page_at(inner, p) else { return };
+                // An end of a domain first (it lies on its curve), then objects, then the axes.
+                if let Some((id, side)) = self.plot.domain_end_at(x, y, 7.0 / k) {
+                    shell.publish(Msg::Pick(id.clone()));
+                    *state = Dragging::End(id, side);
+                } else if let Some(i) = self.object_at(inner, p) {
                     let id = self.plot.objs[i].id.clone();
                     shell.publish(Msg::Pick(id.clone()));
                     if draggable(self.plot, i) {
-                        state.0 = Some(id);
+                        *state = Dragging::Object(id);
                     }
-                    shell.capture_event();
+                } else if let Some(axis) = self.plot.axis_at(x, y, 6.0 / k) {
+                    shell.publish(Msg::AxisGrab(axis, if axis == plot::Axis::X { x } else { y }));
+                    *state = Dragging::Axis(axis, self.fit(inner.size()).map_or(Vector::ZERO, |f| f.0), k);
+                } else {
+                    return;
                 }
+                shell.capture_event();
             }
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
-                if let Some(id) = &state.0
-                    && let Some((x, y, _)) = self.page_at(inner, *position)
-                {
-                    shell.publish(Msg::Drag(id.clone(), x, y));
-                    shell.capture_event();
+                let Some((x, y, _)) = self.page_at(inner, *position) else { return };
+                match &*state {
+                    Dragging::Object(id) => shell.publish(Msg::Drag(id.clone(), x, y)),
+                    Dragging::End(id, side) => shell.publish(Msg::DragEnd(id.clone(), *side, x, y)),
+                    Dragging::Axis(axis, o, k) => {
+                        let (ax, ay) = ((position.x - inner.x - o.x) / k, (position.y - inner.y - o.y) / k);
+                        shell.publish(Msg::AxisTo(if *axis == plot::Axis::X { ax } else { ay }))
+                    }
+                    Dragging::Nothing => return,
                 }
+                shell.capture_event();
             }
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-                if state.0.take().is_some() {
-                    shell.capture_event();
+                match std::mem::take(state) {
+                    Dragging::Nothing => return,
+                    Dragging::Axis(..) => shell.publish(Msg::AxisLet),
+                    _ => {}
                 }
+                shell.capture_event();
             }
             _ => {}
         }
     }
 
     fn mouse_interaction(&self, tree: &widget::Tree, layout: Layout<'_>, cursor: mouse::Cursor, _viewport: &Rectangle, _renderer: &iced::Renderer) -> mouse::Interaction {
-        if tree.state.downcast_ref::<Dragging>().0.is_some() {
-            return mouse::Interaction::Grabbing;
+        let axis_look = |a: plot::Axis| if a == plot::Axis::X { mouse::Interaction::ResizingHorizontally } else { mouse::Interaction::ResizingVertically };
+        match tree.state.downcast_ref::<Dragging>() {
+            Dragging::Nothing => {}
+            Dragging::Axis(a, ..) => return axis_look(*a),
+            _ => return mouse::Interaction::Grabbing,
         }
-        match cursor.position_over(layout.bounds()).and_then(|p| self.object_at(layout.bounds().shrink(1.0), p)) {
+        let inner = layout.bounds().shrink(1.0);
+        let Some(p) = cursor.position_over(layout.bounds()) else { return mouse::Interaction::None };
+        let page = self.page_at(inner, p);
+        if page.is_some_and(|(x, y, k)| self.plot.domain_end_at(x, y, 7.0 / k).is_some()) {
+            return mouse::Interaction::ResizingHorizontally;
+        }
+        match self.object_at(inner, p) {
             Some(i) if draggable(self.plot, i) => mouse::Interaction::Grab,
             Some(_) => mouse::Interaction::Pointer,
-            None => mouse::Interaction::None,
+            None => match page.and_then(|(x, y, k)| self.plot.axis_at(x, y, 6.0 / k)) {
+                Some(a) => axis_look(a),
+                None => mouse::Interaction::None,
+            },
         }
     }
 
@@ -1971,7 +2099,8 @@ mod tests {
 
     /// The algebra view's rows, as listed.
     fn rows(p: &Plot) -> Vec<String> {
-        p.objs.iter().zip(p.values()).map(|(o, v)| listing(o, &v)).collect()
+        let known: HashSet<String> = p.objs.iter().map(|o| o.name()).collect();
+        p.objs.iter().zip(p.values()).map(|(o, v)| listing(o, &v, &known)).collect()
     }
 
     #[test]
@@ -2034,7 +2163,7 @@ mod tests {
         // A function of t, a text, an angle are listed as GeoGebra lists them.
         let p = empty().add("k(t) = t^2").unwrap().add("Text(\"Hallo\")").unwrap().add("q: y = x^3").unwrap();
         assert_eq!(rows(&p), vec!["k(t) = t²", "text1 = „Hallo“", "q: y = x³"]);
-        assert_eq!(swap_x("exp(x) + x²", 't'), "exp(t) + t²");
+        assert_eq!(rows(&empty().add("k(t) = exp(t) + t^2").unwrap()), vec!["k(t) = exp(t) + t²"], "t, not x, also next to words like exp");
     }
 
     #[test]
@@ -2436,7 +2565,7 @@ mod tests {
         e.plot.objs[7].def = "k = q + 1".into();
         let known: HashSet<String> = e.plot.objs.iter().map(|o| o.name()).collect();
         let vals = e.plot.values();
-        let lines: Vec<(String, Option<String>)> = e.plot.objs.iter().zip(&vals).map(|(o, v)| (listing(o, v), row_definition(o, v, &known))).collect();
+        let lines: Vec<(String, Option<String>)> = e.plot.objs.iter().zip(&vals).map(|(o, v)| (listing(o, v, &known), row_definition(o, v, &known))).collect();
         assert_eq!(
             lines,
             vec![
@@ -2481,6 +2610,72 @@ mod tests {
         assert_eq!(e.plot, p);
         let Reply::Apply(stored) = e.update(Msg::Ok) else { panic!() };
         assert_eq!(stored.objs, p.objs);
+    }
+
+    #[test]
+    fn domains_curves_of_letters_and_fractions_in_the_panel() {
+        let mut e = Editor::new("s", empty(), paper());
+        enter(&mut e, "f(x) = x^2, 0 ≤ x ≤ 2");
+        assert_eq!(rows(&e.plot), vec!["f(x) = x², 0 ≤ x ≤ 2"]);
+        // The properties show the domain; what is typed there changes it.
+        assert_eq!(e.domain_fields, ["0".to_string(), "2".to_string()]);
+        e.update(Msg::DomainField(1, "3".into()));
+        assert_eq!(e.plot.objs[0].def, "f(x) = x^2, 0 ≤ x ≤ 3");
+        e.update(Msg::DomainField(0, "".into()));
+        assert_eq!(e.plot.objs[0].def, "f(x) = x^2, x ≤ 3");
+        e.update(Msg::DomainField(0, "5".into()));
+        assert!(e.domain_error.is_some(), "from after to");
+        assert_eq!(e.plot.objs[0].def, "f(x) = x^2, x ≤ 3");
+        e.update(Msg::Everywhere);
+        assert_eq!(e.plot.objs[0].def, "f(x) = x^2");
+        assert_eq!(e.domain_fields, [String::new(), String::new()]);
+        // An end dragged in the preview.
+        e.update(Msg::DomainField(1, "2".into()));
+        let id = id_of(&e, "f");
+        let (x, y) = e.plot.to_page(1.0, 1.0);
+        e.update(Msg::DragEnd(id, 1, x, y));
+        assert_eq!(e.plot.objs[0].def, "f(x) = x^2, x ≤ 1");
+        assert_eq!(e.domain_fields[1], "1");
+        // a = 3b: a curve of the letters, the axes named after them; as sliders and back.
+        enter(&mut e, "a = 3b");
+        assert_eq!(rows(&e.plot)[1], "a(b) = 3b");
+        assert_eq!((e.plot.x_name.as_str(), e.plot.y_name.as_str()), ("b", "a"));
+        e.update(Msg::AsCurve(false));
+        assert_eq!(rows(&e.plot)[1..], ["a = 3", "b = 1"]);
+        e.update(Msg::AsCurve(true));
+        assert_eq!(names(&e), ["f", "a"]);
+        // More kinds; exact fractions as small digits.
+        enter(&mut e, "r = 1 + cos θ");
+        enter(&mut e, "(cos t, sin t)");
+        enter(&mut e, "B = (1/3, 2/3)");
+        let r = rows(&e.plot);
+        assert_eq!(r[2], "c: r = 1 + cos(θ)");
+        assert_eq!(r[3], "d: (cos(t), sin(t)), 0 ≤ t ≤ 2π");
+        assert_eq!(r[4], "B = (¹⁄₃ | ²⁄₃)");
+    }
+
+    #[test]
+    fn an_axis_stretches_alone_in_the_preview() {
+        let mut e = Editor::new("s", empty().add("x^2").unwrap(), paper());
+        let p = e.plot.clone();
+        // The 2 on the x axis pulled to where the 1 was: twice as much x, the same y.
+        e.update(Msg::AxisGrab(plot::Axis::X, p.to_page(2.0, 0.0).0));
+        e.update(Msg::AxisTo(p.to_page(1.5, 0.0).0));
+        e.update(Msg::AxisTo(p.to_page(1.0, 0.0).0));
+        e.update(Msg::AxisLet);
+        assert_eq!((e.plot.x_min, e.plot.x_max, e.plot.y_min, e.plot.y_max), (-12.0, 12.0, -4.0, 4.0));
+        assert_eq!(e.ranges.iter().map(|f| f.text.as_str()).collect::<Vec<_>>(), vec!["-12", "12", "-4", "4"]);
+        // The y axis: its 1 pulled up to where the 4 was — a quarter of the y.
+        let q = e.plot.clone();
+        e.update(Msg::AxisGrab(plot::Axis::Y, q.to_page(0.0, 1.0).1));
+        e.update(Msg::AxisTo(q.to_page(0.0, 4.0).1));
+        e.update(Msg::AxisLet);
+        assert_eq!((e.plot.x_min, e.plot.x_max, e.plot.y_min, e.plot.y_max), (-12.0, 12.0, -1.0, 1.0));
+        assert!(e.view_changed());
+        // Moving the mouse with nothing grabbed changes nothing.
+        let before = e.plot.clone();
+        e.update(Msg::AxisTo(0.0));
+        assert_eq!(e.plot, before);
     }
 
     #[test]

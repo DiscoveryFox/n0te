@@ -1403,6 +1403,47 @@ fn ansicht_zuruecksetzen_brings_the_ranges_back() {
 }
 
 #[test]
+fn an_axis_dragged_with_the_mouse_stretches_alone_and_new_kinds_show() {
+    use n0te_desktop::plots::Msg;
+    let (mut h, root, nb, sheet) = plot_page("plotaxis", n0te_core::notebook::Background::Blank, true);
+    let id = stored_plots(&root, &nb, &sheet)[0].id.clone();
+    h.message(Message::EditPlot(sheet.clone(), id));
+    for line in ["g(x) = x^2 / 3, -2 ≤ x < 1", "r = 1 + cos θ", "a = 3b", "B = (1/3, 2/3)"] {
+        h.message(Message::Plot(Msg::Input(line.into())));
+        h.message(Message::Plot(Msg::InputSubmit));
+        assert!(panel(&h).input_error.is_none(), "{line}: {:?}", panel(&h).input_error);
+    }
+    // g labelled with its formula: x²/3 written stacked on the graph.
+    let g = panel(&h).plot.objs.iter().find(|o| o.name() == "g").unwrap().id.clone();
+    h.message(Message::Plot(Msg::Pick(g)));
+    h.message(Message::Plot(Msg::Label(n0te_core::plot::LabelMode::NameValue)));
+    h.events(&[]);
+    if let Some(dir) = std::env::var_os("N0TE_UI_SHOTS") {
+        h.screenshot(std::path::Path::new(&dir).join("graph-panel.png"));
+    }
+    // The 4 on the x axis (nothing else there), grabbed in the preview and pulled to where the 2 was.
+    let before = panel(&h).plot.clone();
+    let area = h.bounds_of(n0te_desktop::plots::preview_id()).expect("the preview").shrink(1.0);
+    let (o, k) = n0te_desktop::plots::preview_fit(&before, area.size()).expect("drawn");
+    let at = |x: f64, y: f64| {
+        let (px, py) = before.to_page(x, y);
+        Point::new(area.x + o.x + px * k, area.y + o.y + py * k)
+    };
+    h.press_at(at(4.0, 0.0));
+    h.move_to(at(3.0, 0.0));
+    h.move_to(at(2.0, 0.0));
+    h.release();
+    let p = &panel(&h).plot;
+    assert!((p.x_max - 2.0 * before.x_max).abs() < 0.05 && (p.x_min - 2.0 * before.x_min).abs() < 0.05, "{} … {}", p.x_min, p.x_max);
+    assert_eq!((p.y_min, p.y_max), (before.y_min, before.y_max), "y stays");
+    if let Some(dir) = std::env::var_os("N0TE_UI_SHOTS") {
+        h.screenshot(std::path::Path::new(&dir).join("graph-panel-stretched.png"));
+    }
+    drop(h);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn the_pdf_export_has_the_plot_as_ink() {
     let (mut h, root, _nb, _sheet) = plot_page("plotpdf", n0te_core::notebook::Background::Blank, true);
     let pdf = h.app.pdf.clone().expect("pdfium (third_party/pdfium) for the PDF tests");
@@ -1461,7 +1502,7 @@ fn ok_alone_keeps_a_construction_from_the_tablet_and_what_the_panel_changes_is_s
     // Opened (every row drawn, helpers last) and OK: the same plot.
     h.message(Message::EditPlot(sheet.clone(), p.id.clone()));
     h.frame();
-    for row in ["a = 1", "f(x) = 0,5x² − 2", "T = (1 | −1,5)", "g: y = x − 2,5", "vieleck1 = 8,75", "c: (x − 0,5)² + (y + 0,14)² = 6,98", "M = (0,5 | −0,14)"] {
+    for row in ["a = 1", "f(x) = 0,5x² − 2", "T = (1 | −1,5)", "g: y = x − 2,5", "vieleck1 = 8,75", "c: (x − 0,5)² + (y + ¹⁄₇)² = 6,98", "M = (0,5 | −¹⁄₇)"] {
         assert!(h.find(row).is_some(), "{row} is listed");
     }
     assert!(h.find(n0te_desktop::theme::cased("Hilfsobjekte").as_str()).is_some());
