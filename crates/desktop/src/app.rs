@@ -422,8 +422,14 @@ pub struct App {
     last_key: PaneKey,
 }
 
-/// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
+/// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te); on Windows %APPDATA%\n0te,
+/// which the installer and uninstaller leave alone.
 pub fn default_root() -> PathBuf {
+    if cfg!(windows)
+        && let Some(appdata) = std::env::var_os("APPDATA")
+    {
+        return PathBuf::from(appdata).join("n0te");
+    }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
