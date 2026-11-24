@@ -181,11 +181,40 @@ impl Plot {
     /// The plot with a new object from a line of input (`A = (1, 2)`, `x^2`, `Schneide(f, g)`):
     /// named like in GeoGebra, coloured in turn. Several points (two intersections, three
     /// zeros) become several objects, A and B, each usable on its own. Err: what is wrong.
+    ///
+    /// Letters that name nothing yet become sliders first, like in GeoGebra (`y = m x + c`,
+    /// `b = 4 + 3a`): each at 1, from −5 to 5 — only when the input then works.
     pub fn add(&self, input: &str) -> Result<Plot, String> {
-        if let Some(split) = self.split_points(input)? {
-            return Ok(split);
+        let plain = |p: &Plot| -> Result<Plot, String> {
+            if let Some(split) = p.split_points(input)? {
+                return Ok(split);
+            }
+            p.add_one(input)
+        };
+        match plain(self) {
+            Ok(p) => Ok(p),
+            Err(e) => match self.with_sliders_for(input) {
+                // Just a letter: its slider is all there is to it.
+                Some((p, letters)) if letters.len() == 1 && letters[0] == input.trim() => Ok(p),
+                Some((p, _)) => plain(&p).map_err(|_| e),
+                None => Err(e),
+            },
         }
-        self.add_one(input)
+    }
+
+    /// The plot with a slider for each letter `input` uses that names nothing yet (None: there
+    /// is none), and those letters.
+    fn with_sliders_for(&self, input: &str) -> Option<(Plot, Vec<String>)> {
+        let known: std::collections::HashSet<String> = self.objs.iter().map(|o| o.name()).collect();
+        let letters = lang::unknown_letters(input, &known);
+        if letters.is_empty() {
+            return None;
+        }
+        let mut p = self.clone();
+        for l in &letters {
+            p = p.add_one(&format!("{l} = 1")).ok()?;
+        }
+        Some((p, letters))
     }
 
     /// Schneide/Nullstelle/Extremum/Wendepunkt with several results: one object per point
@@ -258,7 +287,18 @@ impl Plot {
     /// The plot with an object's definition changed. Without a name it keeps its old one; with
     /// a new name the objects that use it follow. Refused (Err, German) when the object or one
     /// that depends on it would be wrong afterwards.
+    /// Letters that name nothing yet become sliders, as with [`Plot::add`].
     pub fn set_def(&self, id: &str, def: &str) -> Result<Plot, String> {
+        match self.set_def_plain(id, def) {
+            Ok(p) => Ok(p),
+            Err(e) => match self.with_sliders_for(def) {
+                Some((p, _)) => p.set_def_plain(id, def).map_err(|_| e),
+                None => Err(e),
+            },
+        }
+    }
+
+    fn set_def_plain(&self, id: &str, def: &str) -> Result<Plot, String> {
         let mut p = self.clone();
         let i = p.objs.iter().position(|o| o.id == id).ok_or("Dieses Objekt gibt es nicht mehr")?;
         let old = p.objs[i].name();
@@ -624,6 +664,36 @@ mod tests {
         let renamed = q.set_def(&a, "P = Schneide(f, g, 1)").unwrap();
         assert!(renamed.objs.iter().any(|o| o.def == "h = Gerade(P, B)"), "{:?}", renamed.objs.iter().map(|o| &o.def).collect::<Vec<_>>());
         assert!(q.set_def(&a, "B = (1, 1)").is_err(), "B is taken");
+    }
+
+    #[test]
+    fn letters_that_name_nothing_become_sliders_like_in_geogebra() {
+        let defs = |p: &Plot| p.objs.iter().map(|o| o.def.clone()).collect::<Vec<_>>();
+        // b = 4 + 3a: a slider a at 1 (−5 … 5), b follows it.
+        let p = plot().add("b = 4 + 3a").unwrap();
+        assert_eq!(defs(&p), ["a = 1", "b = 4 + 3a"]);
+        let s = p.objs[0].style.slider.unwrap();
+        assert_eq!((s.min, s.max, s.step), (-5.0, 5.0, 0.1));
+        assert_eq!(p.values()[1], Ok(Val::Num(7.0)));
+        assert_eq!(p.set_slider(&p.objs[0].id, 2.0).unwrap().values()[1], Ok(Val::Num(10.0)));
+        // A line, a parabola in vertex form, a circle: every letter gets its slider, x and y none.
+        assert_eq!(defs(&plot().add("y = m x + c").unwrap()), ["m = 1", "c = 1", "f: y = m x + c"]);
+        let q = plot().add("f(x) = a(x - d)^2 + k").unwrap();
+        assert_eq!(defs(&q)[..3], ["a = 1", "d = 1", "k = 1"]);
+        assert!(q.errors().iter().all(|e| e.is_none()), "{:?}", q.errors());
+        assert_eq!(plot().add("x^2 + y^2 = r^2").unwrap().objs.len(), 2);
+        assert_eq!(defs(&plot().add("y = a_1 x").unwrap())[0], "a_1 = 1");
+        // What exists is used; a letter alone is just its slider.
+        assert_eq!(plot().add("a = 2").unwrap().add("g(x) = a x").unwrap().objs.len(), 2);
+        assert_eq!(defs(&plot().add("a").unwrap()), ["a = 1"]);
+        // A typing mistake stays a mistake (nothing is made).
+        assert!(plot().add("Gerde(A, B)").is_err());
+        assert!(plot().add("y = 2x +").is_err());
+        // Editing: f(x) = x² becomes f(x) = k x², k is made.
+        let p = plot().add("f(x) = x^2").unwrap();
+        let q = p.set_def(&p.objs[0].id, "f(x) = k x^2").unwrap();
+        assert_eq!(defs(&q), ["f(x) = k x^2", "k = 1"]);
+        assert!(q.errors().iter().all(|e| e.is_none()));
     }
 
     #[test]

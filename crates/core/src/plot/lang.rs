@@ -407,6 +407,80 @@ fn split_word(word: &str, known: &HashSet<String>, calls: bool) -> Result<Vec<St
     Ok(out)
 }
 
+/// The letters a line of input uses that name nothing yet (`y = m x + c` → m, c; `b = 4 + 3a`
+/// → a), in the order they come: GeoGebra makes sliders of them. Not x, y, t, e, π, the name
+/// being defined, function or command names, or text in quotes. A letter with an index (`a_1`)
+/// counts as one name.
+pub fn unknown_letters(src: &str, known: &HashSet<String>) -> Vec<String> {
+    let (label, rest) = split_label(src.trim());
+    let mut known = known.clone();
+    if let Some(l) = &label {
+        known.insert(l.clone());
+    }
+    let mut scan = rest;
+    if let Some(at) = top_level_eq(rest) {
+        let lhs = rest[..at].trim();
+        if let Some((name, _)) = fn_head(lhs) {
+            known.insert(name);
+            scan = &rest[at + 1..];
+        } else if is_ident(lhs) && !matches!(lhs, "x" | "y") {
+            known.insert(lhs.to_string());
+            scan = &rest[at + 1..];
+        }
+    }
+    let is_known = |w: &str, last_call: bool| {
+        known.contains(w) || FUNCS.contains(&w.to_lowercase().as_str()) || matches!(w, "x" | "y" | "t" | "pi" | "e") || (last_call && command(w).is_some())
+    };
+    let chars: Vec<char> = scan.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    let mut quoted = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            quoted = !quoted;
+        }
+        if quoted || !c.is_alphabetic() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && (chars[i].is_alphabetic() || chars[i].is_ascii_digit() || chars[i] == '_') {
+            i += 1;
+        }
+        let word = &chars[start..i];
+        let calls = matches!(chars.get(i), Some('(') | Some('['));
+        let whole: String = word.iter().collect();
+        if is_known(&whole, calls) {
+            continue;
+        }
+        // Read like the lexer does: the longest known piece first; a letter that is none starts a name.
+        let mut at = 0;
+        while at < word.len() {
+            let found = (at + 1..=word.len()).rev().find(|&end| {
+                let piece: String = word[at..end].iter().collect();
+                is_known(&piece, calls && end == word.len())
+            });
+            if let Some(end) = found {
+                at = end;
+                continue;
+            }
+            if word[at].is_ascii_digit() || word[at] == '_' {
+                at += 1;
+                continue;
+            }
+            // a_1, a_n: the index belongs to the letter.
+            let end = if word.get(at + 1) == Some(&'_') { word.len() } else { at + 1 };
+            let name: String = word[at..end].iter().collect();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+            at = end;
+        }
+    }
+    out
+}
+
 /// `src` with every use of the name `old` changed to `new` (read like the lexer reads names:
 /// `2a`, `a b`, `f'(x)`, inside commands; text in quotes stays as it is).
 pub fn rename_name(src: &str, old: &str, new: &str, known: &HashSet<String>) -> String {

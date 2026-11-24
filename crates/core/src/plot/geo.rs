@@ -2041,13 +2041,18 @@ fn pretty(n: &Node, ctx: u8) -> String {
 /// will be while typing): fractions stacked, powers raised, roots drawn, commands upright.
 /// None while it doesn't read yet. `known`: the construction's names.
 pub fn latex_input(src: &str, known: &HashSet<String>) -> Option<String> {
-    let input = lang::parse_input(src, known).ok()?;
+    // Letters that name nothing yet read as the sliders they will become.
+    let mut known = known.clone();
+    known.extend(lang::unknown_letters(src, &known));
+    let input = lang::parse_input(src, &known).ok()?;
     let body = match &input.body {
         Body::Expr(n) => tex(n, 0),
         Body::Equation(l, r) => format!("{}={}", tex(l, 0), tex(r, 0)),
     };
     Some(match (&input.name, input.param) {
         (Some(n), Some(p)) => format!("{}({p})={body}", latex_name(n)),
+        // Like GeoGebra: b = 4 + 3a, but c: x² + y² = 9.
+        (Some(n), None) if matches!(input.body, Body::Expr(_)) => format!("{}={body}", latex_name(n)),
         (Some(n), None) => format!("{}{{:}}\\;{body}", latex_name(n)),
         _ => body,
     })
@@ -2135,6 +2140,10 @@ mod tests {
         assert!(t("2x+3").unwrap().starts_with("2\\,x+3"));
         // Not readable yet (half typed): nothing.
         assert_eq!(t("f(x) = (x+"), None);
+        // Letters that will become sliders are set too.
+        assert!(t("y = m x + c").is_some_and(|s| s.contains('m') && s.contains('c')), "{:?}", t("y = m x + c"));
+        assert_eq!(t("b = 4 + 3a").as_deref(), Some("b=4+3\\,a"));
+        assert!(t("k: x^2 + y^2 = 9").unwrap().starts_with("k{:}"));
     }
 
     #[test]
