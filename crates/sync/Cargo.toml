@@ -24,3 +24,7 @@ data-encoding = "2"
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 bytes = "1"
 libc = "0.2"
+
+[build-dependencies]
+# Windows resources of the exes (icon, version info, manifest): packaging/windows/resources.rs.
+embed-resource = "3.0"

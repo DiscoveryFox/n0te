@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+<title>n0te Tablet</title>
+<rect x="4" y="4" width="184" height="184" rx="40" fill="#0B0B0C"/>
+<g transform="matrix(0.6081 0.6081 -0.6081 0.6081 99.5166 -32.0137)">
+<rect x="91" y="18" width="42" height="15" rx="3" fill="#D71921"/>
+<path d="M92 38 H132 C142 58 143 76 136 90 L112 136 L88 90 C81 76 82 58 92 38 Z" fill="#D71921"/>
+<circle cx="112" cy="78" r="7.5" fill="#0B0B0C"/>
+<rect x="110" y="84" width="4" height="50" fill="#0B0B0C"/>
+</g>
+<circle cx="28.0" cy="146.0" r="5.0" fill="#F2F2F4"/><circle cx="40.0" cy="140.4" r="5.0" fill="#F2F2F4"/><circle cx="52.0" cy="134.7" r="5.0" fill="#F2F2F4"/><circle cx="63.9" cy="129.8" r="5.0" fill="#F2F2F4"/><circle cx="75.9" cy="124.8" r="5.0" fill="#F2F2F4"/>
+</svg>
