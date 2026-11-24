@@ -181,6 +181,10 @@ pub enum Message {
     /// Touchpad gestures (Wayland): the window to listen on, its display, a gesture, the frame
     /// clock (while the page glides or a found spot fades), gliding on/off.
     WindowOpened(iced::window::Id),
+    /// n0te Tablet: a pen event (window coordinates), a tool bar action, the pen backend started.
+    Pen(crate::tablet::pen::PenEvent),
+    Tablet(crate::tablet::Msg),
+    PenAttached(bool),
     WaylandDisplay(Option<usize>),
     Gesture(Gesture),
     Glide(Instant),
@@ -420,6 +424,8 @@ pub struct App {
     pub undo_delete: Option<String>,
     /// The last pane key handed out.
     last_key: PaneKey,
+    /// n0te Tablet: tools, the stroke being written, selection, undo (unused in n0te Laptop).
+    pub tablet: crate::tablet::Tablet,
 }
 
 /// The library folder: `$XDG_DATA_HOME/n0te` (~/.local/share/n0te).
@@ -528,6 +534,7 @@ impl App {
             shelf: crate::shelf::Shelf::default(),
             undo_delete: None,
             last_key: 0,
+            tablet: Default::default(),
         };
         // Folders made here that are still empty (the settings keep them).
         app.shelf.made = app.settings.lib_folders.iter().cloned().collect();
@@ -546,7 +553,9 @@ impl App {
         // Touchpad gestures listen on the main window's Wayland display (its "opened" event
         // comes before subscriptions run).
         let gestures = iced::window::latest().and_then(|id| iced::window::run(id, crate::gestures::wayland_display)).map(Message::WaylandDisplay);
-        (app, Task::batch([task, gestures]))
+        // n0te Tablet reads the pen from the window itself (Windows).
+        let pen = if crate::mode() == crate::Mode::Tablet { iced::window::latest().and_then(|id| iced::window::run(id, crate::tablet::pen::attach)).map(Message::PenAttached) } else { Task::none() };
+        (app, Task::batch([task, gestures, pen]))
     }
 
     pub fn theme(&self) -> Theme {
@@ -575,6 +584,7 @@ impl App {
             }),
             iced::window::open_events().map(Message::WindowOpened),
             crate::gestures::subscription().map(Message::Gesture),
+            if crate::mode() == crate::Mode::Tablet { crate::tablet::pen::subscription().map(Message::Pen) } else { Subscription::none() },
             // The frame clock: a gliding page, a found spot fading.
             if self.glide.is_some() || matches!(&self.screen, Screen::Notebook(s) if s.panes.iter().any(|o| o.pages.flash.as_ref().is_some_and(|f| !f.done()))) {
                 iced::window::frames().map(Message::Glide)
@@ -807,6 +817,9 @@ impl App {
             s.retarget(active);
         }
         let more = self.background();
+        if crate::mode() == crate::Mode::Tablet {
+            crate::tablet::pen::set_ink_areas(self.ink_areas());
+        }
         if more.is_empty() { task } else { Task::batch(std::iter::once(task).chain(more)) }
     }
 
@@ -1058,7 +1071,16 @@ impl App {
                     *h = t;
                 }
             }
-            Message::WindowOpened(id) => return iced::window::run(id, crate::gestures::wayland_display).map(Message::WaylandDisplay),
+            Message::WindowOpened(id) => {
+                let gestures = iced::window::run(id, crate::gestures::wayland_display).map(Message::WaylandDisplay);
+                if crate::mode() == crate::Mode::Tablet {
+                    return Task::batch([gestures, iced::window::run(id, crate::tablet::pen::attach).map(Message::PenAttached)]);
+                }
+                return gestures;
+            }
+            Message::Pen(e) => return self.on_pen(e),
+            Message::Tablet(m) => return self.on_tablet(m),
+            Message::PenAttached(_) => {}
             Message::WaylandDisplay(display) => {
                 if let Some(d) = display {
                     crate::gestures::start(d);
@@ -2755,7 +2777,7 @@ impl App {
 
     /// Writes a sheet of notebook `nb` and makes every pane showing it read it again; the same
     /// text page open (and not typed in) in another pane shows the new text.
-    fn store_sheet(&mut self, nb: &str, sheet_id: &str, sheet: &Sheet) {
+    pub(crate) fn store_sheet(&mut self, nb: &str, sheet_id: &str, sheet: &Sheet) {
         if let Err(e) = self.lib.save_sheet(nb, sheet_id, sheet) {
             self.say(format!("Speichern fehlgeschlagen: {e}"));
         }
@@ -3552,11 +3574,18 @@ impl App {
             }
             None => Space::new().height(0).into(),
         };
+        let tablet_bar: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet { crate::tablet::toolbar::view(&self.tablet) } else { Space::new().height(0).into() };
+        let panes: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet && self.tablet.pen_menu {
+            stack![split::view(self, s), container(crate::tablet::toolbar::pen_menu(&self.tablet)).padding([4, 10])].into()
+        } else {
+            split::view(self, s)
+        };
         column![
             self.top_bar(s, o, o.pages.current_number(&o.camera)),
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
+            tablet_bar,
             live_bar,
-            split::view(self, s),
+            panes,
             container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
             self.status_bar(),
         ]
@@ -3567,9 +3596,15 @@ impl App {
     /// active one, the panel opened from the toolbar over them.
     pub(crate) fn pane_view<'a>(&'a self, o: &'a Open, active: bool) -> Element<'a, Message> {
         let current = o.pages.current_number(&o.camera);
-        let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold).on_double_click(Message::NewText).on_plot_click(Message::EditPlot);
+        let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold);
+        // n0te Tablet: the pen (and the mouse) write; laptop: a double click makes a text box.
+        let tablet = crate::mode() == crate::Mode::Tablet;
+        let page_view = if tablet { page_view.on_pen(Message::Pen) } else { page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot) };
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));
+        if tablet && let Some(overlay) = crate::tablet::overlay::view(&self.tablet, o) {
+            layers.push(overlay);
+        }
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
         if o.sidebar {

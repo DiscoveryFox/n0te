@@ -19,6 +19,7 @@ pub mod settings;
 pub mod shelf;
 pub mod sidebar;
 pub mod split;
+pub mod tablet;
 pub mod theme;
 pub mod widgets;
 
@@ -40,6 +41,12 @@ pub fn mode() -> Mode {
     *MODE.get().unwrap_or(&Mode::Laptop)
 }
 
+/// Sets the program's mode before the app starts (false if it was set already). [`run_as`]
+/// does this; tests of n0te Tablet call it first.
+pub fn set_mode(mode: Mode) -> bool {
+    MODE.set(mode).is_ok() || self::mode() == mode
+}
+
 /// The program's name as people see it: window title, menus.
 pub fn app_name() -> &'static str {
     match mode() {
@@ -57,7 +64,7 @@ pub fn run(import: Option<std::path::PathBuf>) -> iced::Result {
 
 /// Runs the app as `mode` (see [`Mode`]).
 pub fn run_as(mode: Mode, import: Option<std::path::PathBuf>) -> iced::Result {
-    let _ = MODE.set(mode);
+    set_mode(mode);
     let root = app::default_root();
     let mut app = iced::application(move || App::boot_with(root.clone(), import.clone()), App::update, App::view)
         .title(App::title)

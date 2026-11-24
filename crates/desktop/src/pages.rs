@@ -751,6 +751,11 @@ impl Pages {
         c
     }
 
+    /// The node of the group title at page point `p`.
+    pub fn header_node_at(&self, p: Point) -> Option<String> {
+        self.header_at(p).map(|h| h.node.clone())
+    }
+
     fn header_at(&self, p: Point) -> Option<&Header> {
         self.headers.iter().find(|h| h.rect.contains(p.x, p.y))
     }
@@ -832,16 +837,26 @@ pub struct PageView<'a, Message> {
     on_fold: Box<dyn Fn(String) -> Message + 'a>,
     on_double: Option<Box<dyn Fn(String, f32, f32) -> Message + 'a>>,
     on_plot: Option<Box<dyn Fn(String, String) -> Message + 'a>>,
+    /// n0te Tablet: the mouse draws like a pen (these events), fingers pan and zoom.
+    on_pen: Option<Box<dyn Fn(crate::tablet::pen::PenEvent) -> Message + 'a>>,
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None }
 }
 
 impl<'a, Message> PageView<'a, Message> {
     /// A double click on a page: (sheet id, x, y in the sheet's points) — a new text box there.
     pub fn on_double_click(mut self, f: impl Fn(String, f32, f32) -> Message + 'a) -> Self {
         self.on_double = Some(Box::new(f));
+        self
+    }
+
+    /// n0te Tablet: a left drag writes (sent as pen events in window coordinates, pressure
+    /// 0.5) instead of panning; the middle button and the wheel still move the view; one finger
+    /// pans and two pinch (both ignored while a pen is near the screen: a resting palm).
+    pub fn on_pen(mut self, f: impl Fn(crate::tablet::pen::PenEvent) -> Message + 'a) -> Self {
+        self.on_pen = Some(Box::new(f));
         self
     }
 
@@ -863,6 +878,14 @@ struct State {
     /// of events before the app applies the camera, so each event builds on what we already
     /// published — for the same notebook only.
     pending: Option<(u64, Camera, Camera)>,
+    /// n0te Tablet: the mouse is writing (left button held), since this instant.
+    mouse_pen: Option<std::time::Instant>,
+    /// Fingers on the view (id → position), for panning and pinching.
+    fingers: Vec<(u64, Point)>,
+}
+
+fn mouse_sample(p: Point, since: std::time::Instant) -> crate::tablet::pen::Sample {
+    crate::tablet::pen::Sample { x: p.x, y: p.y, pressure: 0.5, tilt: (0.0, 0.0), t_ms: since.elapsed().as_millis() as u32 }
 }
 
 /// Pixels per wheel "line".
@@ -910,6 +933,83 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             state.pending = Some((self.pages.id, self.camera, next));
             shell.publish((self.on_camera)(next));
             return;
+        }
+        if let Some(on_pen) = &self.on_pen {
+            use crate::tablet::pen::{PenEvent, Phase};
+            let ev = |phase, p: Point, since| PenEvent { phase, samples: vec![mouse_sample(p, since)], eraser: false, barrel: false, real: false };
+            match event {
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                    if let Some(p) = cursor.position_over(bounds) {
+                        let now = std::time::Instant::now();
+                        state.mouse_pen = Some(now);
+                        shell.publish(on_pen(ev(Phase::Down, p, now)));
+                        shell.capture_event();
+                    }
+                    return;
+                }
+                Event::Mouse(mouse::Event::CursorMoved { position }) if state.mouse_pen.is_some() => {
+                    shell.publish(on_pen(ev(Phase::Move, *position, state.mouse_pen.expect("mouse pen"))));
+                    shell.capture_event();
+                    return;
+                }
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+                    if let Some(since) = state.mouse_pen.take() {
+                        let p = cursor.position().unwrap_or(Point::ORIGIN);
+                        shell.publish(on_pen(ev(Phase::Up, p, since)));
+                        shell.capture_event();
+                    }
+                    return;
+                }
+                Event::Touch(t) => {
+                    use iced::touch;
+                    // A palm resting while the pen writes: ignore it.
+                    if crate::tablet::pen::in_range() {
+                        state.fingers.clear();
+                        return;
+                    }
+                    let before: Vec<Point> = state.fingers.iter().map(|f| f.1).collect();
+                    match *t {
+                        touch::Event::FingerPressed { id, position } => {
+                            if bounds.contains(position) && state.fingers.len() < 2 {
+                                state.fingers.push((id.0, position));
+                                shell.capture_event();
+                            }
+                            return;
+                        }
+                        touch::Event::FingerMoved { id, position } => {
+                            let Some(f) = state.fingers.iter_mut().find(|f| f.0 == id.0) else { return };
+                            f.1 = position;
+                        }
+                        touch::Event::FingerLifted { id, .. } | touch::Event::FingerLost { id, .. } => {
+                            state.fingers.retain(|f| f.0 != id.0);
+                            return;
+                        }
+                    }
+                    let after: Vec<Point> = state.fingers.iter().map(|f| f.1).collect();
+                    let next = match (before.as_slice(), after.as_slice()) {
+                        ([a], [b]) => Some(Camera { x: cam.x - (b.x - a.x) / cam.zoom, y: cam.y - (b.y - a.y) / cam.zoom, ..cam }),
+                        ([a0, a1], [b0, b1]) => {
+                            let (ca, cb) = (Point::new((a0.x + a1.x) / 2.0, (a0.y + a1.y) / 2.0), Point::new((b0.x + b1.x) / 2.0, (b0.y + b1.y) / 2.0));
+                            let (da, db) = (a0.distance(*a1).max(1.0), b0.distance(*b1).max(1.0));
+                            let zoom = (cam.zoom * db / da).clamp(MIN_ZOOM, MAX_ZOOM);
+                            // The page point under the old centre stays under the new one.
+                            let anchor = cam.to_page(bounds, ca);
+                            Some(Camera { x: anchor.x - (cb.x - bounds.x) / zoom, y: anchor.y - (cb.y - bounds.y) / zoom, zoom, ..cam })
+                        }
+                        _ => None,
+                    };
+                    if let Some(c) = next {
+                        let c = self.pages.clamp(c);
+                        if c != cam {
+                            state.pending = Some((self.pages.id, self.camera, c));
+                            shell.publish((self.on_camera)(c));
+                        }
+                        shell.capture_event();
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         let mut fold = None;
         let next = match event {
