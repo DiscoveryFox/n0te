@@ -4443,9 +4443,13 @@ class NotebookView(context: Context) : View(context) {
                     if (b.isEmpty) b.set(r) else b.union(r)
                 }
             }
+            // A page full of handwriting is thousands of outline edges: tested on the lasso's grid,
+            // strokes beside its box not at all.
+            val mask = LassoMask(lp)
+            val box = RectF(area).apply { offset(-p.rect.left, -p.rect.top) }
             for (s in st.strokes) {
                 val n = s.outline.size / 2
-                if (n == 0) continue
+                if (n == 0 || !RectF.intersects(s.bounds, box)) continue
                 // Half of it inside, measured along its length (not by its points: a line drawn
                 // as a shape has most of them packed at its round ends).
                 var inLen = 0f; var allLen = 0f
@@ -4454,9 +4458,9 @@ class NotebookView(context: Context) : View(context) {
                     val x0 = s.outline[2 * i]; val y0 = s.outline[2 * i + 1]; val x1 = s.outline[2 * j]; val y1 = s.outline[2 * j + 1]
                     val l = hypot(x1 - x0, y1 - y0)
                     allLen += l
-                    if (pointInPolygon((x0 + x1) / 2, (y0 + y1) / 2, lp)) inLen += l
+                    if (mask.contains((x0 + x1) / 2, (y0 + y1) / 2)) inLen += l
                 }
-                val inside = if (allLen > 0.5f) inLen >= allLen * 0.5f else pointInPolygon(s.outline[0], s.outline[1], lp)
+                val inside = if (allLen > 0.5f) inLen >= allLen * 0.5f else mask.contains(s.outline[0], s.outline[1])
                 if (inside) { ids += s.id; if (b.isEmpty) b.set(s.bounds) else b.union(s.bounds) }
             }
             if (ids.isNotEmpty()) parts += Selection(p.sheetId, ids, b)
