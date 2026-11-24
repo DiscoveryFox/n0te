@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Builds libn0te_ffi.so for the tablet/phone (arm64) and generates the Kotlin bindings.
-# Output: app-android/n0te/build/rust/{jniLibs/arm64-v8a/{libn0te_ffi.so,libpdfium.so},kotlin/...}
+# Output: n0te/android/build/rust/{jniLibs/arm64-v8a/{libn0te_ffi.so,libpdfium.so},kotlin/...}
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
-repo="$(cd "$here/.." && pwd)"
 cargo="${CARGO:-$HOME/.cargo/bin/cargo}"
 ndk="${ANDROID_NDK_HOME:-$HOME/Android/Sdk/ndk/27.2.12479018}"
 tc="$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin"
@@ -15,7 +14,7 @@ abis="${N0TE_ABIS:-arm64-v8a}"
 cd "$here"
 flag=(--release); dir=release
 [[ "$profile" == debug ]] && { flag=(); dir=debug; }
-out="$repo/app-android/n0te/build/rust"
+out="$here/android/build/rust"
 rm -rf "$out/kotlin" "$out/jniLibs"
 mkdir -p "$out/kotlin"
 lib_for_bindings=""

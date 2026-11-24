@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- n0bridge (same signing key) takes images for the laptop clipboard. -->
+    <uses-permission android:name="dev.n0bridge.app.permission.N0TE" />
+
+    <queries>
+        <package android:name="dev.n0bridge.app" />
+    </queries>
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Updates from GitHub releases (installed only after a tap and Android's confirmation). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <application
+        android:name=".N0teApp"
+        android:label="n0te"
+        android:icon="@android:drawable/ic_menu_edit"
+        android:theme="@style/N0te"
+        android:allowBackup="false">
+        <activity
+            android:name=".LibraryActivity"
+            android:exported="true"
+            android:launchMode="singleTop">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Invite links (n0te://invite/…): the join dialog with the link filled in. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="n0te" android:host="invite" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".NotebookActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustNothing"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|density|smallestScreenSize" />
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+        <receiver
+            android:name=".UpdateReceiver"
+            android:exported="false" />
+        <!-- "Teilen → n0te": pictures and PDFs into a notebook. -->
+        <activity
+            android:name=".ShareActivity"
+            android:exported="true"
+            android:label="n0te">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/pdf" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".MainActivity"
+            android:exported="false" />
+        <activity
+            android:name=".InkSpikeActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density" />
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.files"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

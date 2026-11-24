@@ -20,7 +20,7 @@ SDK="${ANDROID_HOME:-$HOME/Android/Sdk}"
 [[ -x "$SDK/platform-tools/adb" ]] || SDK="$HOME/Android/Sdk"
 ADB="$SDK/platform-tools/adb"
 OUT="${N0TE_EMU_OUT:-${TMPDIR:-/tmp}/n0te-emu}"
-APK="$(cd "$(dirname "$0")/../.." && pwd)/app-android/n0te/build/outputs/apk/release/n0te-emu.apk"
+APK="$(cd "$(dirname "$0")/.." && pwd)/android/build/outputs/apk/release/n0te-emu.apk"
 mkdir -p "$OUT"
 ui() { "$ADB" shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; "$ADB" shell cat /sdcard/ui.xml; }
 case "${1:-}" in

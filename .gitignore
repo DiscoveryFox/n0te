@@ -1,2 +1,6 @@
 /target
 /third_party/pdfium/
+/android/build/
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties

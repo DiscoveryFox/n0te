@@ -12,9 +12,10 @@ Plan and decisions: `~/.claude/plans/n0te-notes-app.md`.
 | `crates/ffi` | `n0te-ffi`: UniFFI bindings of the core for Android (Kotlin). Hot paths pass packed little-endian f32 bytes. PDF: `PdfService` (worker + `TileSink` callback), `NotebookHandle.importPdf/exportPdf`. |
 | `crates/sync` | `n0te-sync`: sync engine over iroh (own devices after pairing, guests with signed invite links, live presence/strokes, history checkpoints with thinning and restore-as-copy) and the `n0te-sync` service/CLI (`make n0te-sync`, systemd user unit in `packaging/`). FFI: `crates/ffi/src/sync.rs` (`SyncEngine`, `SyncListener`). Every library write is merge-on-save under a per-notebook lock; the engine uses its own Loro peer id (`device.sync`). |
 | `crates/uniffi-bindgen` | The bindgen CLI (`cargo run -p uniffi-bindgen -- generate …`). |
-| `scripts/build-android.sh` | Builds `libn0te_ffi.so` for arm64, copies the pinned arm64 `libpdfium.so` next to it and generates the Kotlin bindings into `app-android/n0te/build/rust/`. Run by Gradle before `:n0te` builds. |
+| `scripts/build-android.sh` | Builds `libn0te_ffi.so` for arm64, copies the pinned arm64 `libpdfium.so` next to it and generates the Kotlin bindings into `android/build/rust/`. Run by Gradle before the Android app builds. |
 | `scripts/fetch-pdfium.sh` | Downloads the pinned, hash-checked prebuilt pdfium for linux-x64 and android-arm64 into `third_party/pdfium/` (gitignored). Needed by the n0te-pdf tests and the Android build. |
-| `../app-android/n0te` | The Android app (package `dev.n0bridge.n0te`). |
+| `android/` | The Android app (package `dev.n0bridge.n0te`): `:n0te` in n0bridge's `app-android` build, or on its own (`cd android && gradle assembleRelease`). |
+| `scripts/wincheck.sh` | Type-checks the workspace for Windows on Linux (`cargo check` with stub C headers, nothing linked). |
 
 ## Build and test
 
