@@ -11,6 +11,19 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.33.0", "25. Nov. 2026", "Graphen mit Grenzen, schnelle Auswahl", listOf(
+            "Definitionsbereiche wie in der Schule: f(x) = x², 0 ≤ x ≤ 2 (auch „für …“ oder in Klammern); die Enden als Punkt oder Kreis, im Graphen ziehbar, in den Einstellungen „von/bis“",
+            "Achsen einzeln strecken: an der x- oder y-Achse ziehen ändert nur diese Achse, z. B. y in Hunderterschritten und x in Einern",
+            "Mehr Graphen: x² + y² = 4, x·y = 1, (cos t, sin t), r = 1 + cos θ; a = 3b wird als Kurve gezeichnet (Schalter „als Kurve / als Schieberegler“)",
+            "Handschrift neben einem Graphen kommt mit „In den Graphen“ hinein",
+            "Geteilt durch ist überall ein Bruch: in der Liste, in der Vorschau beim Tippen und in den Beschriftungen; Werte wie ⅓ stehen als Bruch statt 0,33",
+            "Beim Tippen im Graph-Editor springt die Ansicht nicht mehr zum Graphen",
+            "Eine gerade Linie halten wählt nur die Linie, auch direkt neben Schrift; an den Enden länger oder kürzer ziehen, der Winkel bleibt – deutlich zur Seite gezogen dreht sie sich",
+            "PDFs mit n0te öffnen („Öffnen mit“): als neues Notizbuch oder in ein Notizbuch einfügen",
+            "PDF-Export: Seitenblätter direkt nach ihrer Seite oder alle am Ende",
+            "„An den Laptop“ schickt auch große Auswahlen ganz, nichts wird mehr abgeschnitten",
+            "Große Auswahlen sind schnell: Lasso über eine volle Seite, Verschieben, Ablegen und Einfügen von tausenden Strichen",
+        )),
         Entry("0.32.1", "24. Nov. 2026", "Updates von selbst", listOf(
             "Updates kommen jetzt von selbst aus n0tes GitHub-Repo (DiscoveryFox/n0te), ohne etwas einzustellen",
             "In den Einstellungen unter Updates lässt sich ein anderes Repo eintragen; ein leeres Feld schaltet Updates ab",

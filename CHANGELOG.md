@@ -6,6 +6,38 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [0.33.0] - 2026-11-25
+
+### Added
+
+- Graphs: domains as at school: `f(x) = x², 0 ≤ x ≤ 2`, `… für 0 < x < 2`, `x² (x > 0)`; the
+  ends show as a dot (included) or a ring (not included), can be dragged on the graph and set
+  under "Definitionsbereich von / bis".
+- Graphs: stretch one axis on its own: drag the x or y axis to change only that axis (for
+  example y in hundreds and x in ones); on squared paper each axis snaps to its own units.
+- Graphs: implicit curves (`x² + y² = 4`, `x·y = 1`), parametric curves (`(cos t, sin t)`,
+  `Kurve(…)`), polar curves (`r = 1 + cos θ`) and functions of other letters (`a(b) = 3b`).
+- Graphs: an equation of two letters that name nothing yet (`a = 3b`) is drawn as a curve; a
+  switch in its row turns it into sliders instead.
+- Graphs: handwriting next to a graph goes into it: select it and tap "In den Graphen".
+- Android: open PDFs with n0te from other apps ("Open with"): as a new notebook named after the
+  file, or inserted into a notebook after the page it was last open at.
+- PDF export (tablet and laptop): side pages right after their page or all at the end.
+
+### Changed
+
+- Graphs: division always shows as a fraction (rows, the preview while typing, labels on the
+  graph), and exact values like ⅓ as fractions instead of 0.33.
+- Holding a straight line selects only that line, even right next to writing; its end grips
+  change the length and keep the angle, a clear pull sideways turns it (45° and 15° steps).
+- Big selections are much faster: a lasso over a full page, moving, putting down and pasting
+  thousands of strokes; dragging a selection stays smooth.
+
+### Fixed
+
+- "An den Laptop" cut off the end of big selections (several pages, wide boards).
+- Typing in the graph editor made the view jump to the graph.
+
 ## [0.32.1] - 2026-11-24
 
 ### Added
