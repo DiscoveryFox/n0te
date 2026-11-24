@@ -356,6 +356,9 @@ class NotebookView(context: Context) : View(context) {
     private var endWhich = 0
     private var endX = 0f
     private var endY = 0f
+    /** The line's end pulled sideways: it turns (else only its length changes); the angle step it snapped to. */
+    private var endTurning = false
+    private var endSnapDeg: Int? = null
     private var selDx = 0f
     private var selDy = 0f
     private var selScale = 1f
@@ -863,7 +866,11 @@ class NotebookView(context: Context) : View(context) {
         val r = 12f * density / scale
         // Ink lies on top: a stroke under the finger first (its whole word), else the box there.
         val s = st.strokes.lastOrNull { it.id !in st.hidden && RectF(it.bounds).apply { inset(-r, -r) }.contains(tx, ty) && polygonNear(it.outline, tx, ty, r) }
-        if (s != null) {
+        if (s != null && LineGrip.straight(s.ends, LineGrip.HOLD_MIN)) {
+            // A straight line on its own (even right by the writing): its ends get the grips
+            // that make it longer or shorter.
+            selectStrokes(p.sheetId, listOf(s))
+        } else if (s != null) {
             val boxes = st.strokes.filter { it.id !in st.hidden && it.kind != 2 }.map { InkLines.Box(it.id, it.bounds.left, it.bounds.top, it.bounds.right, it.bounds.bottom) }
             val ids = InkLines.word(boxes, s.id).toSet()
             selectStrokes(p.sheetId, st.strokes.filter { it.id in ids }.ifEmpty { listOf(s) })
@@ -2178,7 +2185,7 @@ class NotebookView(context: Context) : View(context) {
             val len = st?.strokes?.firstOrNull { it.id == sel.ids.first() }?.ends?.getOrNull(8)
             m.strokeEnds(sel.sheetId, sel.ids.first()) { e ->
                 val chord = e?.let { hypot(it[2] - it[0], it[3] - it[1]) } ?: 0f
-                if (selection === sel && e != null && chord > 4f && (len == null || chord >= len * 0.92f)) { selEnds = e; invalidate() }
+                if (selection === sel && e != null && LineGrip.straight(chord, len)) { selEnds = e; invalidate() }
             }
         }
         if (sel.ids.size != 1) selEnds = null
@@ -3106,17 +3113,17 @@ class NotebookView(context: Context) : View(context) {
                 val sel = selection ?: return
                 val p = placedFor(sel.sheetId) ?: return
                 val e = selEnds ?: return
-                var nx = wx - p.rect.left; var ny = wy - p.rect.top
-                // Close to a multiple of 15°: snaps (straight, square, 45°).
+                // Along the line only its length changes; pulled clearly sideways it turns,
+                // snapping like a held line.
                 val ax = if (endWhich == 0) e[2] else e[0]; val ay = if (endWhich == 0) e[3] else e[1]
-                val len = hypot(nx - ax, ny - ay)
-                val ang = Math.toDegrees(kotlin.math.atan2((ny - ay).toDouble(), (nx - ax).toDouble()))
-                val snapped = Math.round(ang / 15.0) * 15.0
-                if (abs(ang - snapped) < 3.0) {
-                    nx = ax + len * kotlin.math.cos(Math.toRadians(snapped)).toFloat()
-                    ny = ay + len * kotlin.math.sin(Math.toRadians(snapped)).toFloat()
+                val ox = (if (endWhich == 0) e[0] else e[2]) - ax; val oy = (if (endWhich == 0) e[1] else e[3]) - ay
+                val d = LineGrip.drag(ox, oy, wx - p.rect.left - ax, wy - p.rect.top - ay, endTurning, END_TURN_DP * density / scale)
+                endTurning = d.turning
+                if (d.snapDeg != endSnapDeg) {
+                    if (d.snapDeg != null) performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                    endSnapDeg = d.snapDeg
                 }
-                endX = nx; endY = ny
+                endX = ax + d.x; endY = ay + d.y
                 if (!batch) invalidate()
             }
             Action.GRIP_SEL -> {
@@ -4134,8 +4141,7 @@ class NotebookView(context: Context) : View(context) {
         val len = hypot(dx, dy)
         if (len < 3f / aScale) return
         val deg = Math.toDegrees(kotlin.math.atan2(dy, dx).toDouble())
-        val s45 = Math.round(deg / 45.0) * 45.0; val s15 = Math.round(deg / 15.0) * 15.0
-        val snap = when { lineFree -> null; abs(deg - s45) < 6.0 -> s45; abs(deg - s15) < 3.0 -> s15; else -> null }
+        val snap = if (lineFree) null else LineGrip.snap(deg)
         if (snap != null) { dx = (len * kotlin.math.cos(Math.toRadians(snap))).toFloat(); dy = (len * kotlin.math.sin(Math.toRadians(snap))).toFloat() }
         val step = snap?.let { Math.round(it).toInt() }
         if (step != lineSnapDeg) {
@@ -4467,7 +4473,7 @@ class NotebookView(context: Context) : View(context) {
         if (!sel.multi) selEnds?.let { e ->
             for (i in 0..1) {
                 val sx = (p.rect.left + e[2 * i]) * scale + tx; val sy = (p.rect.top + e[2 * i + 1]) * scale + ty
-                if (hypot(x - sx, y - sy) < 22f * density) { endWhich = i; endX = e[2 * i]; endY = e[2 * i + 1]; return Action.END_SEL }
+                if (hypot(x - sx, y - sy) < 22f * density) { endWhich = i; endX = e[2 * i]; endY = e[2 * i + 1]; endTurning = false; endSnapDeg = null; return Action.END_SEL }
             }
         }
         val b = selectionRectWorld(sel)
@@ -4587,6 +4593,8 @@ class NotebookView(context: Context) : View(context) {
         const val HANDLE_PX = 9f
         const val MARGIN_PT = 40f
         const val HANDLE_R = 15f
+        /** A line's end dragged this far (dp) across the line turns it (closer, only its length changes). */
+        const val END_TURN_DP = 28f
         const val KIND_PENCIL = 1
         const val LAYOUT_ANIM_MS = 300f
         /** The magnifier strip's height (share of the view) and its "move on" part (share of its width). */
