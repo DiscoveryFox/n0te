@@ -36,6 +36,10 @@ pub enum Tool {
     Marker,
     Eraser,
     Lasso,
+    /// Tap: a new text box there, or edit the one tapped.
+    Text,
+    /// A red point the others see (live session, guests).
+    Laser,
 }
 
 /// How the eraser erases.
@@ -62,6 +66,10 @@ pub enum Msg {
     PenMenu(bool),
     DeleteSelection,
     ClearSelection,
+    Copy,
+    Cut,
+    /// Paste what was copied in the middle of the view.
+    Paste,
 }
 
 /// A stroke being written.
@@ -93,6 +101,22 @@ struct Erasing {
     path: Vec<(f32, f32, f32)>,
     /// Strokes touched so far (stroke mode).
     hit: Vec<String>,
+}
+
+/// The selection being moved (or scaled from its bottom-right corner).
+struct Moving {
+    pane: PaneKey,
+    sheet: String,
+    origin: (f32, f32),
+    /// Where the pen went down (sheet points).
+    start: (f32, f32),
+    scale_mode: bool,
+    /// The selected strokes as they were.
+    strokes: Vec<(String, Brush, Vec<InkPoint>)>,
+    bounds: n0te_core::ink::Rect,
+    dx: f32,
+    dy: f32,
+    scale: f32,
 }
 
 /// A lasso being drawn.
@@ -131,9 +155,16 @@ pub struct Tablet {
     pub selection: Option<Selection>,
     /// The lasso's outline while it is drawn (page coordinates), for the view.
     pub lasso_outline: Option<(PaneKey, Vec<Point>)>,
+    /// The laser point (pane, page point) while the laser tool touches.
+    pub laser: Option<(PaneKey, Point)>,
     drawing: Option<Drawing>,
     erasing: Option<Erasing>,
     lassoing: Option<Lassoing>,
+    moving: Option<Moving>,
+    /// Where and when the pen went down (window point, ms): a short touch without moving is a tap.
+    down: Option<(Point, u32, u32)>,
+    /// Copied strokes, relative to their top-left corner.
+    clip: Vec<(Brush, Vec<InkPoint>)>,
     /// Sheets kept open so their undo history lives on: (notebook, sheet) → sheet.
     sheets: HashMap<(String, String), Sheet>,
     /// Our edits, oldest first (undo goes back through them across pages); and what was undone.
@@ -158,9 +189,13 @@ impl Default for Tablet {
             pen_menu: false,
             selection: None,
             lasso_outline: None,
+            laser: None,
             drawing: None,
             erasing: None,
             lassoing: None,
+            moving: None,
+            down: None,
+            clip: Vec::new(),
             sheets: HashMap::new(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -171,6 +206,83 @@ impl Default for Tablet {
 }
 
 impl Tablet {
+    /// Where the tool choice is kept: tablet.conf next to the app's settings.
+    fn conf_path() -> std::path::PathBuf {
+        crate::settings::path().with_file_name("tablet.conf")
+    }
+
+    /// The tools as last left (pen type, palette, colour, width, the widths, eraser, fountain pen).
+    pub fn load() -> Tablet {
+        let mut t = Tablet::default();
+        let Ok(text) = std::fs::read_to_string(Self::conf_path()) else { return t };
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let v = v.trim();
+            let num = |d: f32| v.parse::<f32>().unwrap_or(d);
+            match k.trim() {
+                "pen" => t.pen = PenType::from_key(v).unwrap_or(t.pen),
+                "tool" => {
+                    t.tool = match v {
+                        "marker" => Tool::Marker,
+                        "eraser" => Tool::Eraser,
+                        "lasso" => Tool::Lasso,
+                        "text" => Tool::Text,
+                        _ => Tool::Pen,
+                    }
+                }
+                "palette" => t.palette = v.parse().unwrap_or(0) % pens::PALETTES.len(),
+                "color" => t.color = v.parse().unwrap_or(0) % 6,
+                "width" => t.width = v.parse().unwrap_or(1) % 4,
+                "widths" => {
+                    for (i, w) in v.split(',').filter_map(|w| w.trim().parse::<f32>().ok()).take(4).enumerate() {
+                        t.widths[i] = w.clamp(pens::MIN_WIDTH, pens::MAX_WIDTH);
+                    }
+                }
+                "eraser" => t.eraser_mode = if v == "area" { EraserMode::Area } else { EraserMode::Stroke },
+                "eraser_size" => t.eraser_size = num(t.eraser_size).clamp(3.0, 60.0),
+                "fp_sensitivity" => t.fountain.sensitivity = num(t.fountain.sensitivity).clamp(0.0, 1.0),
+                "fp_speed" => t.fountain.speed = num(t.fountain.speed).clamp(0.0, 1.0),
+                "fp_nib" => t.fountain.nib = pens::Nib::from_key(v),
+                "fp_taper" => t.fountain.taper = v != "0",
+                "pencil_opacity" => t.pencil_opacity = num(t.pencil_opacity).clamp(0.15, 1.0),
+                _ => {}
+            }
+        }
+        t
+    }
+
+    /// Writes the tool choice (n0te Tablet only; tests never do).
+    pub fn save(&self) {
+        let tool = match self.tool {
+            Tool::Marker => "marker",
+            Tool::Eraser => "eraser",
+            Tool::Lasso => "lasso",
+            Tool::Text => "text",
+            Tool::Pen | Tool::Laser => "pen",
+        };
+        let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
+        let f = &self.fountain;
+        let text = format!(
+            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\n",
+            self.pen.key(),
+            self.palette,
+            self.color,
+            self.width,
+            if self.eraser_mode == EraserMode::Area { "area" } else { "stroke" },
+            self.eraser_size,
+            f.sensitivity,
+            f.speed,
+            f.nib.key(),
+            u8::from(f.taper),
+            self.pencil_opacity,
+        );
+        let path = Self::conf_path();
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(path, text);
+    }
+
     /// The colour in use (0xAARRGGBB).
     pub fn ink(&self) -> u32 {
         pens::PALETTES[self.palette % pens::PALETTES.len()][self.color % 6]
@@ -185,6 +297,11 @@ impl Tablet {
         }
     }
 
+    /// Whether something was copied (Einfügen shows).
+    pub fn clip_is_empty(&self) -> bool {
+        self.clip.is_empty()
+    }
+
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
@@ -193,7 +310,7 @@ impl Tablet {
     }
     /// Whether the pen is doing something right now (drawing, erasing, lasso).
     pub fn busy(&self) -> bool {
-        self.drawing.is_some() || self.erasing.is_some() || self.lassoing.is_some()
+        self.drawing.is_some() || self.erasing.is_some() || self.lassoing.is_some() || self.moving.is_some()
     }
 }
 
@@ -220,6 +337,15 @@ impl App {
 
     /// Toolbar actions.
     pub(crate) fn on_tablet(&mut self, m: Msg) -> Task<Message> {
+        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_));
+        let task = self.tablet_action(m);
+        if remember && self.persist_settings {
+            self.tablet.save();
+        }
+        task
+    }
+
+    fn tablet_action(&mut self, m: Msg) -> Task<Message> {
         let t = &mut self.tablet;
         match m {
             Msg::Tool(tool) => {
@@ -263,6 +389,24 @@ impl App {
                 }
             }
             Msg::ClearSelection => self.tablet.selection = None,
+            Msg::Copy | Msg::Cut => {
+                let Some(sel) = self.tablet.selection.clone() else { return Task::none() };
+                let Some(sheet) = self.tablet_sheet(&sel.notebook, &sel.sheet) else { return Task::none() };
+                let (x0, y0) = (sel.bounds.x0, sel.bounds.y0);
+                let clip: Vec<(Brush, Vec<InkPoint>)> = sel
+                    .ids
+                    .iter()
+                    .filter_map(|id| sheet.stroke(id).ok().flatten())
+                    .map(|st| (st.brush, st.points.iter().map(|p| InkPoint { x: p.x - x0, y: p.y - y0, ..*p }).collect()))
+                    .collect();
+                self.tablet.clip = clip;
+                if matches!(m, Msg::Cut) {
+                    self.tablet.selection = None;
+                    self.edit_tracked(&sel.notebook, &sel.sheet, |s| s.remove(&sel.ids));
+                }
+                self.say(format!("{} Striche kopiert", self.tablet.clip.len()));
+            }
+            Msg::Paste => self.paste_strokes(),
         }
         Task::none()
     }
@@ -272,7 +416,8 @@ impl App {
         match e.phase {
             Phase::Down => {
                 let Some(s) = e.last() else { return Task::none() };
-                self.pen_down(&e, s);
+                self.tablet.down = Some((Point::new(s.x, s.y), s.t_ms, s.t_ms));
+                return self.pen_down(&e, s);
             }
             Phase::Move => {
                 for s in &e.samples {
@@ -284,7 +429,8 @@ impl App {
                 if let Some(s) = e.last() {
                     self.pen_move(s);
                 }
-                self.pen_up();
+                let tap = self.tablet.down.take().is_some_and(|(_, t0, far)| far == t0 && e.last().is_none_or(|s| s.t_ms.wrapping_sub(t0) < 400));
+                return self.pen_up(tap);
             }
             Phase::Cancel => self.pen_cancel(),
             Phase::Hover | Phase::Leave => {}
@@ -292,27 +438,61 @@ impl App {
         Task::none()
     }
 
-    fn pen_down(&mut self, e: &PenEvent, s: pen::Sample) {
+    fn pen_down(&mut self, e: &PenEvent, s: pen::Sample) -> Task<Message> {
         self.pen_cancel();
-        let Some((key, cam, at)) = locate(self, s.x, s.y) else { return };
-        let Screen::Notebook(split) = &mut self.screen else { return };
+        let Some((key, cam, at)) = locate(self, s.x, s.y) else { return Task::none() };
+        let Screen::Notebook(split) = &mut self.screen else { return Task::none() };
         split.active = key;
-        let Some(o) = split.pane(key) else { return };
+        let Some(o) = split.pane(key) else { return Task::none() };
         let notebook = o.id.clone();
         let tool = if e.eraser || e.barrel { Tool::Eraser } else { self.tablet.tool };
         // A tap on a group title folds or unfolds the group.
         if let Some(node) = o.pages.header_node_at(at) {
             self.fold_group(key, node);
-            return;
+            return Task::none();
         }
         // The pen writes on the sheet it went down on (boards included).
-        let Some(placed) = o.pages.sheet_at(at.x, at.y).cloned() else { return };
+        let Some(placed) = o.pages.sheet_at(at.x, at.y).cloned() else { return Task::none() };
+        let text_hit = o.pages.text_at(at.x, at.y);
+        if tool == Tool::Laser {
+            self.tablet.laser = Some((key, at));
+            self.send_laser(key, &placed.sheet_id, Some((at.x - placed.rect.x0, at.y - placed.rect.y0)));
+            return Task::none();
+        }
         if self.read_only_nb(&notebook) {
             self.say("Nur lesen: ändern kann, wer dich eingeladen hat");
-            return;
+            return Task::none();
         }
         let origin = (placed.rect.x0, placed.rect.y0);
         let local = (at.x - origin.0, at.y - origin.1);
+        // On the selection: move it (from its bottom-right corner: scale it).
+        if let Some(sel) = self.tablet.selection.clone()
+            && sel.notebook == notebook
+            && sel.sheet == placed.sheet_id
+        {
+            let pad = 10.0 / cam.zoom;
+            let b = sel.bounds.inflate(pad);
+            if b.contains(local.0, local.1) {
+                let corner = (local.0 - b.x1).hypot(local.1 - b.y1) < 22.0 / cam.zoom;
+                let Some(sheet) = self.tablet_sheet(&notebook, &placed.sheet_id) else { return Task::none() };
+                let strokes = sel.ids.iter().filter_map(|id| sheet.stroke(id).ok().flatten()).map(|st| (st.id, st.brush, st.points)).collect();
+                if let Screen::Notebook(split) = &mut self.screen
+                    && let Some(o) = split.pane_mut(key)
+                {
+                    o.pages.live_erase(&placed.sheet_id, &sel.ids, &[]);
+                }
+                self.tablet.moving = Some(Moving { pane: key, sheet: placed.sheet_id.clone(), origin, start: local, scale_mode: corner, strokes, bounds: sel.bounds, dx: 0.0, dy: 0.0, scale: 1.0 });
+                return Task::none();
+            }
+            self.tablet.selection = None;
+        }
+        if tool == Tool::Text {
+            return match text_hit {
+                Some((sheet, id)) => Task::done(Message::EditText(sheet, id)),
+                None if !placed.is_board() => Task::done(Message::NewText(placed.sheet_id.clone(), local.0, local.1)),
+                None => Task::none(),
+            };
+        }
         match tool {
             Tool::Pen | Tool::Marker => {
                 let t = &mut self.tablet;
@@ -334,10 +514,64 @@ impl App {
                 self.tablet.lassoing = Some(Lassoing { pane: key, notebook, sheet: placed.sheet_id.clone(), origin, polygon: vec![local.0, local.1] });
                 self.tablet.lasso_outline = Some((key, vec![at]));
             }
+            Tool::Text | Tool::Laser => {}
         }
+        Task::none()
     }
 
     fn pen_move(&mut self, s: pen::Sample) {
+        if let Some((p0, t0, far)) = &mut self.tablet.down
+            && p0.distance(Point::new(s.x, s.y)) > 4.0
+        {
+            *far = t0.wrapping_add(1);
+        }
+        if let Some((key, _)) = self.tablet.laser {
+            let Some((k, _, at)) = locate(self, s.x, s.y) else { return };
+            if k != key {
+                return;
+            }
+            self.tablet.laser = Some((key, at));
+            let hit = pane_camera(&self.screen, key).and(match &self.screen {
+                Screen::Notebook(split) => split.pane(key).and_then(|o| o.pages.sheet_at(at.x, at.y).map(|p| (p.sheet_id.clone(), p.rect.x0, p.rect.y0))),
+                Screen::Library => None,
+            });
+            if let Some((sheet, x0, y0)) = hit {
+                self.send_laser(key, &sheet, Some((at.x - x0, at.y - y0)));
+            }
+            return;
+        }
+        if let Some(m) = &mut self.tablet.moving {
+            let Some(cam) = pane_camera(&self.screen, m.pane) else { return };
+            let at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
+            let (x, y) = (at.x - m.origin.0, at.y - m.origin.1);
+            if m.scale_mode {
+                let (w0, h0) = (m.bounds.width().max(1.0), m.bounds.height().max(1.0));
+                let k = ((x - m.bounds.x0) / w0).max((y - m.bounds.y0) / h0).max(0.1);
+                m.scale = k.clamp(0.1, 10.0);
+            } else {
+                m.dx = x - m.start.0;
+                m.dy = y - m.start.1;
+            }
+            let (sheet, pane) = (m.sheet.clone(), m.pane);
+            let (ox, oy, k, dx, dy) = (m.bounds.x0, m.bounds.y0, m.scale, m.dx, m.dy);
+            let previews: Vec<(String, LiveInk)> = m
+                .strokes
+                .iter()
+                .map(|(id, b, pts)| {
+                    let points = pts.iter().map(|p| InkPoint { x: ox + (p.x - ox) * k + dx, y: oy + (p.y - oy) * k + dy, ..*p }).collect();
+                    (format!("sel:{id}"), LiveInk { sheet_id: sheet.clone(), brush: Brush { width: b.width * k, ..*b }, points, done: None })
+                })
+                .collect();
+            if let Screen::Notebook(split) = &mut self.screen
+                && let Some(o) = split.pane_mut(pane)
+            {
+                let mut live = o.pages.live.borrow_mut();
+                for (id, l) in previews {
+                    live.insert((LOCAL.to_string(), hash_id(&id)), l);
+                }
+            }
+            return;
+        }
         if let Some(d) = &mut self.tablet.drawing {
             let Some(cam) = pane_camera(&self.screen, d.pane) else { return };
             let at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
@@ -378,7 +612,52 @@ impl App {
         }
     }
 
-    fn pen_up(&mut self) {
+    fn pen_up(&mut self, tap: bool) -> Task<Message> {
+        if let Some((key, _)) = self.tablet.laser.take() {
+            self.send_laser(key, "", None);
+            return Task::none();
+        }
+        if let Some(m) = self.tablet.moving.take() {
+            let Some(sel) = self.tablet.selection.clone() else { return Task::none() };
+            if let Screen::Notebook(split) = &mut self.screen
+                && let Some(o) = split.pane_mut(m.pane)
+            {
+                let mut live = o.pages.live.borrow_mut();
+                for (id, _, _) in &m.strokes {
+                    live.remove(&(LOCAL.to_string(), hash_id(&format!("sel:{id}"))));
+                }
+                drop(live);
+                o.pages.erasing.borrow_mut().remove(&m.sheet);
+            }
+            if m.dx != 0.0 || m.dy != 0.0 || m.scale != 1.0 {
+                let (dx, dy, k, ox, oy) = (m.dx, m.dy, m.scale, m.bounds.x0, m.bounds.y0);
+                self.edit_tracked(&sel.notebook, &sel.sheet, |s| s.transform(&sel.ids, dx, dy, k, ox, oy));
+                if let Some(sel) = &mut self.tablet.selection {
+                    let b = m.bounds;
+                    sel.bounds = n0te_core::ink::Rect::new(ox + (b.x0 - ox) * k + dx, oy + (b.y0 - oy) * k + dy, ox + (b.x1 - ox) * k + dx, oy + (b.y1 - oy) * k + dy);
+                }
+            } else if let Screen::Notebook(split) = &mut self.screen
+                && let Some(o) = split.pane_mut(m.pane)
+            {
+                o.pages.reload_sheet(&m.sheet);
+            }
+            return Task::none();
+        }
+        // A tap with the pen on a coordinate system or a text box opens it (no dot).
+        if tap && let Some(d) = &self.tablet.drawing {
+            let first = d.points.first().copied();
+            let target = match (&self.screen, first) {
+                (Screen::Notebook(split), Some(p)) => split.pane(d.pane).and_then(|o| {
+                    let (x, y) = (p.x + d.origin.0, p.y + d.origin.1);
+                    o.pages.plot_at(x, y).map(|(s, id)| Message::EditPlot(s, id)).or_else(|| o.pages.text_at(x, y).map(|(s, id)| Message::EditText(s, id)))
+                }),
+                _ => None,
+            };
+            if let Some(m) = target {
+                self.pen_cancel();
+                return Task::done(m);
+            }
+        }
         if let Some(mut d) = self.tablet.drawing.take() {
             if let Some(f) = &d.fountain {
                 f.taper_end(&mut d.points);
@@ -401,7 +680,7 @@ impl App {
             self.send_live(true);
             self.tablet.drawing = None;
             self.edit_tracked(&nb, &sheet, |s| s.add_stroke(brush, &points).map(|_| ()));
-            return;
+            return Task::none();
         }
         if let Some(er) = self.tablet.erasing.take() {
             let (nb, sheet) = (er.notebook.clone(), er.sheet.clone());
@@ -418,18 +697,19 @@ impl App {
                 }
                 _ => {}
             }
-            return;
+            return Task::none();
         }
         if let Some(l) = self.tablet.lassoing.take() {
             self.tablet.lasso_outline = None;
             if l.polygon.len() < 6 {
-                return;
+                return Task::none();
             }
-            let Some(sheet) = self.tablet_sheet(&l.notebook, &l.sheet) else { return };
+            let Some(sheet) = self.tablet_sheet(&l.notebook, &l.sheet) else { return Task::none() };
             let ids = sheet.lasso(&l.polygon);
             let bounds = ids.iter().filter_map(|id| sheet.stroke(id).ok().flatten()).fold(n0te_core::ink::Rect::EMPTY, |r, s| r.union(&s.bounds));
             self.tablet.selection = (!ids.is_empty()).then(|| Selection { notebook: l.notebook, sheet: l.sheet, ids, bounds });
         }
+        Task::none()
     }
 
     fn pen_cancel(&mut self) {
@@ -564,7 +844,57 @@ impl App {
     }
 }
 
+/// A live-ink key for a preview stroke (selection being moved).
+fn hash_id(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish() | 1 << 63
+}
+
 impl App {
+    /// Where this view looks, with the laser point (sheet points) or without it (`None`).
+    fn send_laser(&mut self, key: PaneKey, sheet: &str, at: Option<(f32, f32)>) {
+        let Some(sync) = self.sync.clone() else { return };
+        let Screen::Notebook(split) = &self.screen else { return };
+        let Some(o) = split.pane(key) else { return };
+        let (x0, y0) = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).map(|p| (p.placed.rect.x0, p.placed.rect.y0)).unwrap_or((0.0, 0.0));
+        let v = o.camera.view_rect();
+        let mut args = vec!["presence".to_string(), o.id.clone(), sheet.to_string()];
+        args.extend([v.x0 - x0, v.y0 - y0, v.width(), v.height()].iter().map(|x| format!("{x:.1}")));
+        args.push(format!("{:.3}", o.camera.zoom));
+        if let Some((x, y)) = at {
+            args.extend([format!("{x:.1}"), format!("{y:.1}")]);
+        }
+        sync.send(&args);
+    }
+
+    /// Pastes the copied strokes in the middle of the active pane's view, on the sheet there.
+    fn paste_strokes(&mut self) {
+        if self.tablet.clip.is_empty() {
+            return;
+        }
+        let Screen::Notebook(split) = &self.screen else { return };
+        let o = split.active_pane();
+        let v = o.camera.view_rect();
+        let (cx, cy) = ((v.x0 + v.x1) / 2.0, (v.y0 + v.y1) / 2.0);
+        let Some(p) = o.pages.sheet_at(cx, cy).cloned() else { return };
+        let nb = o.id.clone();
+        let w = self.tablet.clip.iter().flat_map(|(_, pts)| pts.iter().map(|p| p.x)).fold(0.0f32, f32::max);
+        let h = self.tablet.clip.iter().flat_map(|(_, pts)| pts.iter().map(|p| p.y)).fold(0.0f32, f32::max);
+        let (x0, y0) = (cx - p.rect.x0 - w / 2.0, cy - p.rect.y0 - h / 2.0);
+        let items: Vec<(Brush, Vec<InkPoint>)> = self.tablet.clip.iter().map(|(b, pts)| (*b, pts.iter().map(|q| InkPoint { x: q.x + x0, y: q.y + y0, ..*q }).collect())).collect();
+        let mut ids = Vec::new();
+        self.edit_tracked(&nb, &p.sheet_id, |s| {
+            ids = s.add_strokes(&items)?;
+            Ok(())
+        });
+        if !ids.is_empty() {
+            self.tablet.tool = Tool::Lasso;
+            self.tablet.selection = Some(Selection { notebook: nb, sheet: p.sheet_id, ids, bounds: n0te_core::ink::Rect::new(x0, y0, x0 + w, y0 + h) });
+        }
+    }
+
     fn fold_group(&mut self, key: PaneKey, node: String) {
         let _ = self.update(Message::Pane(key, Box::new(Message::Fold(node))));
     }

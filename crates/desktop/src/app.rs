@@ -548,6 +548,9 @@ impl App {
         let mut app = Self::with_settings(root, Settings::load());
         app.persist_settings = true;
         app.offline = false;
+        if crate::mode() == crate::Mode::Tablet {
+            app.tablet = crate::tablet::Tablet::load();
+        }
         app.connect_sync();
         let task = import.map(|p| Task::done(Message::Import(p))).unwrap_or_else(Task::none);
         // Touchpad gestures listen on the main window's Wayland display (its "opened" event
@@ -3057,6 +3060,23 @@ impl App {
             }
             if self.pane().is_some_and(|o| o.text_page.is_some()) {
                 return self.handle(Message::Blocks(crate::blocks::Msg::Wrap(mark)));
+            }
+        }
+        // n0te Tablet, not typing: undo/redo, copy/cut/paste and delete work on the ink.
+        if crate::mode() == crate::Mode::Tablet && self.editing.is_none() && self.pane().is_some_and(|o| o.text_page.is_none()) {
+            use crate::tablet::Msg as T;
+            let t = match (m.command(), m.shift(), key.as_ref()) {
+                (true, false, Key::Character("z")) => Some(T::Undo),
+                (true, true, Key::Character("z" | "Z")) | (true, _, Key::Character("y")) => Some(T::Redo),
+                (true, _, Key::Character("c")) if self.tablet.selection.is_some() => Some(T::Copy),
+                (true, _, Key::Character("x")) if self.tablet.selection.is_some() => Some(T::Cut),
+                (true, _, Key::Character("v")) if !self.tablet.clip_is_empty() => Some(T::Paste),
+                (false, _, Key::Named(Named::Delete | Named::Backspace)) if self.tablet.selection.is_some() => Some(T::DeleteSelection),
+                (false, _, Key::Named(Named::Escape)) if self.tablet.selection.is_some() => Some(T::ClearSelection),
+                _ => None,
+            };
+            if let Some(t) = t {
+                return self.handle(Message::Tablet(t));
             }
         }
         match (m.command(), key.as_ref()) {

@@ -599,6 +599,23 @@ impl Pages {
         page.plot_at(&self.load, x - r.x0, y - r.y0).map(|id| (page.placed.sheet_id.clone(), id))
     }
 
+    /// The text box at page point (x, y): (sheet id, box id). A box is as tall as its lines.
+    pub fn text_at(&self, x: f32, y: f32) -> Option<(String, String)> {
+        let page = self.pages.iter().find(|p| p.rect().contains(x, y))?;
+        let r = page.rect();
+        let (lx, ly) = (x - r.x0, y - r.y0);
+        let content = page.content(&self.load);
+        content
+            .texts
+            .iter()
+            .rev()
+            .find(|t| {
+                let lines = t.text.lines().count().max(1) as f32;
+                lx >= t.x - 4.0 && lx <= t.x + t.w + 4.0 && ly >= t.y - 4.0 && ly <= t.y + lines * t.size * 1.5 + 4.0
+            })
+            .map(|t| (page.placed.sheet_id.clone(), t.id.clone()))
+    }
+
     /// A sheet's coordinate systems as drawn (read from the library if not shown yet).
     pub fn plots_of(&self, sheet_id: &str) -> Vec<Plot> {
         self.pages.iter().find(|p| p.placed.sheet_id == sheet_id).map(|p| p.content(&self.load).plots.clone()).unwrap_or_default()

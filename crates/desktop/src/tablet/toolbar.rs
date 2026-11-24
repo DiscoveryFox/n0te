@@ -47,6 +47,8 @@ fn tool_label(t: Tool) -> &'static str {
         Tool::Marker => "Marker",
         Tool::Eraser => "Radierer",
         Tool::Lasso => "Lasso",
+        Tool::Text => "Text",
+        Tool::Laser => "Laser",
     }
 }
 
@@ -109,7 +111,7 @@ pub fn view(t: &Tablet) -> Element<'_, Message> {
     let pen_on = t.tool == Tool::Pen;
     let pen_msg = if pen_on { Msg::PenMenu(!t.pen_menu) } else { Msg::Tool(Tool::Pen) };
     tools = tools.push(tool_button(&format!("{} ▾", pen_label(t.pen)), pen_on, pen_msg));
-    for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso] {
+    for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso, Tool::Text, Tool::Laser] {
         tools = tools.push(tool_button(tool_label(tool), t.tool == tool, Msg::Tool(tool)));
     }
     if t.tool == Tool::Eraser {
@@ -133,9 +135,14 @@ pub fn view(t: &Tablet) -> Element<'_, Message> {
     if let Some(sel) = &t.selection {
         bar = bar.push(text(format!("{} ausgewählt", sel.ids.len())).font(theme::meta_font()).size(theme::SMALL).color(theme::p().muted));
         bar = bar.push(Space::new().width(8));
+        bar = bar.push(button(theme::btn_small("Kopieren")).padding(theme::pad()).on_press(msg(Msg::Copy)).style(theme::ghost));
+        bar = bar.push(button(theme::btn_small("Ausschneiden")).padding(theme::pad()).on_press(msg(Msg::Cut)).style(theme::ghost));
         bar = bar.push(button(theme::btn_small("Löschen")).padding(theme::pad()).on_press(msg(Msg::DeleteSelection)).style(theme::ghost));
         bar = bar.push(button(theme::btn_small("Fertig")).padding(theme::pad()).on_press(msg(Msg::ClearSelection)).style(theme::ghost));
         bar = bar.push(Space::new().width(8));
+    }
+    if !t.clip_is_empty() && t.selection.is_none() {
+        bar = bar.push(button(theme::btn_small("Einfügen")).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost));
     }
     bar = bar.push(undo).push(redo);
     container(bar).padding([4, 10]).width(Length::Fill).style(theme::chrome).into()

@@ -14,6 +14,8 @@ struct Overlay {
     lasso: Option<Vec<Point>>,
     /// The selection's frame in page coordinates.
     frame: Option<n0te_core::ink::Rect>,
+    /// The laser point (page coordinates).
+    laser: Option<Point>,
 }
 
 impl canvas::Program<Message> for Overlay {
@@ -41,6 +43,11 @@ impl canvas::Program<Message> for Overlay {
             frame.fill(&rect, Color { a: 0.06, ..accent });
             frame.stroke(&rect, Stroke::default().with_color(accent).with_width(1.5));
         }
+        if let Some(p) = self.laser {
+            let c = self.camera.to_screen(local, p.x, p.y);
+            frame.fill(&Path::circle(c, 14.0), Color { a: 0.18, ..accent });
+            frame.fill(&Path::circle(c, 6.0), accent);
+        }
         vec![frame.into_geometry()]
     }
 }
@@ -54,8 +61,9 @@ pub fn view<'a>(t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Message>> {
         let (x0, y0) = (placed.placed.rect.x0, placed.placed.rect.y0);
         Some(n0te_core::ink::Rect::new(r.x0 + x0, r.y0 + y0, r.x1 + x0, r.y1 + y0))
     });
-    if lasso.is_none() && frame.is_none() {
+    let laser = t.laser.filter(|(k, _)| *k == o.key).map(|(_, p)| p);
+    if lasso.is_none() && frame.is_none() && laser.is_none() {
         return None;
     }
-    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame }).width(Length::Fill).height(Length::Fill).into())
+    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, laser }).width(Length::Fill).height(Length::Fill).into())
 }

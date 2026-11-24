@@ -148,3 +148,46 @@ fn one_finger_pans_two_fingers_zoom() {
     let c2 = open(&h).camera;
     assert!(c2.zoom > c1.zoom * 1.5, "zoomed in: {} → {}", c1.zoom, c2.zoom);
 }
+
+#[test]
+fn a_selection_moves_copies_and_pastes() {
+    let mut h = opened("move");
+    let (nb, sheet, a) = first_page(&h, 0.3, 0.8);
+    let old: Vec<String> = strokes(&h, &nb, &sheet).into_iter().map(|s| s.id).collect();
+    drag(&mut h, a, Point::new(a.x + 60.0, a.y), 6);
+    let new_id = strokes(&h, &nb, &sheet).into_iter().find(|s| !old.contains(&s.id)).unwrap().id;
+    h.message(Message::Tablet(Msg::Tool(Tool::Lasso)));
+    let pts = [(-15.0, -15.0), (75.0, -15.0), (75.0, 15.0), (-15.0, 15.0), (-15.0, -14.0)];
+    h.press_at(Point::new(a.x + pts[0].0, a.y + pts[0].1));
+    for (x, y) in &pts[1..] {
+        h.move_to(Point::new(a.x + x, a.y + y));
+    }
+    h.release();
+    assert!(h.app.tablet.selection.is_some());
+    let x_before = strokes(&h, &nb, &sheet).into_iter().find(|s| s.id == new_id).unwrap().bounds.x0;
+    // Drag from inside the selection: it moves 50 px right (zoom 1 here: 50 points, roughly).
+    drag(&mut h, Point::new(a.x + 30.0, a.y), Point::new(a.x + 80.0, a.y), 5);
+    let zoom = open(&h).camera.zoom;
+    let x_after = strokes(&h, &nb, &sheet).into_iter().find(|s| s.id == new_id).unwrap().bounds.x0;
+    assert!(((x_after - x_before) - 50.0 / zoom).abs() < 2.0, "moved by 50 px: {x_before} → {x_after} (zoom {zoom})");
+    let n = strokes(&h, &nb, &sheet).len();
+    h.message(Message::Tablet(Msg::Copy));
+    h.message(Message::Tablet(Msg::Paste));
+    let total: usize = open(&h).pages.pages.iter().map(|p| strokes(&h, &nb, &p.placed.sheet_id).len()).sum();
+    assert!(total > n, "pasted somewhere in view");
+    // Undo the paste, the move: back to where it was.
+    h.message(Message::Tablet(Msg::Undo));
+    h.message(Message::Tablet(Msg::Undo));
+    let x_back = strokes(&h, &nb, &sheet).into_iter().find(|s| s.id == new_id).unwrap().bounds.x0;
+    assert!((x_back - x_before).abs() < 0.5, "undo moves it back: {x_back} vs {x_before}");
+}
+
+#[test]
+fn the_text_tool_makes_a_text_box_where_tapped() {
+    let mut h = opened("text");
+    let (_, _, a) = first_page(&h, 0.5, 0.5);
+    h.message(Message::Tablet(Msg::Tool(Tool::Text)));
+    h.click(a);
+    h.events(&[]);
+    assert!(h.app.editing.is_some(), "a text box is being edited");
+}
