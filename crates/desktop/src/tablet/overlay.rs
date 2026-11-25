@@ -47,6 +47,9 @@ struct Overlay {
     ghost: Option<(Rect, f32)>,
     space: Option<SpaceMarks>,
     loupe: Option<Frame>,
+    /// Mitwandern's band (pane-local px) and its glyph: "→" slides on, "↵" goes to the next line;
+    /// the line's middle (page y) if known.
+    flow: Option<(Rectangle, &'static str, Option<f32>)>,
 }
 
 fn dashed(color: Color, width: f32, on: &'static [f32]) -> Stroke<'static> {
@@ -80,6 +83,20 @@ impl canvas::Program<Message> for Overlay {
         }
         if let Some(sp) = &self.space {
             draw_space(&mut frame, sp, &at, cam.zoom);
+        }
+        if let Some((band, glyph, line)) = self.flow {
+            frame.fill(&Path::rectangle(band.position(), band.size()), Color { a: 0.07, ..accent });
+            frame.stroke(&Path::line(band.position(), Point::new(band.x, band.y + band.height)), dashed(Color { a: 0.31, ..accent }, 1.5, &[6.0, 5.0]));
+            let y = line.map_or(band.y + band.height / 2.0, |y| at(0.0, y).y).clamp(band.y + 30.0, (band.y + band.height - 10.0).max(band.y + 30.0));
+            frame.fill_text(canvas::Text {
+                content: glyph.into(),
+                position: Point::new(band.x + band.width / 2.0, y),
+                color: Color { a: 0.7, ..accent },
+                size: 22.0.into(),
+                align_x: iced::advanced::text::Alignment::Center,
+                align_y: iced::alignment::Vertical::Center,
+                ..canvas::Text::default()
+            });
         }
         if let Some((g, a)) = self.ghost {
             let (p, q) = (at(g.x0, g.y0), at(g.x1, g.y1));
@@ -274,11 +291,21 @@ fn view<'a>(app: &'a App, t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Mess
         let fh = l.w * strip.height / strip.width.max(1.0);
         Some(Frame { rect: Rect::new(page.x0 + l.x, page.y0 + l.y, page.x0 + l.x + l.w, page.y0 + l.y + fh), line_x: page.x0 + l.line_x })
     });
-    if lasso.is_none() && frame.is_none() && laser.is_none() && hover.is_none() && ruler.is_none() && handles.is_empty() && ghost.is_none() && space.is_none() && loupe.is_none() {
+    // Mitwandern's band, while the pen is near (hovering) or writing.
+    let near = t.hover.is_some_and(|(k, _)| k == o.key) || t.busy();
+    let flow = app.flow_page(o.key).filter(|_| near).and_then(|p| {
+        let band = app.flow_band(o.key, &p)?;
+        let more = p.rect.x1 > o.camera.x + o.camera.viewport.width / o.camera.zoom + 2.0 / o.camera.zoom;
+        let lined = matches!(p.spec.background, n0te_core::notebook::Background::Lines | n0te_core::notebook::Background::Cornell | n0te_core::notebook::Background::Grid | n0te_core::notebook::Background::Dots);
+        let glyph = if more { "→" } else if lined { "↵" } else { return None };
+        let line = t.flow.as_ref().filter(|f| f.sheet == p.sheet_id).map(|f| (f.top + f.bottom) / 2.0);
+        Some((Rectangle::new(Point::new(band.x - o.camera.origin.x, band.y - o.camera.origin.y), band.size()), glyph, line))
+    });
+    if lasso.is_none() && frame.is_none() && laser.is_none() && hover.is_none() && ruler.is_none() && handles.is_empty() && ghost.is_none() && space.is_none() && loupe.is_none() && flow.is_none() {
         return None;
     }
     let held = held.map(|h| h.handle.dir);
-    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, laser, hover, ruler, handles, held, ghost, space, loupe }).width(Length::Fill).height(Length::Fill).into())
+    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, laser, hover, ruler, handles, held, ghost, space, loupe, flow }).width(Length::Fill).height(Length::Fill).into())
 }
 
 /// The writing magnifier's strip over its pane: the frame's part of the page, large (its own

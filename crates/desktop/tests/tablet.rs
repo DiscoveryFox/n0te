@@ -470,3 +470,39 @@ fn the_writing_magnifier_writes_into_its_frame_and_moves_on() {
     h.message(Message::Tablet(Msg::Loupe(false)));
     assert!(h.app.tablet.loupe.is_none());
 }
+
+#[test]
+fn mitwandern_moves_the_page_on_after_a_lift_in_the_band() {
+    let mut h = opened("flow");
+    h.message(Message::Tablet(Msg::WriteFlow(true)));
+    // A squared page, zoomed in past its width.
+    let grid = open(&h).pages.pages.iter().find(|p| p.placed.side == 0 && p.placed.spec.background == n0te_core::notebook::Background::Grid).unwrap().placed.clone();
+    h.message(Message::Jump(grid.sheet_id.clone()));
+    h.message(Message::Zoom(2.5));
+    h.events(&[]);
+    let cam = open(&h).camera;
+    assert!(h.app.flow_page(open(&h).key).is_some(), "Mitwandern acts here");
+    let band = h.app.flow_band(open(&h).key, &grid).expect("a band");
+    // A word ending in the band: a moment later the page slides left under the pen.
+    let end = Point::new(band.x + band.width / 2.0, band.y + band.height * 0.5);
+    drag(&mut h, Point::new(end.x - 80.0, end.y), end, 8);
+    assert_eq!(open(&h).camera, cam, "not at once");
+    std::thread::sleep(std::time::Duration::from_millis(450));
+    h.message(Message::Tablet(Msg::Frame));
+    let slid = open(&h).camera;
+    assert!(slid.x > cam.x + 50.0 / cam.zoom, "slid on: {} → {}", cam.x, slid.x);
+    // At the page's right edge: a tap in the band goes a line down, back to its left edge.
+    for _ in 0..40 {
+        let c = open(&h).camera;
+        if grid.rect.x1 < c.x + c.viewport.width / c.zoom - 40.0 / c.zoom {
+            break;
+        }
+        h.scroll(Point::new(700.0, 500.0), -60.0, 0.0);
+    }
+    let at_edge = open(&h).camera;
+    let band = h.app.flow_band(open(&h).key, &grid).expect("a band");
+    h.click(Point::new(band.x + band.width / 2.0, band.y + band.height * 0.4));
+    let next = open(&h).camera;
+    assert!(next.y > at_edge.y && next.x < at_edge.x, "next line: {:?} → {:?}", (at_edge.x, at_edge.y), (next.x, next.y));
+    assert!((next.x - (grid.rect.x0 - 12.0 / next.zoom)).abs() < 1.0, "back to the left edge");
+}

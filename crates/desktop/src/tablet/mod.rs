@@ -72,6 +72,8 @@ pub enum Msg {
     /// The pen-type menu open / closed.
     PenMenu(bool),
     FingerDraws(bool),
+    /// "Mitwandern" on / off: zoomed in, a lift in the band at the right moves the page on.
+    WriteFlow(bool),
     DeleteSelection,
     ClearSelection,
     Copy,
@@ -210,6 +212,10 @@ pub struct Tablet {
     pub pen_menu: bool,
     /// A finger writes like the pen (devices without a pen); two fingers still pan and zoom.
     pub finger_draws: bool,
+    /// "Mitwandern beim Schreiben" (off by default, like on the tablet).
+    pub write_flow: bool,
+    /// The line being written with Mitwandern on, and a move due.
+    pub flow: Option<extras::Flow>,
     /// Where the pen hovers (pane, page point), for the cursor ring.
     pub hover: Option<(PaneKey, Point)>,
     pub selection: Option<Selection>,
@@ -260,6 +266,8 @@ impl Default for Tablet {
             eraser_size: 10.0,
             pen_menu: false,
             finger_draws: false,
+            write_flow: false,
+            flow: None,
             hover: None,
             selection: None,
             lasso_outline: None,
@@ -327,6 +335,7 @@ impl Tablet {
                 "fp_taper" => t.fountain.taper = v != "0",
                 "pencil_opacity" => t.pencil_opacity = num(t.pencil_opacity).clamp(0.15, 1.0),
                 "finger_draws" => t.finger_draws = v == "1",
+                "write_flow" => t.write_flow = v == "1",
                 _ => {}
             }
         }
@@ -346,7 +355,7 @@ impl Tablet {
         let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
         let f = &self.fountain;
         let text = format!(
-            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\n",
+            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\nwrite_flow={}\n",
             self.pen.key(),
             self.palette,
             self.color,
@@ -359,6 +368,7 @@ impl Tablet {
             u8::from(f.taper),
             self.pencil_opacity,
             u8::from(self.finger_draws),
+            u8::from(self.write_flow),
         );
         let path = Self::conf_path();
         if let Some(dir) = path.parent() {
@@ -422,7 +432,7 @@ impl App {
 
     /// Toolbar actions.
     pub(crate) fn on_tablet(&mut self, m: Msg) -> Task<Message> {
-        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_));
+        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_) | Msg::WriteFlow(_));
         if let Msg::Tool(t) = m
             && t != Tool::Space
             && let Some(sp) = self.tablet.space.take()
@@ -473,6 +483,10 @@ impl App {
             }
             Msg::PenMenu(on) => t.pen_menu = on,
             Msg::FingerDraws(on) => t.finger_draws = on,
+            Msg::WriteFlow(on) => {
+                t.write_flow = on;
+                t.flow = None;
+            }
             Msg::Undo => self.tablet_undo(true),
             Msg::Redo => self.tablet_undo(false),
             Msg::DeleteSelection => {
@@ -810,7 +824,7 @@ impl App {
         }
         // The magnifier: a tap in its strip's right part moves its frame on, a tap on a page
         // puts the frame there (no dot either way).
-        if tap && self.loupe_tap() {
+        if tap && (self.loupe_tap() || self.flow_tap()) {
             self.pen_cancel();
             return Task::none();
         }
@@ -901,7 +915,7 @@ impl App {
                 l.done = Some(std::time::Instant::now());
             }
             let replaces = d.replaces.clone();
-            let through_loupe = d.map.is_some();
+            let (through_loupe, pane) = (d.map.is_some(), d.pane);
             self.tablet.drawing = Some(d);
             self.send_live(true);
             self.tablet.drawing = None;
@@ -913,6 +927,8 @@ impl App {
             });
             if through_loupe {
                 self.loupe_after_stroke(&sheet, &points);
+            } else {
+                self.track_flow(pane, &sheet, &points);
             }
             return Task::none();
         }
@@ -1215,6 +1231,7 @@ impl App {
     /// after 0.9 s), as on the tablet.
     pub(crate) fn tablet_frame(&mut self) {
         self.loupe_timer();
+        self.flow_timer();
         let Some(mut d) = self.tablet.drawing.take() else { return };
         if !d.snapped && d.edge == 0 && d.points.len() >= 5 {
             let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
@@ -1255,7 +1272,7 @@ impl App {
 
     /// Whether the hold timers need frames now.
     pub fn tablet_wants_frames(&self) -> bool {
-        self.tablet.drawing.as_ref().is_some_and(|d| !d.snapped) || self.tablet.loupe.as_ref().is_some_and(|l| l.advance_at.is_some())
+        self.tablet.drawing.as_ref().is_some_and(|d| !d.snapped) || self.tablet.loupe.as_ref().is_some_and(|l| l.advance_at.is_some()) || self.tablet.flow.as_ref().is_some_and(|f| f.due.is_some())
     }
 }
 

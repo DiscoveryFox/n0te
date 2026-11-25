@@ -123,6 +123,22 @@ pub struct HandleDrag {
     pub drag: f32,
 }
 
+/// "Mitwandern": the line being written (page points: its top and bottom), where the pen last
+/// lifted (page x), and when the page moves on (a lift in the band).
+#[derive(Debug, Clone)]
+pub struct Flow {
+    pub pane: PaneKey,
+    pub sheet: String,
+    pub top: f32,
+    pub bottom: f32,
+    pub lift_x: f32,
+    pub due: Option<Instant>,
+}
+
+/// How long after a lift in the Mitwandern band the page moves on (a dot on the i right after
+/// starts the next stroke and stops it).
+const FLOW_DELAY: Duration = Duration::from_millis(380);
+
 /// A "+" dragged back this far (px) adds nothing.
 const HANDLE_CANCEL: f32 = 40.0;
 /// How long after a stroke lifted in the strip's right part the frame moves on.
@@ -640,6 +656,141 @@ impl App {
         let due = self.tablet.loupe.as_ref().and_then(|l| l.advance_at).is_some_and(|t| Instant::now() >= t);
         if due && !self.tablet.busy() {
             self.loupe_move_on();
+        }
+    }
+
+    // --- Mitwandern -----------------------------------------------------------------------------
+
+    /// The page Mitwandern acts on in pane `key` (on, with the pen, zoomed in so the page is
+    /// wider than the view, no magnifier, no board): the last written one if in view, else the
+    /// one in the middle.
+    pub fn flow_page(&self, key: PaneKey) -> Option<Placed> {
+        let t = &self.tablet;
+        if !t.write_flow || t.tool != Tool::Pen || t.loupe.is_some() {
+            return None;
+        }
+        let o = self.pane_ref(key)?;
+        if o.pages.board.is_some() || self.read_only_nb(&o.id) {
+            return None;
+        }
+        let view = o.camera.view_rect();
+        let last = t.flow.as_ref().filter(|f| f.pane == key).and_then(|f| o.pages.pages.iter().find(|p| p.placed.sheet_id == f.sheet && p.placed.rect.intersects(&view)));
+        let p = match last {
+            Some(p) => p.placed.clone(),
+            None => o.pages.index_of_number(o.pages.current_number(&o.camera)).map(|i| o.pages.pages[i].placed.clone())?,
+        };
+        (!p.is_board() && p.rect.width() * o.camera.zoom > o.camera.viewport.width * 1.08).then_some(p)
+    }
+
+    /// The band at the right edge of the page's part in view (window px) where a lift moves on.
+    pub fn flow_band(&self, key: PaneKey, p: &Placed) -> Option<Rectangle> {
+        let o = self.pane_ref(key)?;
+        let c = o.camera;
+        let view = Rectangle::new(c.origin, c.viewport);
+        let right = (view.x + view.width).min(c.to_screen(view, p.rect.x1, 0.0).x);
+        let w = (view.width * 0.13).max(72.0);
+        let (top, bottom) = (c.to_screen(view, 0.0, p.rect.y0).y.max(view.y), c.to_screen(view, 0.0, p.rect.y1).y.min(view.y + view.height));
+        (bottom > top).then(|| Rectangle::new(Point::new(right - w, top), Size::new(w, bottom - top)))
+    }
+
+    /// How far the next line is: one rule on lined paper, whole boxes for what was written on
+    /// squared and dotted paper, none on blank paper.
+    fn flow_step(&self, p: &Placed) -> Option<f32> {
+        let sp = if p.spec.spacing >= 4.0 { p.spec.spacing } else { 20.0 };
+        let h = self.tablet.flow.as_ref().map_or(0.0, |f| (f.bottom - f.top).max(0.0));
+        match p.spec.background {
+            Background::Lines | Background::Cornell => Some(sp * (h / sp + 0.35).floor().max(1.0)),
+            Background::Grid | Background::Dots => Some(sp * (h * 1.15 / sp).ceil().max(1.0)),
+            _ => None,
+        }
+    }
+
+    /// After a stroke with the pen (sheet points): the line grows (or a new one starts); lifted
+    /// in the band, the page moves on shortly after.
+    pub(crate) fn track_flow(&mut self, key: PaneKey, sheet: &str, points: &[InkPoint]) {
+        if let Some(f) = &mut self.tablet.flow {
+            f.due = None;
+        }
+        let Some(page) = self.flow_page(key).filter(|p| p.sheet_id == sheet) else { return };
+        let Some(last) = points.last() else { return };
+        let (o, r) = (page.rect.x0, page.rect.y0);
+        let (t, b) = points.iter().fold((f32::MAX, f32::MIN), |(t, b), p| (t.min(p.y + r), b.max(p.y + r)));
+        let f = self.tablet.flow.get_or_insert(Flow { pane: key, sheet: sheet.to_string(), top: t, bottom: b, lift_x: 0.0, due: None });
+        let line_h = (f.bottom - f.top).max(12.0);
+        let same = f.pane == key && f.sheet == sheet && t < f.bottom + line_h * 0.6 && b > f.top - line_h * 0.6;
+        if same {
+            f.top = f.top.min(t);
+            f.bottom = f.bottom.max(b);
+        } else {
+            *f = Flow { pane: key, sheet: sheet.to_string(), top: t, bottom: b, lift_x: 0.0, due: None };
+        }
+        f.lift_x = last.x + o;
+        let lift = Point::new(last.x + o, last.y + r);
+        let Some(cam) = self.pane_ref(key).map(|o| o.camera) else { return };
+        let at = cam.to_screen(Rectangle::new(cam.origin, cam.viewport), lift.x, lift.y);
+        if self.flow_band(key, &page).is_some_and(|band| band.contains(at))
+            && let Some(f) = &mut self.tablet.flow
+        {
+            f.due = Some(Instant::now() + FLOW_DELAY);
+        }
+    }
+
+    /// A pen tap in the band moves on at once (no dot). Whether it did.
+    pub(crate) fn flow_tap(&mut self) -> bool {
+        let Some(d) = &self.tablet.drawing else { return false };
+        let (key, sheet) = (d.pane, d.sheet.clone());
+        let Some(first) = d.points.first().copied() else { return false };
+        let Some(page) = self.flow_page(key).filter(|p| p.sheet_id == sheet) else { return false };
+        let Some(cam) = self.pane_ref(key).map(|o| o.camera) else { return false };
+        let (x, y) = (first.x + page.rect.x0, first.y + page.rect.y0);
+        let at = cam.to_screen(Rectangle::new(cam.origin, cam.viewport), x, y);
+        if !self.flow_band(key, &page).is_some_and(|b| b.contains(at)) {
+            return false;
+        }
+        let f = self.tablet.flow.get_or_insert(Flow { pane: key, sheet: sheet.clone(), top: y - 6.0, bottom: y + 6.0, lift_x: x, due: None });
+        f.sheet = sheet;
+        f.pane = key;
+        f.lift_x = x;
+        self.write_flow();
+        true
+    }
+
+    /// Every frame while a move is due: it happens once its time came (not while the pen writes).
+    pub(crate) fn flow_timer(&mut self) {
+        let due = self.tablet.flow.as_ref().and_then(|f| f.due).is_some_and(|t| Instant::now() >= t);
+        if due && !self.tablet.busy() {
+            self.write_flow();
+        }
+    }
+
+    /// Moves on: with more page to the right it slides left (the writing a third into the view);
+    /// at its right edge one line down and back to its left edge (lined, squared, dotted paper).
+    fn write_flow(&mut self) {
+        let Some(f) = self.tablet.flow.clone() else { return };
+        if let Some(f) = &mut self.tablet.flow {
+            f.due = None;
+        }
+        let Some(p) = self.flow_page(f.pane).filter(|p| p.sheet_id == f.sheet) else { return };
+        let step = self.flow_step(&p);
+        let Some(o) = self.pane_mut_of(f.pane) else { return };
+        let c = o.camera;
+        let (vw, edge) = (c.viewport.width / c.zoom, 12.0 / c.zoom);
+        let mut next = c;
+        if p.rect.x1 > c.x + vw + 2.0 / c.zoom {
+            let x = (f.lift_x - vw * 0.33).min(p.rect.x1 + edge - vw);
+            if x > c.x + 2.0 / c.zoom {
+                next.x = x;
+            }
+        } else if let Some(step) = step {
+            next.x = p.rect.x0 - edge;
+            next.y = c.y + step;
+            if let Some(f) = &mut self.tablet.flow {
+                f.top += step;
+                f.bottom += step;
+            }
+        }
+        if let Some(o) = self.pane_mut_of(f.pane) {
+            o.camera = o.pages.clamp(next);
         }
     }
 

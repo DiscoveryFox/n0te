@@ -55,6 +55,7 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     (" · Seite +{} mm breiter", " · page +{} mm wider"),
     ("Die Schreiblupe gibt es auf normalen Seiten, nicht auf Boards", "The writing magnifier works on plain pages, not on boards"),
     ("Ende der Seite", "End of the page"),
+    ("Mitwandern beim Schreiben", "Page follows the writing"),
     ("{} ausgewählt", "{} selected"),
     ("Kopieren", "Copy"),
     ("Ausschneiden", "Cut"),

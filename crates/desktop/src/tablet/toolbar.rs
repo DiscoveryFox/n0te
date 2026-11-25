@@ -188,6 +188,9 @@ pub fn pen_menu(t: &Tablet) -> Element<'_, Message> {
     col = col.push(
         iced::widget::toggler(t.finger_draws).label(tr("Mit dem Finger schreiben")).on_toggle(|on| msg(Msg::FingerDraws(on))).size(18).text_size(13).spacing(10).style(theme::switch),
     );
+    col = col.push(
+        iced::widget::toggler(t.write_flow).label(tr("Mitwandern beim Schreiben")).on_toggle(|on| msg(Msg::WriteFlow(on))).size(18).text_size(13).spacing(10).style(theme::switch),
+    );
     col = col.push(iced::widget::scrollable(pals).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).width(Length::Fixed(260.0)));
     container(col).padding(8).style(theme::menu).into()
 }
