@@ -80,6 +80,17 @@ class PdfBindingsTest {
         return out.toByteArray()
     }
 
+    /** A huge PDF page's whole-page picture stays at most 2048 px a side (memory not growing with the page). */
+    @Test
+    fun thumbnailsOfHugePagesStaySmall() {
+        assertEquals(PDF_THUMB, pdfThumbScale(595.28f, 841.89f), 0f)
+        assertEquals("2000 mm: 1417 px as before", PDF_THUMB, pdfThumbScale(5669.3f, 5669.3f), 0f)
+        for (side in listOf(8192f, 14400f, 200_000f)) {
+            val t = pdfThumbScale(side, side / 3f)
+            assertTrue("$side pt at $t", side * t <= 2048f && side * t > 1024f)
+        }
+    }
+
     /** The tablet's page size in pixels matches the core's for odd sizes at every zoom bucket. */
     @Test
     fun pagePixelsMatchTheCore() {

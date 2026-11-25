@@ -22,6 +22,20 @@ import kotlin.math.min
 fun pagePixels(w: Float, h: Float, b: Float): Pair<Int, Int> =
     maxOf(1, Math.round(w * b)) to maxOf(1, Math.round(h * b))
 
+/** Pixels per point of a PDF page's whole-page picture (under its sharp tiles). */
+const val PDF_THUMB = 0.25f
+
+/**
+ * The scale of the whole-page picture of a [w] × [h] point PDF page: [PDF_THUMB] pixels per point,
+ * halved until it is at most 2048 pixels a side, so its memory doesn't grow with the page (a
+ * poster of a few metres gets a coarser one; the sharp tiles on top only cover the screen).
+ */
+fun pdfThumbScale(w: Float, h: Float): Float {
+    var t = PDF_THUMB
+    while (maxOf(w, h) * t > 2048f && t > 1f / 1024f) t /= 2f
+    return t
+}
+
 /**
  * PDF page backgrounds as bitmap tiles from the core's PDF worker. A page is drawn from a small
  * thumbnail (always requested, so a fast scroll never shows white) with sharp 512 px tiles at
@@ -30,7 +44,7 @@ fun pagePixels(w: Float, h: Float, b: Float): Pair<Int, Int> =
  */
 object PdfTiles : TileSink {
     private const val TILE = 512
-    private const val THUMB = 0.25f
+    private const val THUMB = PDF_THUMB
 
     /**
      * One page view's zoom level and request generation: two panes (and the page pictures) each
@@ -82,7 +96,7 @@ object PdfTiles : TileSink {
             slot.lastBucket = b
             slot.generation++
             val mine = "#${slot.view}"
-            pending.removeAll { it.endsWith(mine) && !it.contains("/$THUMB/") }
+            pending.removeAll { it.endsWith(mine) && (it.split('/').getOrNull(2)?.toFloatOrNull() ?: 0f) > THUMB }
         }
         // Space inserted into the page splits the PDF: each band of it is drawn where it lies now
         // (the PDF at its own size, moved down by the space above), blank paper in between.
@@ -93,9 +107,10 @@ object PdfTiles : TileSink {
             val origin = RectF(r.left, r.top + dst - src, r.right, r.top + dst - src + base)
             val clip = RectF(r.left, r.top + dst, r.right, r.top + dst + len)
             if (gaps.isNotEmpty()) { c.save(); c.clipRect(clip) }
-            // Underneath: the thumbnail (one tile for the whole page).
-            drawLevel(c, blob, page, origin, p.spec.width, base, THUMB, clip, out, priority = 10u, slot)
-            if (b > THUMB) {
+            // Underneath: the thumbnail (a few tiles for the whole page).
+            val thumb = pdfThumbScale(p.spec.width, base)
+            drawLevel(c, blob, page, origin, p.spec.width, base, thumb, clip, out, priority = 10u, slot)
+            if (b > thumb) {
                 val part = RectF(max(vis.left, clip.left), max(vis.top, clip.top), min(vis.right, clip.right), min(vis.bottom, clip.bottom))
                 if (part.width() > 0 && part.height() > 0) drawLevel(c, blob, page, origin, p.spec.width, base, b, part, out, priority = 0u, slot)
             }

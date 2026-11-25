@@ -308,6 +308,11 @@ class NotebookView(context: Context) : View(context) {
     /** Pencil grain size for the current zoom (see [Pencil.texelFor]). */
     private var pencilTexel = 0f
     private var pencilGeneration = -1
+    /** Frames drawn, the zoom of the last one and when the zoom last changed (for the ink's tiles). */
+    private var frames = 0L
+    private var trimAt = 0L
+    private var lastScale = 0f
+    private var scaleAt = 0L
     private val livePath = Path()
     private var liveColor = Color.BLACK
 
@@ -680,7 +685,8 @@ class NotebookView(context: Context) : View(context) {
         changed()
     }
 
-    private fun showMinimap() {
+    /** The board's minimap for a moment (after a pan or zoom; the frame-time bench too). */
+    fun showMinimap() {
         miniUntil = SystemClock.uptimeMillis() + 900
         postInvalidateDelayed(950)
     }
@@ -1579,16 +1585,40 @@ class NotebookView(context: Context) : View(context) {
     }
 
     override fun onDraw(c: Canvas) {
+        if (!PerfBench.on) { drawFrame(c); return }
+        val t = System.nanoTime()
+        drawFrame(c)
+        PerfBench.drawNs += System.nanoTime() - t
+    }
+
+    private fun drawFrame(c: Canvas) {
         val m = model
         if (m != null && drawCarried(c, m)) return
         c.drawColor(bgColor)
         if (m == null) return
         val texel = Pencil.texelFor(scale)
         if (texel != pencilTexel || Pencil.generation != pencilGeneration) {
-            // The pencil grain is baked into the recorded pages: re-record those with pencil ink.
+            // The pencil grain is baked into the recorded ink: its chunks with pencil strokes are
+            // recorded anew as they show (InkChunks compares the grain they were recorded with).
             pencilTexel = texel
             pencilGeneration = Pencil.generation
-            for (st in m.sheets.values) if (st.strokes.any { it.kind == KIND_PENCIL }) st.invalidateNode()
+        }
+        frames++
+        val now = SystemClock.uptimeMillis()
+        if (now - trimAt > 2000) {
+            // Pages long out of view let go of their strokes once very many are held.
+            trimAt = now
+            val keep = HashSet<String>()
+            selection?.parts?.forEach { keep += it.sheetId }
+            editingText?.let { keep += it.first }
+            board?.let { keep += it.sheetId }
+            m.trim(keep, now)
+        }
+        if (scale != lastScale) {
+            // Zooming: ink tiles at steps of zoom meanwhile; once it rests, drawn at the zoom itself.
+            lastScale = scale
+            scaleAt = SystemClock.uptimeMillis()
+            postInvalidateDelayed(ZOOM_REST_MS + 20)
         }
         val vis = RectF(toWorldX(0f), toWorldY(0f), toWorldX(width.toFloat()), toWorldY(height.toFloat()))
         val prefetch = RectF(vis).apply { inset(0f, -vis.height()) }
@@ -1644,7 +1674,7 @@ class NotebookView(context: Context) : View(context) {
             if (alpha < 1f) c.saveLayerAlpha(p.rect.left - 2f, p.rect.top - 2f, p.rect.right + 2f, p.rect.bottom + 2f, (alpha * 255).toInt())
             drawPaper(c, p, v)
             if (p.spec.pdfBlob != null) PdfTiles.draw(c, p, scale, v, tileRequests, pdfSlot)
-            m.sheets[p.sheetId]?.let { drawImages(c, p, it); drawInk(c, p, it) }
+            m.sheets[p.sheetId]?.let { drawImages(c, p, it); drawInk(c, p, it, v) }
             if (alpha < 1f) c.restore()
             c.restore()
         }
@@ -1657,7 +1687,7 @@ class NotebookView(context: Context) : View(context) {
                 if (!RectF.intersects(p.rect, vis)) continue
                 c.saveLayerAlpha(p.rect.left - 2f, p.rect.top - 2f, p.rect.right + 2f, p.rect.bottom + 2f, ((1f - e) * 255).toInt())
                 drawPaper(c, p, vis)
-                m.sheets[p.sheetId]?.let { drawInk(c, p, it) }
+                m.sheets[p.sheetId]?.let { drawInk(c, p, it, vis) }
                 c.restore()
             }
             postInvalidateOnAnimation()
@@ -1710,7 +1740,7 @@ class NotebookView(context: Context) : View(context) {
         if (sd.sideways == null) {
             // Not yet clear which way: the page as it is, a small cross where the pen is.
             drawPaper(c, p, vis)
-            m.sheets[p.sheetId]?.let { st -> if (p.spec.pdfBlob != null) PdfTiles.draw(c, p, scale, vis, tileRequests, pdfSlot); drawImages(c, p, st); drawInk(c, p, st) }
+            m.sheets[p.sheetId]?.let { st -> if (p.spec.pdfBlob != null) PdfTiles.draw(c, p, scale, vis, tileRequests, pdfSlot); drawImages(c, p, st); drawInk(c, p, st, vis) }
             spaceLine.color = Ui.theme.accent.toInt()
             spaceLine.strokeWidth = 1.5f / scale
             spaceLine.pathEffect = DashPathEffect(floatArrayOf(6f / scale, 5f / scale), 0f)
@@ -1727,7 +1757,7 @@ class NotebookView(context: Context) : View(context) {
         val st = m.sheets[p.sheetId]
         fun content(v: RectF) {
             if (p.spec.pdfBlob != null) PdfTiles.draw(c, p, scale, v, tileRequests, pdfSlot)
-            st?.let { drawImages(c, p, it); drawInk(c, p, it) }
+            st?.let { drawImages(c, p, it); drawInk(c, p, it, v) }
         }
         c.save(); c.clipRect(r.left, r.top, r.right, line); content(vis); c.restore()
         c.save(); c.clipRect(r.left, line + max(dy, 0f), r.right, bottom); c.translate(0f, dy); content(RectF(vis).apply { offset(0f, -dy) }); c.restore()
@@ -1770,7 +1800,7 @@ class NotebookView(context: Context) : View(context) {
         val st = m.sheets[p.sheetId]
         fun content(shift: Float) {
             c.translate(shift, 0f)
-            st?.let { drawImages(c, p, it); drawInk(c, p, it) }
+            st?.let { drawImages(c, p, it); drawInk(c, p, it, RectF(vis).apply { offset(-shift, 0f) }) }
         }
         c.save(); c.clipRect(left, r.top, line, r.bottom); content(own); c.restore()
         c.save(); c.clipRect(line + max(dx, 0f), r.top, right, r.bottom); content(own + dx); c.restore()
@@ -1976,7 +2006,7 @@ class NotebookView(context: Context) : View(context) {
         val step = b.spec.spacing.takeIf { it >= 4f } ?: 24f
         drawPattern(c, FfiBackground.DOTS, RectF(0f, 0f, 0f, 0f), vis, step)
         m.ensureLoaded(b.sheetId)
-        m.sheets[b.sheetId]?.let { drawInk(c, b, it) }
+        m.sheets[b.sheetId]?.let { drawInk(c, b, it, vis) }
         if (action == Action.INK && inkLayer?.active != true) {
             drawLive(c)
         }
@@ -1986,17 +2016,50 @@ class NotebookView(context: Context) : View(context) {
         if (Settings.minimap && SystemClock.uptimeMillis() < miniUntil) m.sheets[b.sheetId]?.let { drawMinimap(c, it, vis) }
     }
 
+    /** The board's ink as the minimap shows it (recorded once while the minimap stays the same), its bounds. */
+    private val miniNode = RenderNode("minimap").apply { setClipToBounds(false) }
+    /** The minimap's scale when its rectangles were recorded (0: not yet). */
+    private var miniK = 0f
+    private val miniContent = RectF()
+    private var miniOf: SheetState? = null
+    private var miniVersion = -1
+
     private fun drawMinimap(c: Canvas, st: SheetState, vis: RectF) {
-        val content = RectF()
-        for (s in st.strokes) if (content.isEmpty) content.set(s.bounds) else content.union(s.bounds)
+        if (miniOf !== st || miniVersion != st.version) {
+            miniContent.setEmpty()
+            for (s in st.strokes) if (miniContent.isEmpty) miniContent.set(s.bounds) else miniContent.union(s.bounds)
+            miniOf = st; miniVersion = st.version; miniK = 0f
+        }
+        val content = miniContent
         val all = RectF(vis).apply { if (!content.isEmpty) union(content) }
         val mw = 200f * density; val mh = 140f * density
         val k = min(mw / all.width(), mh / all.height())
         val ox = width - mw - 16f * density; val oy = 16f * density + 64f * density
         c.drawRoundRect(ox - 8f, oy - 8f, ox + mw + 8f, oy + mh + 8f, 14f, 14f, miniBg)
-        fun mx(x: Float) = ox + (x - all.left) * k + (mw - all.width() * k) / 2
-        fun my(y: Float) = oy + (y - all.top) * k + (mh - all.height() * k) / 2
-        for (s in st.strokes) c.drawRect(mx(s.bounds.left), my(s.bounds.top), max(mx(s.bounds.right), mx(s.bounds.left) + 1.5f), max(my(s.bounds.bottom), my(s.bounds.top) + 1.5f), miniInk)
+        // Page points to minimap pixels: mx(x) = x · k + dx.
+        val dx = ox + (mw - all.width() * k) / 2 - all.left * k
+        val dy = oy + (mh - all.height() * k) / 2 - all.top * k
+        fun mx(x: Float) = x * k + dx
+        fun my(y: Float) = y * k + dy
+        // A rectangle per stroke, at least 1.5 px a side; recorded in page points once and then
+        // only moved and scaled (again when the scale changed by a tenth or the ink changed), not
+        // drawn stroke by stroke on every frame of a pan or zoom.
+        if (c.isHardwareAccelerated) {
+            if (!miniNode.hasDisplayList() || miniK == 0f || abs(k / miniK - 1f) > 0.1f) {
+                val rc = miniNode.beginRecording()
+                val m = 1.5f / k
+                for (s in st.strokes) rc.drawRect(s.bounds.left, s.bounds.top, max(s.bounds.right, s.bounds.left + m), max(s.bounds.bottom, s.bounds.top + m), miniInk)
+                miniNode.endRecording()
+                miniK = k
+            }
+            c.save()
+            c.translate(dx, dy)
+            c.scale(k, k)
+            c.drawRenderNode(miniNode)
+            c.restore()
+        } else {
+            for (s in st.strokes) c.drawRect(mx(s.bounds.left), my(s.bounds.top), max(mx(s.bounds.right), mx(s.bounds.left) + 1.5f), max(my(s.bounds.bottom), my(s.bounds.top) + 1.5f), miniInk)
+        }
         c.drawRect(mx(vis.left), my(vis.top), mx(vis.right), my(vis.bottom), miniView)
     }
 
@@ -2140,7 +2203,12 @@ class NotebookView(context: Context) : View(context) {
         }
     }
 
-    private fun drawInk(c: Canvas, p: Placed, st: SheetState) {
+    /**
+     * A page's text boxes and ink (canvas in world coordinates). With [vis] (world) only the ink
+     * in view is drawn, with [tiles] (the page view itself, not the magnifier) from tiles when
+     * very much is in view: see [InkChunks].
+     */
+    private fun drawInk(c: Canvas, p: Placed, st: SheetState, vis: RectF? = null, tiles: Boolean = true) {
         val w = p.rect.width()
         val h = p.rect.height()
         val unbounded = board?.sheetId == p.sheetId
@@ -2149,36 +2217,30 @@ class NotebookView(context: Context) : View(context) {
         if (!unbounded) c.clipRect(0f, 0f, w, h)
         // Area eraser: hide what it has covered so far until the core has cut the strokes.
         eraseClip?.let { if (eraseSheet == st.id) c.clipOutPath(it) }
+        val local = vis?.let { v ->
+            RectF(v).apply { offset(-p.rect.left, -p.rect.top); if (!unbounded && !intersect(0f, 0f, w, h)) setEmpty() }
+        }
         if (c.isHardwareAccelerated) {
-            val node = st.nodeFor(this)
-            // Android drops the display list of a node it didn't draw for a while (scrolled away,
-            // group folded): re-record then, or the page shows up blank.
-            // A page that changed size (space inserted, turned, a new format) is recorded anew: the
-            // node only shows what lies inside the size it was recorded at.
-            val sized = unbounded || (node.right == kotlin.math.ceil(w).toInt() + 2 && node.bottom == kotlin.math.ceil(h).toInt() + 2)
-            if (!st.nodeValid(this) || !node.hasDisplayList() || !sized) {
-                // The node covers the ink (a board's ink can be anywhere, also at negative x/y).
-                val area = RectF(0f, 0f, w, h)
-                if (unbounded) for (s in st.strokes) area.union(s.bounds)
-                val l = kotlin.math.floor(area.left).toInt() - 2; val t = kotlin.math.floor(area.top).toInt() - 2
-                node.setPosition(l, t, kotlin.math.ceil(area.right).toInt() + 2, kotlin.math.ceil(area.bottom).toInt() + 2)
-                val rc = node.beginRecording()
-                rc.translate(-l.toFloat(), -t.toFloat())
-                drawStrokes(rc, st)
-                node.endRecording()
-                st.nodeRecorded(this)
-            }
-            c.drawRenderNode(node)
+            val t0 = if (PerfBench.on) System.nanoTime() else 0L
+            val texel = pencilTexel.takeIf { it > 0f } ?: Pencil.texelFor(scale)
+            st.seenAt = SystemClock.uptimeMillis()
+            val ink = st.inkFor(this)
+            val zooming = SystemClock.uptimeMillis() - scaleAt < ZOOM_REST_MS
+            val more = ink.draw(c, st, local, texel, Pencil.generation, editingText?.takeIf { it.first == st.id }?.second, tiles, frames, zooming) { rc, s -> drawStroke(rc, s) }
+            if (more) postInvalidateOnAnimation()
+            if (PerfBench.on && ink.recorded > 0) { PerfBench.recordNs += System.nanoTime() - t0; PerfBench.recorded += ink.recorded }
         } else {
-            drawStrokes(c, st)
+            drawStrokes(c, st, local)
         }
         c.restore()
     }
 
-    private fun drawStrokes(c: Canvas, st: SheetState) {
+    /** Text boxes and ink straight onto [c] (pictures of pages); with [vis] (page points) only what is in it. */
+    private fun drawStrokes(c: Canvas, st: SheetState, vis: RectF? = null) {
         if (st.texts.isNotEmpty()) TextBoxes.draw(c, st.texts, skip = editingText?.takeIf { it.first == st.id }?.second)
         for (s in st.strokes) {
             if (s.id in st.hidden || s.id in st.floating) continue
+            if (vis != null && !RectF.intersects(s.bounds, vis)) continue
             drawStroke(c, s)
         }
     }
@@ -2644,12 +2706,25 @@ class NotebookView(context: Context) : View(context) {
     private var liveDrag: Triple<String, uniffi.n0te_ffi.FfiPlot, String>? = null
 
     /**
+     * An axis of an interactive graph being stretched on the page: its sheet, the plot when the
+     * drag began, which axis (1 x, 2 y), where it was grabbed (page points), the page's squares
+     * (0: none), the plot as it is now.
+     */
+    private class AxisDrag(val sheet: String, val start: uniffi.n0te_ffi.FfiPlot, val axis: Int, val downX: Float, val downY: Float, val squares: Float, val pointer: Int) {
+        var now = start
+    }
+    private var axisDrag: AxisDrag? = null
+
+    /**
      * Interactive graphs (switched on per graph): a touch on one of their points or sliders drags
-     * it right on the page; letting go stores it (one step to undo). Elsewhere nothing changes.
+     * it right on the page; on an axis (the pen, or a finger where fingers write) it stretches
+     * only that axis, as in the editor. Letting go stores it (one step to undo). Elsewhere
+     * nothing changes.
      */
     private fun interactiveTouch(ev: MotionEvent): Boolean {
         if (graph != null || readOnly) return false
         val m = model ?: return false
+        if (axisDrag != null) return axisTouch(ev, m)
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val wx = toWorldX(ev.getX(0)); val wy = toWorldY(ev.getY(0))
@@ -2657,14 +2732,27 @@ class NotebookView(context: Context) : View(context) {
                 val x = wx - p.rect.left; val y = wy - p.rect.top
                 val st = m.sheets[p.sheetId] ?: return false
                 val tol = 14f * density / scale
+                val stylus = isStylus(ev.getToolType(0))
+                val erasing = stylus && (ev.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER || (Settings.sideButtonErases && (eraseButton(ev) || penButton)))
+                val axes = eyedropper == null && plotBox == null &&
+                    PageAxis.allowed(stylus, erasing, tool, penOnly, navigateOnly, palm = !stylus && isPalm(ev, 0), penNear = !stylus && penNear(ev.eventTime))
+                val axisTol = PageAxis.tolerance(stylus, density, scale)
                 for (im in st.images.reversed()) {
                     val plot = im.plot ?: continue
                     if (!plot.interactive || !RectF(im.x, im.y, im.x + im.w, im.y + im.h).apply { inset(-tol, -tol) }.contains(x, y)) continue
-                    val id = uniffi.n0te_ffi.plotHit(plot, x, y, tol) ?: continue
-                    val info = uniffi.n0te_ffi.plotInfo(plot).firstOrNull { it.id == id } ?: continue
-                    if (!info.draggable && info.sliderValue == null) continue
-                    liveDrag = Triple(p.sheetId, plot, id)
-                    return true
+                    val id = uniffi.n0te_ffi.plotHit(plot, x, y, tol)
+                    val info = id?.let { h -> uniffi.n0te_ffi.plotInfo(plot).firstOrNull { it.id == h } }
+                    if (id != null && info != null && (info.draggable || info.sliderValue != null)) {
+                        liveDrag = Triple(p.sheetId, plot, id)
+                        return true
+                    }
+                    // Not on a point or slider: an axis grabbed stretches alone.
+                    val axis = if (axes && info == null) uniffi.n0te_ffi.plotAxisAt(plot, x, y, axisTol).toInt() else 0
+                    if (axis != 0) {
+                        axisDrag = AxisDrag(p.sheetId, plot, axis, x, y, if (p.isBoard) 0f else PageAxis.squares(p.spec), ev.getPointerId(0))
+                        if (stylus) { requestUnbufferedDispatch(ev); parent?.requestDisallowInterceptTouchEvent(true) }
+                        return true
+                    }
                 }
                 return false
             }
@@ -2697,6 +2785,49 @@ class NotebookView(context: Context) : View(context) {
             }
         }
         return liveDrag != null
+    }
+
+    /** The touch that grabbed an axis: stretches it while it moves, stores it (snapped to the squares) when it lifts. */
+    private fun axisTouch(ev: MotionEvent, m: NotebookModel): Boolean {
+        val d = axisDrag ?: return false
+        val i = ev.findPointerIndex(d.pointer)
+        fun pagePoint(): Pair<Float, Float>? {
+            val p = board?.takeIf { it.sheetId == d.sheet } ?: m.placed.firstOrNull { it.sheetId == d.sheet } ?: return null
+            if (i < 0) return null
+            return (toWorldX(ev.getX(i)) - p.rect.left) to (toWorldY(ev.getY(i)) - p.rect.top)
+        }
+        // Another finger coming or going changes nothing; the one that grabbed lifting ends it.
+        val action = if (ev.actionMasked == MotionEvent.ACTION_POINTER_UP && ev.actionIndex == i) MotionEvent.ACTION_UP else ev.actionMasked
+        /** Stretched to where the pen is, always from the plot as it was when grabbed (the number grabbed stays under the pen). */
+        fun follow() {
+            val (x, y) = pagePoint() ?: return
+            val s = if (d.axis == 1) uniffi.n0te_ffi.plotAxisDragged(d.start, 1.toUByte(), d.downX, x) else uniffi.n0te_ffi.plotAxisDragged(d.start, 2.toUByte(), d.downY, y)
+            d.now = s.copy(x = d.start.x, y = d.start.y, w = d.start.w, h = d.start.h)
+        }
+        when (action) {
+            MotionEvent.ACTION_MOVE -> {
+                follow()
+                plotDraft = d.now
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                axisDrag = null
+                // Where it was let go (the last move can lie a little before it).
+                if (action == MotionEvent.ACTION_UP) follow()
+                val stored = m.sheets[d.sheet]?.images?.firstOrNull { it.id == d.start.id }?.plot
+                if (action == MotionEvent.ACTION_UP && stored != null && d.now != d.start) {
+                    // In its box as stored now; one step to undo.
+                    val put = PageAxis.settled(d.now.copy(x = stored.x, y = stored.y, w = stored.w, h = stored.h), d.squares)
+                    if (put != stored) {
+                        // Shown as put down until the page has it.
+                        plotDraft = put
+                        m.setPlot(d.sheet, put) { if (plotDraft === put) plotDraft = null }
+                        return true
+                    }
+                }
+                plotDraft = null
+            }
+        }
+        return true
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
@@ -3963,7 +4094,7 @@ class NotebookView(context: Context) : View(context) {
         drawPaper(c, p, vis)
         loupeDrawScale = 0f
         if (p.spec.pdfBlob != null) { val req = ArrayList<uniffi.n0te_ffi.FfiTileRequest>(); PdfTiles.draw(c, p, scale, vis, req, pdfSlot); PdfTiles.flush(req) }
-        m.sheets[p.sheetId]?.let { drawImages(c, p, it); drawInk(c, p, it) }
+        m.sheets[p.sheetId]?.let { drawImages(c, p, it); drawInk(c, p, it, vis, tiles = false) }
         if (action == Action.INK && mapLoupe && inkLayer?.active != true) {
             c.save(); c.translate(p.rect.left, p.rect.top); drawLive(c); c.restore()
         }
@@ -4688,6 +4819,8 @@ class NotebookView(context: Context) : View(context) {
         const val SEL_LAYER_MAX = 4096
         const val SEL_LAYER_PIXELS = 8L shl 20
         const val KIND_PENCIL = 1
+        /** The zoom counts as resting this long after it last changed (the ink's tiles are then drawn at it). */
+        const val ZOOM_REST_MS = 220L
         const val LAYOUT_ANIM_MS = 300f
         /** The magnifier strip's height (share of the view) and its "move on" part (share of its width). */
         const val LOUPE_H = 0.3f
