@@ -267,6 +267,7 @@ class NotebookActivity : ComponentActivity() {
     private val redrawPlots: () -> Unit = { panes.forEach { it.view.invalidate() }; tick++ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val createdAt = android.os.SystemClock.uptimeMillis()
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         Themes.applyWindow(this)
@@ -314,6 +315,8 @@ class NotebookActivity : ComponentActivity() {
             addPane(first)
             mainPane = first
             active = first
+            // Frame times for performance work (adb only, see PerfBench).
+            intent.getStringExtra(PerfBench.EXTRA)?.let { PerfBench.start(this, first.view, intent.getStringExtra(EXTRA_SHEET), it, createdAt) }
         }
         // Only for the first opening (not again when rebuilt).
         intent.removeExtra(EXTRA_SHEET)

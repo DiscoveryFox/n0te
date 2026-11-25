@@ -680,7 +680,8 @@ class NotebookView(context: Context) : View(context) {
         changed()
     }
 
-    private fun showMinimap() {
+    /** The board's minimap for a moment (after a pan or zoom; the frame-time bench too). */
+    fun showMinimap() {
         miniUntil = SystemClock.uptimeMillis() + 900
         postInvalidateDelayed(950)
     }
@@ -1579,6 +1580,13 @@ class NotebookView(context: Context) : View(context) {
     }
 
     override fun onDraw(c: Canvas) {
+        if (!PerfBench.on) { drawFrame(c); return }
+        val t = System.nanoTime()
+        drawFrame(c)
+        PerfBench.drawNs += System.nanoTime() - t
+    }
+
+    private fun drawFrame(c: Canvas) {
         val m = model
         if (m != null && drawCarried(c, m)) return
         c.drawColor(bgColor)
@@ -2160,6 +2168,7 @@ class NotebookView(context: Context) : View(context) {
                 // The node covers the ink (a board's ink can be anywhere, also at negative x/y).
                 val area = RectF(0f, 0f, w, h)
                 if (unbounded) for (s in st.strokes) area.union(s.bounds)
+                val t0 = if (PerfBench.on) System.nanoTime() else 0L
                 val l = kotlin.math.floor(area.left).toInt() - 2; val t = kotlin.math.floor(area.top).toInt() - 2
                 node.setPosition(l, t, kotlin.math.ceil(area.right).toInt() + 2, kotlin.math.ceil(area.bottom).toInt() + 2)
                 val rc = node.beginRecording()
@@ -2167,6 +2176,7 @@ class NotebookView(context: Context) : View(context) {
                 drawStrokes(rc, st)
                 node.endRecording()
                 st.nodeRecorded(this)
+                if (PerfBench.on) PerfBench.recordNs += System.nanoTime() - t0
             }
             c.drawRenderNode(node)
         } else {
