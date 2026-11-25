@@ -64,8 +64,8 @@ fn main() {
     // Opening: the notebook, its first frames (the big page fills the view's width).
     let t = Instant::now();
     h.message(Message::Open(id.clone()));
-    let open = [h.step(&[]), h.step(&[]), h.step(&[])];
-    report("open (3 frames)", &mut open.iter().map(FrameTimes::total).collect::<Vec<_>>());
+    let opening = [h.step(&[]), h.step(&[]), h.step(&[])];
+    report("open (3 frames)", &mut opening.iter().map(FrameTimes::total).collect::<Vec<_>>());
     println!("  open total {:.0} ms", t.elapsed().as_secs_f32() * 1000.0);
 
     let mut idle: Vec<f32> = (0..10).map(|_| h.step(&[]).total()).collect();
@@ -155,6 +155,25 @@ fn main() {
         }
         report("board frame: pan at 200 %", &mut frames.iter().map(FrameTimes::total).collect::<Vec<_>>());
         split(&frames);
+        // n0te Tablet: the board on its own (endless, all its ink in view at first).
+        if mode == Mode::Tablet {
+            let t = Instant::now();
+            h.message(Message::Tablet(n0te_desktop::tablet::Msg::Board(true)));
+            let first = h.step(&[]);
+            println!("  board on its own: open {:.0} ms + first frame {:.0} ms (zoom {:.2})", t.elapsed().as_secs_f32() * 1000.0 - first.total(), first.total(), open(&h).camera.zoom);
+            for (label, zoom) in [("board on its own: all of it", None), ("board on its own: 100 %", Some(1.0))] {
+                if let Some(z) = zoom {
+                    h.message(Message::Zoom(z));
+                    h.step(&[]);
+                }
+                let mut frames = Vec::new();
+                for i in 0..40 {
+                    frames.push(h.scroll(mid, if i < 20 { 40.0 } else { -40.0 }, if i % 10 < 5 { 30.0 } else { -30.0 }));
+                }
+                report(label, &mut frames.iter().map(FrameTimes::total).collect::<Vec<_>>());
+                split(&frames);
+            }
+        }
     }
     let (rss, peak) = rss_mib();
     println!("memory: {rss:.0} MiB now, {peak:.0} MiB peak");

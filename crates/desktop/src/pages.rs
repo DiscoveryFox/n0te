@@ -752,9 +752,11 @@ fn draw_pattern(frame: &mut canvas::Frame, bg: Background, extent: Option<(f32, 
             }
         }
         Background::Dots => {
-            // Zoomed out: every 2nd/4th dot, like the tablet.
+            // Zoomed out: every 2nd/4th dot, like the tablet (a board on its own, endless: at
+            // least 16 px apart, as there).
             let mut s = step;
-            while s * lod < 8.0 {
+            let apart = if extent.is_some() { 8.0 } else { 16.0 };
+            while s * lod < apart {
                 s *= 2.0;
             }
             let r = (1.3 / lod).max(0.6);
