@@ -2798,16 +2798,21 @@ class NotebookView(context: Context) : View(context) {
         }
         // Another finger coming or going changes nothing; the one that grabbed lifting ends it.
         val action = if (ev.actionMasked == MotionEvent.ACTION_POINTER_UP && ev.actionIndex == i) MotionEvent.ACTION_UP else ev.actionMasked
+        /** Stretched to where the pen is, always from the plot as it was when grabbed (the number grabbed stays under the pen). */
+        fun follow() {
+            val (x, y) = pagePoint() ?: return
+            val s = if (d.axis == 1) uniffi.n0te_ffi.plotAxisDragged(d.start, 1.toUByte(), d.downX, x) else uniffi.n0te_ffi.plotAxisDragged(d.start, 2.toUByte(), d.downY, y)
+            d.now = s.copy(x = d.start.x, y = d.start.y, w = d.start.w, h = d.start.h)
+        }
         when (action) {
             MotionEvent.ACTION_MOVE -> {
-                val (x, y) = pagePoint() ?: return true
-                // Always from the plot as it was when it was grabbed: the number grabbed stays under the pen.
-                val s = if (d.axis == 1) uniffi.n0te_ffi.plotAxisDragged(d.start, 1.toUByte(), d.downX, x) else uniffi.n0te_ffi.plotAxisDragged(d.start, 2.toUByte(), d.downY, y)
-                d.now = s.copy(x = d.start.x, y = d.start.y, w = d.start.w, h = d.start.h)
+                follow()
                 plotDraft = d.now
             }
             MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
                 axisDrag = null
+                // Where it was let go (the last move can lie a little before it).
+                if (action == MotionEvent.ACTION_UP) follow()
                 val stored = m.sheets[d.sheet]?.images?.firstOrNull { it.id == d.start.id }?.plot
                 if (action == MotionEvent.ACTION_UP && stored != null && d.now != d.start) {
                     // In its box as stored now; one step to undo.
