@@ -47,14 +47,14 @@ each pdfium-binaries archive.
 
 ## Rust crates
 
-669 crates from [crates.io](https://crates.io) are compiled into n0te Laptop,
+678 crates from [crates.io](https://crates.io) are compiled into n0te Laptop,
 n0te Tablet, n0te-sync and the Android app's native library. Each crate's license file and
 copyright notice are in its source package on crates.io (and in `~/.cargo/registry` after a
 build). Licenses, by how many crates use them:
 
 | License (SPDX) | Crates |
 |---|---|
-| Apache-2.0 OR MIT | 390 |
+| Apache-2.0 OR MIT | 396 |
 | MIT | 160 |
 | Apache-2.0 OR MIT OR Zlib | 19 |
 | Unicode-3.0 | 18 |
@@ -69,6 +69,7 @@ build). Licenses, by how many crates use them:
 | Apache-2.0 OR ISC OR MIT | 3 |
 | ISC | 3 |
 | MPL-2.0+ | 2 |
+| 0BSD | 2 |
 | Apache-2.0 OR BSD-3-Clause | 2 |
 | Apache-2.0 OR BSD-3-Clause OR MIT | 2 |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 2 |
@@ -80,6 +81,7 @@ build). Licenses, by how many crates use them:
 | CC0-1.0 | 1 |
 | Apache-2.0 OR CC0-1.0 | 1 |
 | Apache-2.0 AND ISC | 1 |
+| (MIT OR Apache-2.0) AND ISC | 1 |
 | Apache-2.0 OR BSL-1.0 | 1 |
 | Apache-2.0 OR GPL-2.0-only | 1 |
 | CDLA-Permissive-2.0 | 1 |
@@ -137,6 +139,7 @@ build). Licenses, by how many crates use them:
 | bitflags | 2.13.2 | Apache-2.0 OR MIT | The Rust Project Developers |
 | bitstream-io | 4.10.0 | Apache-2.0 OR MIT | Brian Langenberger |
 | blake3 | 1.8.7 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | Jack O'Connor, Samuel Neves |
+| block-buffer | 0.10.4 | Apache-2.0 OR MIT | RustCrypto Developers |
 | block-buffer | 0.12.1 | Apache-2.0 OR MIT | RustCrypto Developers |
 | bumpalo | 3.20.4 | Apache-2.0 OR MIT | Nick Fitzgerald |
 | bytemuck | 1.25.2 | Apache-2.0 OR MIT OR Zlib | Lokathor |
@@ -204,6 +207,7 @@ build). Licenses, by how many crates use them:
 | derive_more-impl | 2.1.1 | MIT | Jelte Fennema |
 | diatomic-waker | 0.2.3 | Apache-2.0 OR MIT | Asynchronics and contributors |
 | diff | 0.1.13 | Apache-2.0 OR MIT | Utkarsh Kukreti |
+| digest | 0.10.7 | Apache-2.0 OR MIT | RustCrypto Developers |
 | digest | 0.11.3 | Apache-2.0 OR MIT | RustCrypto Developers |
 | displaydoc | 0.2.7 | Apache-2.0 OR MIT | Jane Lusby |
 | dlib | 0.5.3 | MIT | Elinor Berger |
@@ -258,6 +262,9 @@ build). Licenses, by how many crates use them:
 | futures-sink | 0.3.34 | Apache-2.0 OR MIT | – |
 | futures-task | 0.3.34 | Apache-2.0 OR MIT | – |
 | futures-util | 0.3.34 | Apache-2.0 OR MIT | – |
+| g2gen | 1.2.2 | Apache-2.0 OR MIT | WanzenBug |
+| g2p | 1.2.2 | Apache-2.0 OR MIT | WanzenBug |
+| g2poly | 1.2.2 | Apache-2.0 OR MIT | WanzenBug |
 | generic-array | 0.14.7 | MIT | Bartłomiej Kamiński, Aaron Trent |
 | generic-btree | 0.10.8 | MIT | zxch3n |
 | gethostname | 1.1.0 | Apache-2.0 | Sebastian Wiesner |
@@ -367,6 +374,7 @@ build). Licenses, by how many crates use them:
 | linked-hash-map | 0.5.6 | Apache-2.0 OR MIT | Stepan Koltsov, Andrew Paseltiner |
 | linux-raw-sys | 0.12.1 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Dan Gohman |
 | linux-raw-sys | 0.4.15 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Dan Gohman |
+| linuxvideo | 0.3.5 | 0BSD | – |
 | litemap | 0.8.3 | Unicode-3.0 | The ICU4X Project Developers |
 | litrs | 1.0.1 | Apache-2.0 OR MIT | Lukas Kalbertodt |
 | lock_api | 0.4.14 | Apache-2.0 OR MIT | Amanieu d'Antras |
@@ -512,6 +520,7 @@ build). Licenses, by how many crates use them:
 | rgb | 0.8.53 | MIT | Kornel Lesiński, James Forster |
 | ring | 0.17.14 | Apache-2.0 AND ISC | – |
 | roxmltree | 0.20.0 | Apache-2.0 OR MIT | Yevhenii Reizner |
+| rqrr | 0.11.0 | (MIT OR Apache-2.0) AND ISC | WanzenBug |
 | rustc-hash | 1.1.0 | Apache-2.0 OR MIT | The Rust Project Developers |
 | rustc-hash | 2.1.3 | Apache-2.0 OR MIT | The Rust Project Developers |
 | rustix | 0.38.44 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | Dan Gohman, Jakub Konka |
@@ -546,6 +555,7 @@ build). Licenses, by how many crates use them:
 | serde_spanned | 1.1.3 | Apache-2.0 OR MIT | – |
 | serdect | 0.4.3 | Apache-2.0 OR MIT | RustCrypto Developers |
 | sha1_smol | 1.0.1 | BSD-3-Clause | Armin Ronacher |
+| sha2 | 0.10.9 | Apache-2.0 OR MIT | RustCrypto Developers |
 | sha2 | 0.11.1 | Apache-2.0 OR MIT | RustCrypto Developers |
 | signal-hook-registry | 1.4.8 | Apache-2.0 OR MIT | Michal 'vorner' Vaner, Masaki Hara |
 | signature | 3.0.0 | Apache-2.0 OR MIT | RustCrypto Developers |
@@ -654,6 +664,7 @@ build). Licenses, by how many crates use them:
 | uniffi_udl | 0.32.2 | MPL-2.0 | – |
 | universal-hash | 0.5.1 | Apache-2.0 OR MIT | RustCrypto Developers |
 | untrusted | 0.9.0 | ISC | Brian Smith |
+| uoctl | 1.0.1 | 0BSD | – |
 | url | 2.5.8 | Apache-2.0 OR MIT | The rust-url developers |
 | usvg | 0.45.1 | Apache-2.0 OR MIT | – |
 | utf16string | 0.2.0 | Apache-2.0 OR MIT | Floris Bruynooghe, Sentry |
