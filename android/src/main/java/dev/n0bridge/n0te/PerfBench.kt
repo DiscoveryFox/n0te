@@ -75,6 +75,13 @@ object PerfBench {
                 when (n) {
                     "fit" -> steps += Step("fit", frames(20)) { if (it == 0) view.fitSheet(p, whole = true, animate = false) }
                     "idle" -> steps += Step("idle", frames(60)) {}
+                    "graph" -> {
+                        // The page's first graph in the middle of the screen (to try it by hand or over adb).
+                        val im = view.model?.sheets?.get(p.sheetId)?.images?.firstOrNull { it.plot != null }
+                        steps += Step("graph", frames(10)) { f ->
+                            if (f == 0 && im != null) view.fitBox(p.sheetId, android.graphics.RectF(im.x, im.y, im.x + im.w, im.y + im.h), android.graphics.RectF(view.width * 0.25f, view.height * 0.25f, view.width * 0.75f, view.height * 0.75f))
+                        }
+                    }
                     "tour" -> {
                         // Every page in turn, whole, a few frames each (all of them loaded).
                         val per = frames(20)
@@ -200,10 +207,9 @@ object PerfBench {
                 if (s != null && i > 0) {
                     intervals += dt; draws += d; records += r
                 }
-                if (s != null && s.seconds > 0 && i == 0) s.until = SystemClock.uptimeMillis() + s.seconds * 1000L
                 if (s == null || i >= s.frames || (s.seconds > 0 && SystemClock.uptimeMillis() > s.until)) {
                     if (s != null) report(s.name)
-                    cur = steps.removeFirstOrNull()
+                    cur = steps.removeFirstOrNull()?.also { if (it.seconds > 0) it.until = SystemClock.uptimeMillis() + it.seconds * 1000L }
                     i = 0
                     if (cur == null) { finish(); return }
                     intervals.clear(); draws.clear(); records.clear(); recorded = 0; why.fill(0); synchronized(totals) { totals.clear() }
