@@ -599,12 +599,13 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         }
     }
 
-    /** Changes a coordinate system (its functions, ranges, look; one undo step). */
-    fun setPlot(sheetId: String, plot: uniffi.n0te_ffi.FfiPlot) {
+    /** Changes a coordinate system (its functions, ranges, look; one undo step); [then] once the page has it. */
+    fun setPlot(sheetId: String, plot: uniffi.n0te_ffi.FfiPlot, then: () -> Unit = {}) {
         val st = state(sheetId)
         withHandle(st) { hd ->
             N0te.background({ hd.setPlot(plot); st.images = hd.images() }) { r ->
                 if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId); onChanged() }
+                then()
             }
         }
     }

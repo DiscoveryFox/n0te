@@ -2644,12 +2644,25 @@ class NotebookView(context: Context) : View(context) {
     private var liveDrag: Triple<String, uniffi.n0te_ffi.FfiPlot, String>? = null
 
     /**
+     * An axis of an interactive graph being stretched on the page: its sheet, the plot when the
+     * drag began, which axis (1 x, 2 y), where it was grabbed (page points), the page's squares
+     * (0: none), the plot as it is now.
+     */
+    private class AxisDrag(val sheet: String, val start: uniffi.n0te_ffi.FfiPlot, val axis: Int, val downX: Float, val downY: Float, val squares: Float, val pointer: Int) {
+        var now = start
+    }
+    private var axisDrag: AxisDrag? = null
+
+    /**
      * Interactive graphs (switched on per graph): a touch on one of their points or sliders drags
-     * it right on the page; letting go stores it (one step to undo). Elsewhere nothing changes.
+     * it right on the page; on an axis (the pen, or a finger where fingers write) it stretches
+     * only that axis, as in the editor. Letting go stores it (one step to undo). Elsewhere
+     * nothing changes.
      */
     private fun interactiveTouch(ev: MotionEvent): Boolean {
         if (graph != null || readOnly) return false
         val m = model ?: return false
+        if (axisDrag != null) return axisTouch(ev, m)
         when (ev.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 val wx = toWorldX(ev.getX(0)); val wy = toWorldY(ev.getY(0))
@@ -2657,14 +2670,27 @@ class NotebookView(context: Context) : View(context) {
                 val x = wx - p.rect.left; val y = wy - p.rect.top
                 val st = m.sheets[p.sheetId] ?: return false
                 val tol = 14f * density / scale
+                val stylus = isStylus(ev.getToolType(0))
+                val erasing = stylus && (ev.getToolType(0) == MotionEvent.TOOL_TYPE_ERASER || (Settings.sideButtonErases && (eraseButton(ev) || penButton)))
+                val axes = eyedropper == null && plotBox == null &&
+                    PageAxis.allowed(stylus, erasing, tool, penOnly, navigateOnly, palm = !stylus && isPalm(ev, 0), penNear = !stylus && penNear(ev.eventTime))
+                val axisTol = PageAxis.tolerance(stylus, density, scale)
                 for (im in st.images.reversed()) {
                     val plot = im.plot ?: continue
                     if (!plot.interactive || !RectF(im.x, im.y, im.x + im.w, im.y + im.h).apply { inset(-tol, -tol) }.contains(x, y)) continue
-                    val id = uniffi.n0te_ffi.plotHit(plot, x, y, tol) ?: continue
-                    val info = uniffi.n0te_ffi.plotInfo(plot).firstOrNull { it.id == id } ?: continue
-                    if (!info.draggable && info.sliderValue == null) continue
-                    liveDrag = Triple(p.sheetId, plot, id)
-                    return true
+                    val id = uniffi.n0te_ffi.plotHit(plot, x, y, tol)
+                    val info = id?.let { h -> uniffi.n0te_ffi.plotInfo(plot).firstOrNull { it.id == h } }
+                    if (id != null && info != null && (info.draggable || info.sliderValue != null)) {
+                        liveDrag = Triple(p.sheetId, plot, id)
+                        return true
+                    }
+                    // Not on a point or slider: an axis grabbed stretches alone.
+                    val axis = if (axes && info == null) uniffi.n0te_ffi.plotAxisAt(plot, x, y, axisTol).toInt() else 0
+                    if (axis != 0) {
+                        axisDrag = AxisDrag(p.sheetId, plot, axis, x, y, if (p.isBoard) 0f else PageAxis.squares(p.spec), ev.getPointerId(0))
+                        if (stylus) { requestUnbufferedDispatch(ev); parent?.requestDisallowInterceptTouchEvent(true) }
+                        return true
+                    }
                 }
                 return false
             }
@@ -2697,6 +2723,44 @@ class NotebookView(context: Context) : View(context) {
             }
         }
         return liveDrag != null
+    }
+
+    /** The touch that grabbed an axis: stretches it while it moves, stores it (snapped to the squares) when it lifts. */
+    private fun axisTouch(ev: MotionEvent, m: NotebookModel): Boolean {
+        val d = axisDrag ?: return false
+        val i = ev.findPointerIndex(d.pointer)
+        fun pagePoint(): Pair<Float, Float>? {
+            val p = board?.takeIf { it.sheetId == d.sheet } ?: m.placed.firstOrNull { it.sheetId == d.sheet } ?: return null
+            if (i < 0) return null
+            return (toWorldX(ev.getX(i)) - p.rect.left) to (toWorldY(ev.getY(i)) - p.rect.top)
+        }
+        // Another finger coming or going changes nothing; the one that grabbed lifting ends it.
+        val action = if (ev.actionMasked == MotionEvent.ACTION_POINTER_UP && ev.actionIndex == i) MotionEvent.ACTION_UP else ev.actionMasked
+        when (action) {
+            MotionEvent.ACTION_MOVE -> {
+                val (x, y) = pagePoint() ?: return true
+                // Always from the plot as it was when it was grabbed: the number grabbed stays under the pen.
+                val s = if (d.axis == 1) uniffi.n0te_ffi.plotAxisDragged(d.start, 1.toUByte(), d.downX, x) else uniffi.n0te_ffi.plotAxisDragged(d.start, 2.toUByte(), d.downY, y)
+                d.now = s.copy(x = d.start.x, y = d.start.y, w = d.start.w, h = d.start.h)
+                plotDraft = d.now
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                axisDrag = null
+                val stored = m.sheets[d.sheet]?.images?.firstOrNull { it.id == d.start.id }?.plot
+                if (action == MotionEvent.ACTION_UP && stored != null && d.now != d.start) {
+                    // In its box as stored now; one step to undo.
+                    val put = PageAxis.settled(d.now.copy(x = stored.x, y = stored.y, w = stored.w, h = stored.h), d.squares)
+                    if (put != stored) {
+                        // Shown as put down until the page has it.
+                        plotDraft = put
+                        m.setPlot(d.sheet, put) { if (plotDraft === put) plotDraft = null }
+                        return true
+                    }
+                }
+                plotDraft = null
+            }
+        }
+        return true
     }
 
     override fun onTouchEvent(ev: MotionEvent): Boolean {
