@@ -3,13 +3,21 @@
 //! landscape frames. Pan with the wheel / trackpad / left or middle drag, zoom with
 //! ctrl+wheel around the cursor; a click on a group title folds or unfolds it.
 //!
-//! Drawing: each page's paper and pattern go into one `canvas::Cache` at a power-of-two level
-//! of detail; its strokes become one triangle mesh in page units (`ink::outline_mesh`, no
-//! tessellation) drawn under a GPU transformation, so neither panning nor zooming rebuilds
-//! anything. Coordinate systems are ink too (their look from the core, [`crate::plots`]): one
-//! more mesh per page under the strokes, rebuilt only when a plot changes. A sheet's strokes
-//! are read from disk the first time it becomes visible; caches of pages not drawn for a while
-//! are dropped (LRU).
+//! Drawing: each page's paper is one quad; its pattern goes into `canvas::Cache` tiles of
+//! [`TILE_PX`] pixels at a power-of-two level of detail, built for the part in view only (a
+//! huge page at a high zoom never builds a huge picture). Its strokes are sorted into square
+//! cells ([`CELL`]), each cell one triangle mesh in page units (`ink::outline_mesh`, no
+//! tessellation) drawn under a GPU transformation: only cells in view are drawn (the GPU uploads
+//! a cached mesh again whenever the view moves, so what is out of view costs nothing), and after
+//! an edit only the cells whose strokes changed are built again. Zoomed out, the meshes keep
+//! fewer samples (never more than half a pixel off). Coordinate systems are ink too (their look
+//! from the core, [`crate::plots`]): one more mesh per page under the strokes, rebuilt only when
+//! a plot changes. A sheet's strokes are read from disk the first time it becomes visible;
+//! caches of pages not drawn for a while are dropped (LRU).
+//!
+//! Every view of the same pages (the page view, the writing magnifier, the outline's small
+//! pictures) has GPU caches of its own ([`Slot`]): a cache drawn twice in one frame would show
+//! only where it was drawn last.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -44,11 +52,32 @@ pub const MAX_ZOOM: f32 = 8.0;
 pub const MAX_CACHED: usize = 24;
 /// Pencil passes (outer band, middle band, core) at the tablet's default softness.
 const PENCIL_ALPHA: [f32; 3] = [0.84, 0.14, 0.24];
+/// Strokes go into square cells this big (page points) by the middle of their box; a cell is
+/// one mesh (an A4 page has four).
+pub const CELL: f32 = 512.0;
+/// A background tile is this many pixels of its level of detail on a side.
+pub const TILE_PX: f32 = 1024.0;
+/// Background tiles kept per page (the least recently drawn go first).
+const MAX_TILES: usize = 64;
+
+/// Which view draws (each has GPU caches of its own, see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Slot {
+    #[default]
+    Main,
+    /// The writing magnifier's strip (n0te Tablet).
+    Loupe,
+    /// The outline's small pictures.
+    Thumb,
+}
 
 /// What a sheet holds.
 #[derive(Default)]
 pub struct SheetContent {
-    pub strokes: Vec<Stroke>,
+    pub strokes: Vec<Rc<Stroke>>,
+    /// Where the sheet's history stood when this was read: read again after an edit, only
+    /// what changed since is decoded ([`SheetContent::read`]).
+    pub version: Option<n0te_core::sheet::VersionMark>,
     pub texts: Vec<TextBox>,
     /// A text page's Markdown body.
     pub body: String,
@@ -58,27 +87,109 @@ pub struct SheetContent {
     pub plots: Vec<Plot>,
 }
 
-/// Reads a sheet's content (from the library).
-pub type Loader = Box<dyn Fn(&str) -> SheetContent>;
+impl SheetContent {
+    /// What `sheet` holds. With `old` (the same sheet read before), only what changed since is
+    /// read: a page with a million samples gets one more stroke in a moment. `image`: an
+    /// image's file.
+    pub fn read(sheet: &n0te_core::sheet::Sheet, old: Option<&SheetContent>, image: impl Fn(&n0te_core::sheet::ImageObj) -> Option<std::path::PathBuf>) -> SheetContent {
+        let version = Some(sheet.version_mark());
+        if let Some(old) = old
+            && let Some(v) = &old.version
+            && let Some(ch) = sheet.changes_since(v)
+        {
+            let mut out: HashSet<&str> = ch.gone.iter().map(String::as_str).collect();
+            out.extend(ch.strokes.iter().map(|s| s.id.as_str()));
+            let mut strokes: Vec<Rc<Stroke>> = old.strokes.iter().filter(|s| !out.contains(s.id.as_str())).cloned().collect();
+            strokes.extend(ch.strokes.into_iter().map(Rc::new));
+            let (texts, body, images, plots) = if ch.other {
+                (sheet.text_boxes(), sheet.page_text(), sheet.images().into_iter().filter_map(|i| image(&i).map(|p| (i, p))).collect(), sheet.plots())
+            } else {
+                (old.texts.clone(), old.body.clone(), old.images.clone(), old.plots.clone())
+            };
+            return SheetContent { strokes, version, texts, body, images, plots };
+        }
+        SheetContent {
+            strokes: sheet.strokes().into_iter().map(Rc::new).collect(),
+            version,
+            texts: sheet.text_boxes(),
+            body: sheet.page_text(),
+            images: sheet.images().into_iter().filter_map(|i| image(&i).map(|p| (i, p))).collect(),
+            plots: sheet.plots(),
+        }
+    }
+}
+
+/// Reads a sheet's content: from the sheet given (open here already) or else from the library;
+/// strokes unchanged since the content given are taken from there ([`SheetContent::read`]).
+pub type Loader = Box<dyn Fn(&str, Option<&n0te_core::sheet::Sheet>, Option<&SheetContent>) -> SheetContent>;
 
 thread_local! {
     /// Image handles per file (iced decodes and caches by handle).
     static IMAGES: RefCell<HashMap<std::path::PathBuf, iced::advanced::image::Handle>> = RefCell::new(HashMap::new());
 }
 
+/// A background tile: (view, level of detail, column, row, the paper's extent it was cut to).
+type TileKey = (Slot, u32, i32, i32, u64);
+
+/// One cell of a page's ink: which strokes, their box, and its meshes as built so far.
+struct Chunk {
+    /// Of its strokes as drawn (ids, boxes, brushes, ends; erased or cut ones counted).
+    fp: u64,
+    /// Around its strokes (page-local).
+    bounds: Rect,
+    /// Indices into the content's strokes.
+    strokes: Vec<usize>,
+    /// (view, sample step, clip, mesh).
+    meshes: Vec<(Slot, u8, Rectangle, mesh::Cache)>,
+    last_frame: u64,
+}
+
+impl Chunk {
+    /// Builds its mesh for `slot` at sample step `level` (the one it had for `slot` goes).
+    fn build(&mut self, strokes: &[Rc<Stroke>], erasing: Option<&Erasing>, slot: Slot, level: u8, clip: Rectangle) -> mesh::Cache {
+        let cache = mesh::Cache::new(Arc::from(chunk_meshes(strokes, &self.strokes, erasing, level as usize, clip)));
+        self.meshes.retain(|m| m.0 != slot);
+        self.meshes.push((slot, level, clip, cache.clone()));
+        cache
+    }
+}
+
+/// What a cell's meshes are clipped to: the page, or (a board on its own) the cell's ink.
+fn chunk_clip(page: Option<Rectangle>, chunk: &Chunk) -> Rectangle {
+    page.unwrap_or_else(|| {
+        let b = chunk.bounds.inflate(4.0);
+        Rectangle::new(Point::new(b.x0, b.y0), Size::new(b.width(), b.height()))
+    })
+}
+
+/// A page's ink sorted into cells.
+#[derive(Default)]
+struct Cells {
+    /// What they were sorted from: the content's generation and how far an erasing on it got.
+    sig: Option<(u64, Option<(usize, usize, usize)>)>,
+    map: HashMap<(i32, i32), Chunk>,
+}
+
+static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub struct Page {
     pub placed: Placed,
     content: RefCell<Option<Rc<SheetContent>>>,
-    cache: RefCell<canvas::Cache>,
-    lod: Cell<f32>,
-    /// (sample step, mesh): zoomed-out views use a decimated mesh.
-    ink: RefCell<Option<(usize, mesh::Cache)>>,
-    /// The plots the mesh shows, and the mesh: kept while the sheet's plots stay the same (a
-    /// reload for a new stroke doesn't rebuild it).
-    plots: RefCell<Option<(Vec<Plot>, Option<mesh::Cache>)>>,
+    /// Changes whenever the content is dropped or replaced (the cells sort it again).
+    generation: Cell<u64>,
+    /// Pattern tiles with the frame they were last drawn in.
+    tiles: RefCell<HashMap<TileKey, (canvas::Cache, u64)>>,
+    cells: RefCell<Cells>,
+    /// Per view: the plots the mesh shows, and the mesh: kept while the sheet's plots stay the
+    /// same (a reload for a new stroke doesn't rebuild it).
+    plots: RefCell<Vec<(Slot, Vec<Plot>, Option<mesh::Cache>)>>,
     /// The coarse ink mesh of the page's small picture (outline): built when first shown,
     /// dropped whenever the sheet changes (with its content).
-    thumb: RefCell<Option<mesh::Cache>>,
+    thumb: RefCell<Option<(f32, mesh::Cache)>>,
     last_frame: Cell<u64>,
 }
 
@@ -87,24 +198,28 @@ impl Page {
         Page {
             placed,
             content: RefCell::new(None),
-            cache: RefCell::new(canvas::Cache::new()),
-            lod: Cell::new(0.0),
-            ink: RefCell::new(None),
-            plots: RefCell::new(None),
+            generation: Cell::new(next_generation()),
+            tiles: RefCell::new(HashMap::new()),
+            cells: RefCell::new(Cells::default()),
+            plots: RefCell::new(Vec::new()),
             thumb: RefCell::new(None),
             last_frame: Cell::new(0),
         }
     }
 
-    /// The strokes for the small picture: every fourth sample is plenty that small.
-    fn thumb_mesh(&self, load: &Loader) -> mesh::Cache {
-        if let Some(cache) = self.thumb.borrow().as_ref() {
+    /// The strokes for the small picture `zoom` pixels per point: no two samples closer than
+    /// half a pixel, plenty that small (a huge page's picture stays small too).
+    fn thumb_mesh(&self, load: &Loader, zoom: f32) -> mesh::Cache {
+        if let Some((z, cache)) = self.thumb.borrow().as_ref()
+            && (z / zoom - 1.0).abs() < 0.25
+        {
             return cache.clone();
         }
         let content = self.content(load);
         let (w, h) = self.size();
-        let cache = mesh::Cache::new(Arc::from(ink_meshes(&content.strokes, 4, Rectangle::new(Point::ORIGIN, Size::new(w, h)))));
-        *self.thumb.borrow_mut() = Some(cache.clone());
+        let tol = 0.5 / zoom.max(1e-3);
+        let cache = mesh::Cache::new(Arc::from(ink_meshes_tol(content.strokes.iter().map(|s| (s.points.as_slice(), &s.brush)), tol, Rectangle::new(Point::ORIGIN, Size::new(w, h)))));
+        *self.thumb.borrow_mut() = Some((zoom, cache.clone()));
         cache
     }
 
@@ -117,70 +232,163 @@ impl Page {
     }
 
     fn is_cached(&self) -> bool {
-        self.lod.get() > 0.0 || self.ink.borrow().is_some()
+        !self.tiles.borrow().is_empty() || self.cells.borrow().map.values().any(|c| !c.meshes.is_empty())
     }
 
     fn evict(&self) {
-        *self.cache.borrow_mut() = canvas::Cache::new();
-        *self.ink.borrow_mut() = None;
-        *self.plots.borrow_mut() = None;
-        self.lod.set(0.0);
+        self.tiles.borrow_mut().clear();
+        for c in self.cells.borrow_mut().map.values_mut() {
+            c.meshes.clear();
+        }
+        self.plots.borrow_mut().clear();
     }
 
     fn content(&self, load: &Loader) -> Rc<SheetContent> {
-        self.content.borrow_mut().get_or_insert_with(|| Rc::new(load(&self.placed.sheet_id))).clone()
+        self.content.borrow_mut().get_or_insert_with(|| Rc::new(load(&self.placed.sheet_id, None, None))).clone()
     }
 
-    /// Paper and pattern at `lod`, built on first use.
-    fn background(&self, renderer: &iced::Renderer, lod: f32) -> canvas::Geometry {
-        let (w, h) = self.size();
+    /// Drops the content (read again when next needed).
+    fn forget(&self) {
+        *self.content.borrow_mut() = None;
+        *self.thumb.borrow_mut() = None;
+        self.generation.set(next_generation());
+    }
+
+    /// The paper's pattern over the part `view` (page-local) of a page `extent` big (None: a
+    /// board shown on its own, paper everywhere), drawn at `at` (the page's top-left on screen):
+    /// the tiles in view at the zoom's level of detail, each built once.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pattern(&self, r: &mut iced::Renderer, at: Point, cam: &Camera, slot: Slot, view: Rect, extent: Option<(f32, f32)>, frame_no: u64) {
         let spec = &self.placed.spec;
         let board = self.placed.is_board();
-        let geometry = self.cache.borrow().draw(renderer, Size::new(w * lod, h * lod), |frame| {
-            frame.scale(lod);
-            frame.fill_rectangle(Point::ORIGIN, Size::new(w, h), theme::p().paper);
-            if board {
-                draw_pattern(frame, Background::Dots, w, h, spec.spacing.max(4.0), lod);
-            } else if spec.pdf.is_none() {
-                draw_pattern(frame, spec.background, w, h, spec.spacing.max(4.0), lod);
+        let bg = if board { Background::Dots } else { spec.background };
+        if !board && (spec.pdf.is_some() || matches!(bg, Background::Blank | Background::Text)) {
+            return;
+        }
+        let step = if board && spec.spacing < 4.0 { 24.0 } else { spec.spacing.max(4.0) };
+        let lod = lod_for(cam.zoom);
+        let span = TILE_PX / lod;
+        let ext_key = extent.map_or(0, |(w, h)| (w.to_bits() as u64) << 32 | h.to_bits() as u64);
+        let mut tiles = self.tiles.borrow_mut();
+        for (ix, iy) in tiles_in(view, extent, span) {
+            let key = (slot, lod.to_bits(), ix, iy, ext_key);
+            let tile = tile_rect(ix, iy, span, extent);
+            let entry = tiles.entry(key).or_insert_with(|| (canvas::Cache::new(), frame_no));
+            entry.1 = frame_no;
+            let geometry = entry.0.draw(r, Size::new(tile.width() * lod, tile.height() * lod), |frame| {
+                frame.scale(lod);
+                frame.translate(Vector::new(-tile.x0, -tile.y0));
+                draw_pattern(frame, bg, extent, tile, step, lod);
+            });
+            let pos = Point::new(at.x + tile.x0 * cam.zoom, at.y + tile.y0 * cam.zoom);
+            r.with_translation(Vector::new(pos.x, pos.y), |r| {
+                r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
+            });
+        }
+        if tiles.len() > MAX_TILES {
+            let mut ages: Vec<(u64, TileKey)> = tiles.iter().map(|(k, v)| (v.1, *k)).collect();
+            ages.sort_by_key(|a| a.0);
+            for (_, k) in ages.into_iter().take(tiles.len() - MAX_TILES) {
+                tiles.remove(&k);
             }
-        });
-        self.lod.set(lod);
-        geometry
+        }
     }
 
-    /// The strokes as triangle meshes in page units (one per pencil pass), built on first use.
-    fn ink_mesh(&self, zoom: f32, load: &Loader, erasing: Option<&Erasing>) -> mesh::Cache {
-        let step = mesh_step(zoom);
-        if let Some((s, cache)) = self.ink.borrow().as_ref()
-            && *s == step
-        {
-            return cache.clone();
+    /// Sorts the strokes into cells (again, once they or the erasing on them changed); a cell
+    /// whose strokes look the same keeps its meshes.
+    fn sort_cells(&self, content: &SheetContent, erasing: Option<&Erasing>) {
+        let sig = (self.generation.get(), erasing.map(|e| (e.hidden.len(), e.cut.len(), e.dabs.len())));
+        let mut cells = self.cells.borrow_mut();
+        if cells.sig == Some(sig) {
+            return;
         }
+        cells.sig = Some(sig);
+        let mut fresh: HashMap<(i32, i32), (Vec<usize>, std::collections::hash_map::DefaultHasher, Rect)> = HashMap::new();
+        for (i, s) in content.strokes.iter().enumerate() {
+            let cut = match erasing {
+                Some(e) if e.hidden.contains(&s.id) => continue,
+                Some(e) if e.cut.contains(&s.id) => Some(e.dabs.iter().filter(|d| touches(&s.bounds, &[d.0, d.1, d.2], s.brush.width)).count()),
+                _ => None,
+            };
+            let e = fresh.entry(cell_of(&s.bounds)).or_insert_with(|| (Vec::new(), Default::default(), Rect::EMPTY));
+            e.0.push(i);
+            stroke_fp(s, cut, &mut e.1);
+            e.2 = e.2.union(&s.bounds);
+        }
+        let old = std::mem::take(&mut cells.map);
+        let mut old = old;
+        for (cell, (strokes, h, bounds)) in fresh {
+            use std::hash::Hasher;
+            let fp = h.finish();
+            let chunk = match old.remove(&cell) {
+                Some(c) if c.fp == fp => Chunk { strokes, bounds, ..c },
+                _ => Chunk { fp, bounds, strokes, meshes: Vec::new(), last_frame: 0 },
+            };
+            cells.map.insert(cell, chunk);
+        }
+    }
+
+    /// Builds the meshes of the cells in `view` (page-local) that the zoom's level lacks, until
+    /// `deadline`; whether all are there (the page view does this before it draws a frame, so a
+    /// zoom past a level builds a little per frame and draws the cells it hasn't got to yet as
+    /// they were).
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_ink(&self, cam: &Camera, slot: Slot, view: Rect, load: &Loader, erasing: Option<&Erasing>, clip: Option<Rectangle>, deadline: std::time::Instant) -> bool {
         let content = self.content(load);
-        let (w, h) = self.size();
-        let clip = Rectangle::new(Point::ORIGIN, Size::new(w, h));
-        let meshes = match erasing {
-            Some(e) => ink_meshes(&e.apply(&content.strokes), step, clip),
-            None => ink_meshes(&content.strokes, step, clip),
-        };
-        let cache = mesh::Cache::new(Arc::from(meshes));
-        *self.ink.borrow_mut() = Some((step, cache.clone()));
-        cache
+        self.sort_cells(&content, erasing);
+        let level = mesh_step(cam.zoom) as u8;
+        let mut cells = self.cells.borrow_mut();
+        for chunk in cells.map.values_mut().filter(|c| c.bounds.intersects(&view)) {
+            let clip = chunk_clip(clip, chunk);
+            if chunk.meshes.iter().any(|m| m.0 == slot && m.1 == level && m.2 == clip) {
+                continue;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            chunk.build(&content.strokes, erasing, slot, level, clip);
+        }
+        true
+    }
+
+    /// Draws the ink in `view` (page-local) at `at`: the cells in view, each mesh built when
+    /// first needed (one at another level stands in while [`Page::prepare_ink`] gets to it).
+    /// `clip`: the page (None: a board on its own, unclipped).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_ink(&self, r: &mut iced::Renderer, at: Point, cam: &Camera, slot: Slot, view: Rect, load: &Loader, erasing: Option<&Erasing>, clip: Option<Rectangle>, frame_no: u64) {
+        let content = self.content(load);
+        self.sort_cells(&content, erasing);
+        let level = mesh_step(cam.zoom) as u8;
+        let mut cells = self.cells.borrow_mut();
+        let mut seen: Vec<(&(i32, i32), &mut Chunk)> = cells.map.iter_mut().filter(|(_, c)| c.bounds.intersects(&view)).collect();
+        seen.sort_by_key(|(k, _)| **k);
+        for (_, chunk) in seen {
+            chunk.last_frame = frame_no;
+            let clip = chunk_clip(clip, chunk);
+            let cache = match chunk.meshes.iter().find(|m| m.0 == slot && m.2 == clip) {
+                Some(m) => m.3.clone(),
+                None => chunk.build(&content.strokes, erasing, slot, level, clip),
+            };
+            r.with_translation(Vector::new(at.x, at.y), |r| {
+                r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(cache));
+            });
+        }
     }
 
     /// The page's coordinate systems as one mesh in page units (None: it has none), built when
     /// they change.
-    fn plot_mesh(&self, load: &Loader) -> Option<mesh::Cache> {
+    fn plot_mesh(&self, load: &Loader, slot: Slot) -> Option<mesh::Cache> {
         let content = self.content(load);
-        if let Some((plots, cache)) = self.plots.borrow().as_ref()
+        let mut all = self.plots.borrow_mut();
+        if let Some((_, plots, cache)) = all.iter().find(|p| p.0 == slot)
             && *plots == content.plots
         {
             return cache.clone();
         }
         let (w, h) = self.size();
         let cache = crate::plots::meshes(&content.plots, Rectangle::new(Point::ORIGIN, Size::new(w, h))).map(|m| mesh::Cache::new(Arc::from(m)));
-        *self.plots.borrow_mut() = Some((content.plots.clone(), cache.clone()));
+        all.retain(|p| p.0 != slot);
+        all.push((slot, content.plots.clone(), cache.clone()));
         cache
     }
 
@@ -233,7 +441,7 @@ pub fn pdf_parts(spec: &SheetSpec, visible: Rect) -> Vec<PdfPart> {
 
 /// Whether `strokes` holds the finished live stroke `l` (same colour, about the same place and
 /// size; a recognised shape keeps its extent, so it matches too).
-pub fn stored_has(strokes: &[Stroke], l: &LiveInk) -> bool {
+pub fn stored_has<'a>(strokes: impl IntoIterator<Item = &'a Stroke>, l: &LiveInk) -> bool {
     let Some(first) = l.points.first() else { return true };
     let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x, first.y);
     for q in &l.points {
@@ -243,7 +451,7 @@ pub fn stored_has(strokes: &[Stroke], l: &LiveInk) -> bool {
         y1 = y1.max(q.y);
     }
     let tol = 2.0 + l.brush.width * 2.0 + 0.2 * (x1 - x0).max(y1 - y0);
-    strokes.iter().any(|s| {
+    strokes.into_iter().any(|s| {
         let b = s.bounds;
         s.brush.color == l.brush.color && (b.x0 - x0).abs() <= tol && (b.y0 - y0).abs() <= tol && (b.x1 - x1).abs() <= tol && (b.y1 - y1).abs() <= tol
     })
@@ -288,7 +496,7 @@ impl Erasing {
     }
 
     /// The stored sheet has none of the strokes this hid or cut any more: it's done.
-    fn settled(&self, strokes: &[Stroke]) -> bool {
+    fn settled(&self, strokes: &[Rc<Stroke>]) -> bool {
         !strokes.iter().any(|s| self.hidden.contains(&s.id) || self.cut.contains(&s.id))
     }
 }
@@ -299,7 +507,8 @@ fn touches(b: &Rect, d: &[f32; 3], width: f32) -> bool {
     d[0] >= b.x0 - m && d[0] <= b.x1 + m && d[1] >= b.y0 - m && d[1] <= b.y1 + m
 }
 
-/// Every how many samples the mesh keeps at a zoom (zoomed out, full resolution only costs).
+/// Every how many samples the ink meshes keep at a zoom (zoomed out, full resolution only
+/// costs); also the level a cell's mesh is built for.
 pub fn mesh_step(zoom: f32) -> usize {
     match zoom {
         z if z >= 0.6 => 1,
@@ -308,6 +517,7 @@ pub fn mesh_step(zoom: f32) -> usize {
     }
 }
 
+/// Every `step`-th sample (and the last); all of them for `step` 1.
 fn thin<'a>(points: &'a [ink::InkPoint], step: usize, buf: &'a mut Vec<ink::InkPoint>) -> &'a [ink::InkPoint] {
     if step > 1 && points.len() > 2 * step {
         buf.clear();
@@ -321,75 +531,210 @@ fn thin<'a>(points: &'a [ink::InkPoint], step: usize, buf: &'a mut Vec<ink::InkP
     }
 }
 
+/// The samples at least `tol` apart (the first and the last always stay); all of them for
+/// `tol` 0.
+pub fn decimate<'a>(points: &'a [ink::InkPoint], tol: f32, buf: &'a mut Vec<ink::InkPoint>) -> &'a [ink::InkPoint] {
+    if tol <= 0.0 || points.len() <= 2 {
+        return points;
+    }
+    buf.clear();
+    let mut last = points[0];
+    buf.push(last);
+    for p in &points[1..points.len() - 1] {
+        if (p.x - last.x).hypot(p.y - last.y) >= tol {
+            buf.push(*p);
+            last = *p;
+        }
+    }
+    buf.push(points[points.len() - 1]);
+    buf
+}
+
+/// The cell a stroke goes into: where the middle of its box lies.
+pub fn cell_of(b: &Rect) -> (i32, i32) {
+    (((b.x0 + b.x1) * 0.5 / CELL).floor() as i32, ((b.y0 + b.y1) * 0.5 / CELL).floor() as i32)
+}
+
+/// Adds what a stroke looks like to a cell's fingerprint (`cut`: how many eraser dabs cut it).
+fn stroke_fp(s: &Stroke, cut: Option<usize>, h: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+    s.id.hash(h);
+    s.points.len().hash(h);
+    for v in [s.brush.width, s.brush.thinning, s.bounds.x0, s.bounds.y0, s.bounds.x1, s.bounds.y1] {
+        v.to_bits().hash(h);
+    }
+    (s.brush.color, s.brush.kind, cut).hash(h);
+    for p in [s.points.first(), s.points.last()].into_iter().flatten() {
+        (p.x.to_bits(), p.y.to_bits(), p.pressure.to_bits()).hash(h);
+    }
+}
+
+/// The meshes of the strokes `which` (indices into `strokes`), with what an erasing hides or
+/// cuts left out.
+fn chunk_meshes(strokes: &[Rc<Stroke>], which: &[usize], erasing: Option<&Erasing>, step: usize, clip: Rectangle) -> Vec<Mesh> {
+    let mut runs: Vec<(Vec<ink::InkPoint>, ink::Brush)> = Vec::new();
+    let mut whole: Vec<&Stroke> = Vec::with_capacity(which.len());
+    for &i in which {
+        let s = &*strokes[i];
+        match erasing {
+            Some(e) if e.hidden.contains(&s.id) => {}
+            Some(e) if e.cut.contains(&s.id) => match n0te_core::sheet::cut_stroke(&s.points, s.brush.width, &e.dabs) {
+                Some(cut) => runs.extend(cut.into_iter().map(|r| (r, s.brush))),
+                None => whole.push(s),
+            },
+            _ => whole.push(s),
+        }
+    }
+    ink_meshes_of(whole.iter().map(|s| (s.points.as_slice(), &s.brush)).chain(runs.iter().map(|(p, b)| (p.as_slice(), b))), step, clip)
+}
+
+/// The background tiles (column, row) `span` page points big that `view` (page-local) touches
+/// on paper `extent` big (None: endless, a board on its own).
+pub fn tiles_in(view: Rect, extent: Option<(f32, f32)>, span: f32) -> Vec<(i32, i32)> {
+    let (mut v, mut out) = (view, Vec::new());
+    if let Some((w, h)) = extent {
+        v = Rect { x0: v.x0.max(0.0), y0: v.y0.max(0.0), x1: v.x1.min(w), y1: v.y1.min(h) };
+    }
+    if !(v.x0 < v.x1 && v.y0 < v.y1) || span <= 0.0 {
+        return out;
+    }
+    let (c0, c1) = ((v.x0 / span).floor() as i32, ((v.x1 / span).ceil() as i32 - 1).max((v.x0 / span).floor() as i32));
+    let (r0, r1) = ((v.y0 / span).floor() as i32, ((v.y1 / span).ceil() as i32 - 1).max((v.y0 / span).floor() as i32));
+    // Far too many (a broken camera): draw none rather than hang.
+    if (c1 - c0 + 1) as i64 * (r1 - r0 + 1) as i64 > 4096 {
+        return out;
+    }
+    for r in r0..=r1 {
+        for c in c0..=c1 {
+            out.push((c, r));
+        }
+    }
+    out
+}
+
+/// A tile's rectangle (page-local), cut to the paper's extent.
+pub fn tile_rect(ix: i32, iy: i32, span: f32, extent: Option<(f32, f32)>) -> Rect {
+    let r = Rect { x0: ix as f32 * span, y0: iy as f32 * span, x1: (ix + 1) as f32 * span, y1: (iy + 1) as f32 * span };
+    match extent {
+        Some((w, h)) => Rect { x1: r.x1.min(w), y1: r.y1.min(h), ..r },
+        None => r,
+    }
+}
+
 /// All strokes of a page as solid meshes (page units, colour per vertex). Pencils are three
-/// translucent bands like on the tablet (without the grain).
+/// translucent bands like on the tablet (without the grain). `step`: every how many samples.
 pub fn ink_meshes(strokes: &[Stroke], step: usize, clip: Rectangle) -> Vec<Mesh> {
     ink_meshes_of(strokes.iter().map(|s| (s.points.as_slice(), &s.brush)), step, clip)
 }
 
 /// Like [`ink_meshes`], for any ink: (points, brush) per stroke.
 pub fn ink_meshes_of<'a>(strokes: impl IntoIterator<Item = (&'a [ink::InkPoint], &'a ink::Brush)>, step: usize, clip: Rectangle) -> Vec<Mesh> {
-    let (mut xy, mut indices) = (Vec::new(), Vec::new());
-    let mut vertices: Vec<SolidVertex2D> = Vec::new();
     let mut buf = Vec::new();
-    let push = |points: &[ink::InkPoint], brush: &ink::Brush, color: Color, xy: &mut Vec<f32>, indices: &mut Vec<u32>, vertices: &mut Vec<SolidVertex2D>| {
-        let start = xy.len();
-        ink::outline_mesh(points, brush, xy, indices);
-        let packed = color::pack(color);
-        vertices.extend(xy[start..].chunks_exact(2).map(|v| SolidVertex2D { position: [v[0], v[1]], color: packed }));
-    };
+    let mut out = MeshBuilder::default();
     for (points, brush) in strokes {
-        let points = thin(points, step, &mut buf).to_vec();
-        let base = argb(brush.color);
-        if brush.kind == KIND_PENCIL {
-            push(&points, brush, Color { a: base.a * PENCIL_ALPHA[0], ..base }, &mut xy, &mut indices, &mut vertices);
-            for (i, b) in ink::pencil_layer_brushes(brush).iter().enumerate() {
-                push(&points, b, Color { a: base.a * PENCIL_ALPHA[i + 1], ..base }, &mut xy, &mut indices, &mut vertices);
-            }
-        } else {
-            push(&points, brush, base, &mut xy, &mut indices, &mut vertices);
-        }
+        out.push(thin(points, step, &mut buf), brush);
     }
-    if vertices.is_empty() {
-        return Vec::new();
-    }
-    vec![Mesh::Solid { buffers: Indexed { vertices, indices }, transformation: Transformation::IDENTITY, clip_bounds: clip }]
+    out.finish(clip)
 }
 
-/// A paper ruling in page units (the same spacing and margins as the tablet).
-fn draw_pattern(frame: &mut canvas::Frame, bg: Background, w: f32, h: f32, step: f32, lod: f32) {
-    let line = LineStroke::default().with_color(theme::PATTERN).with_width((1.0 / lod).max(0.5));
-    let hline = |frame: &mut canvas::Frame, y: f32| frame.stroke(&Path::line(Point::new(0.0, y), Point::new(w, y)), line.clone());
+/// Like [`ink_meshes_of`], keeping samples at least `tol` page points apart ([`decimate`]).
+pub fn ink_meshes_tol<'a>(strokes: impl IntoIterator<Item = (&'a [ink::InkPoint], &'a ink::Brush)>, tol: f32, clip: Rectangle) -> Vec<Mesh> {
+    let mut buf = Vec::new();
+    let mut out = MeshBuilder::default();
+    for (points, brush) in strokes {
+        out.push(decimate(points, tol, &mut buf), brush);
+    }
+    out.finish(clip)
+}
+
+/// Strokes going into one solid mesh (page units, colour per vertex).
+#[derive(Default)]
+struct MeshBuilder {
+    xy: Vec<f32>,
+    indices: Vec<u32>,
+    vertices: Vec<SolidVertex2D>,
+}
+
+impl MeshBuilder {
+    fn band(&mut self, points: &[ink::InkPoint], brush: &ink::Brush, color: Color) {
+        let start = self.xy.len();
+        ink::outline_mesh(points, brush, &mut self.xy, &mut self.indices);
+        let packed = color::pack(color);
+        self.vertices.extend(self.xy[start..].chunks_exact(2).map(|v| SolidVertex2D { position: [v[0], v[1]], color: packed }));
+    }
+
+    /// A stroke (pencils are three translucent bands like on the tablet, without the grain).
+    fn push(&mut self, points: &[ink::InkPoint], brush: &ink::Brush) {
+        let base = argb(brush.color);
+        if brush.kind == KIND_PENCIL {
+            self.band(points, brush, Color { a: base.a * PENCIL_ALPHA[0], ..base });
+            for (i, b) in ink::pencil_layer_brushes(brush).iter().enumerate() {
+                self.band(points, b, Color { a: base.a * PENCIL_ALPHA[i + 1], ..base });
+            }
+        } else {
+            self.band(points, brush, base);
+        }
+    }
+
+    fn finish(self, clip: Rectangle) -> Vec<Mesh> {
+        if self.vertices.is_empty() {
+            return Vec::new();
+        }
+        vec![Mesh::Solid { buffers: Indexed { vertices: self.vertices, indices: self.indices }, transformation: Transformation::IDENTITY, clip_bounds: clip }]
+    }
+}
+
+/// The multiples of `step` from `first` (a multiple) on that lie within `lo..=hi` and at most
+/// `last` (lines of a ruling inside a tile).
+fn ticks(step: f32, first: f32, last: f32, lo: f32, hi: f32) -> impl Iterator<Item = f32> {
+    let k0 = ((lo.max(first)) / step).ceil() as i64;
+    let k1 = ((hi.min(last)) / step).floor() as i64;
+    (k0..=k1).map(move |k| k as f32 * step)
+}
+
+/// A paper ruling in page units (the same spacing and margins as the tablet), the part of it
+/// in `tile` (page-local) on paper `extent` big (None: endless dots, a board on its own).
+fn draw_pattern(frame: &mut canvas::Frame, bg: Background, extent: Option<(f32, f32)>, tile: Rect, step: f32, lod: f32) {
+    let (w, h) = extent.unwrap_or((f32::INFINITY, f32::INFINITY));
+    let lw = (1.0 / lod).max(0.5);
+    let line = LineStroke::default().with_color(theme::PATTERN).with_width(lw);
+    // Lines across the tile (the frame cuts them at its edge): from one side to the other.
+    let (x0, x1) = (tile.x0.max(0.0), tile.x1.min(w));
+    let (y0, y1) = (tile.y0.max(0.0), tile.y1.min(h));
+    let hline = |frame: &mut canvas::Frame, y: f32, s: &LineStroke| frame.stroke(&Path::line(Point::new(x0, y), Point::new(x1, y)), s.clone());
     match bg {
         Background::Blank | Background::Text => {}
         Background::Lines => {
-            let mut y = step * 2.0;
-            while y <= h {
-                hline(frame, y);
-                y += step;
+            for y in ticks(step, step * 2.0, h, tile.y0 - lw, tile.y1 + lw) {
+                hline(frame, y, &line);
             }
         }
         Background::Cornell => {
             let mut y = 90.0;
             while y < h - 150.0 {
-                hline(frame, y);
+                if y >= tile.y0 - lw && y <= tile.y1 + lw {
+                    hline(frame, y, &line);
+                }
                 y += step;
             }
-            let margin = LineStroke::default().with_color(theme::alpha(theme::p().accent, 0.4)).with_width((1.5 / lod).max(0.75));
-            frame.stroke(&Path::line(Point::new(150.0, 70.0), Point::new(150.0, h - 150.0)), margin.clone());
-            frame.stroke(&Path::line(Point::new(0.0, h - 150.0), Point::new(w, h - 150.0)), margin.clone());
-            frame.stroke(&Path::line(Point::new(0.0, 70.0), Point::new(w, 70.0)), margin);
+            let mw = (1.5 / lod).max(0.75);
+            let margin = LineStroke::default().with_color(theme::alpha(theme::p().accent, 0.4)).with_width(mw);
+            let (top, bottom) = (70.0f32.max(y0 - mw), (h - 150.0).min(y1 + mw));
+            if 150.0 >= tile.x0 - mw && 150.0 <= tile.x1 + mw && top < bottom {
+                frame.stroke(&Path::line(Point::new(150.0, top), Point::new(150.0, bottom)), margin.clone());
+            }
+            for y in [h - 150.0, 70.0] {
+                if y >= tile.y0 - mw && y <= tile.y1 + mw {
+                    hline(frame, y, &margin);
+                }
+            }
         }
         Background::Grid => {
-            let mut x = step;
-            while x <= w {
-                frame.stroke(&Path::line(Point::new(x, 0.0), Point::new(x, h)), line.clone());
-                x += step;
+            for x in ticks(step, step, w, tile.x0 - lw, tile.x1 + lw) {
+                frame.stroke(&Path::line(Point::new(x, y0), Point::new(x, y1)), line.clone());
             }
-            let mut y = step;
-            while y <= h {
-                hline(frame, y);
-                y += step;
+            for y in ticks(step, step, h, tile.y0 - lw, tile.y1 + lw) {
+                hline(frame, y, &line);
             }
         }
         Background::Dots => {
@@ -398,15 +743,13 @@ fn draw_pattern(frame: &mut canvas::Frame, bg: Background, w: f32, h: f32, step:
             while s * lod < 8.0 {
                 s *= 2.0;
             }
+            let r = (1.3 / lod).max(0.6);
+            let (first, last) = if extent.is_some() { (0.0, (w, h)) } else { (f32::NEG_INFINITY, (w, h)) };
             let dots = Path::new(|b| {
-                let mut y = 0.0;
-                while y <= h {
-                    let mut x = 0.0;
-                    while x <= w {
-                        b.circle(Point::new(x, y), (1.3 / lod).max(0.6));
-                        x += s;
+                for y in ticks(s, first, last.1, tile.y0 - r, tile.y1 + r) {
+                    for x in ticks(s, first, last.0, tile.x0 - r, tile.x1 + r) {
+                        b.circle(Point::new(x, y), r);
                     }
-                    y += s;
                 }
             });
             frame.fill(&dots, theme::PATTERN_DOT);
@@ -449,11 +792,34 @@ impl Flash {
 }
 
 /// A stroke another device is drawing right now (shown until the stored stroke arrives).
+#[derive(Default)]
 pub struct LiveInk {
     pub sheet_id: String,
     pub brush: ink::Brush,
     pub points: Vec<ink::InkPoint>,
     pub done: Option<std::time::Instant>,
+    /// Its mesh per view, with what it was built from (built again only when the points change).
+    pub mesh: RefCell<Vec<(Slot, (usize, [u32; 6]), mesh::Cache)>>,
+}
+
+impl LiveInk {
+    /// The stroke as a mesh in page units (None: nothing to draw yet).
+    fn mesh(&self, slot: Slot, clip: Rectangle) -> Option<mesh::Cache> {
+        let (first, last) = (self.points.first()?, self.points.last()?);
+        let key = (self.points.len(), [first.x.to_bits(), first.y.to_bits(), last.x.to_bits(), last.y.to_bits(), last.pressure.to_bits(), self.brush.width.to_bits()]);
+        let mut all = self.mesh.borrow_mut();
+        if let Some((_, _, cache)) = all.iter().find(|m| m.0 == slot && m.1 == key) {
+            return Some(cache.clone());
+        }
+        let meshes = ink_meshes_tol([(self.points.as_slice(), &self.brush)], 0.0, clip);
+        all.retain(|m| m.0 != slot);
+        if meshes.is_empty() {
+            return None;
+        }
+        let cache = mesh::Cache::new(Arc::from(meshes));
+        all.push((slot, key, cache.clone()));
+        Some(cache)
+    }
 }
 
 /// The laid-out notebook.
@@ -501,18 +867,36 @@ impl Pages {
         }
     }
 
-    /// Drops a sheet's strokes and meshes (it changed on disk or was edited).
+    /// Reads a sheet again (it changed on disk or was edited): its meshes follow for the cells
+    /// that changed.
     pub fn reload_sheet(&self, sheet_id: &str) {
+        self.reload(sheet_id, None);
+    }
+
+    /// Like [`Pages::reload_sheet`], from the sheet as it is open here (just stored): nothing is
+    /// read from disk.
+    pub fn reload_sheet_from(&self, sheet_id: &str, sheet: &n0te_core::sheet::Sheet) {
+        self.reload(sheet_id, Some(sheet));
+    }
+
+    fn reload(&self, sheet_id: &str, open: Option<&n0te_core::sheet::Sheet>) {
         let Some(p) = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id) else {
             self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some()));
             return;
         };
-        *p.content.borrow_mut() = None;
-        *p.ink.borrow_mut() = None;
-        *p.thumb.borrow_mut() = None;
+        let old = p.content.borrow().clone();
+        let content = Rc::new((self.load)(sheet_id, open, old.as_deref()));
+        // Read again but the same (a save that merged nothing): everything stays as it is.
+        if let Some(old) = &old
+            && old.version.is_some()
+            && old.version == content.version
+        {
+            return;
+        }
+        p.forget();
+        *p.content.borrow_mut() = Some(content.clone());
         // A finished live stroke goes only once the sheet holds it: the save that triggered this
         // reload may predate it (drawn just after), and dropping it then made it blink.
-        let content = p.content(&self.load);
         // Live erasing likewise: until none of the strokes it hid or cut are stored any more.
         {
             let mut erasing = self.erasing.borrow_mut();
@@ -520,7 +904,7 @@ impl Pages {
                 erasing.remove(sheet_id);
             }
         }
-        self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some() && stored_has(&content.strokes, l)));
+        self.live.borrow_mut().retain(|_, l| !(l.sheet_id == sheet_id && l.done.is_some() && stored_has(content.strokes.iter().map(|s| &**s), l)));
     }
 
     /// Another device erasing on `sheet_id`: strokes it hid and area-eraser dabs (x, y, r).
@@ -539,7 +923,6 @@ impl Pages {
             }
             e.dabs.push((d[0], d[1], d[2]));
         }
-        *page.ink.borrow_mut() = None;
     }
 
     /// New samples (packed LE f32 x, y, pressure, t) of a stroke another device is drawing.
@@ -550,6 +933,7 @@ impl Pages {
             brush: ink::Brush { width: brush.0, thinning: brush.1, color: brush.2, kind: brush.3 },
             points: Vec::new(),
             done: None,
+            mesh: Default::default(),
         });
         for c in samples.chunks_exact(16) {
             let f = |i: usize| f32::from_le_bytes(c[i..i + 4].try_into().expect("4 bytes"));
@@ -669,10 +1053,8 @@ impl Pages {
         use iced::advanced::image::{FilterMethod, Image, Renderer as _};
         let content = page.content(&self.load);
         for (img, path) in &content.images {
-            if !path.exists() {
-                continue;
-            }
-            // From the bytes: blobs have no file extension, which the decoder would go by.
+            // From the bytes: blobs have no file extension, which the decoder would go by (a file
+            // not there yet is looked for again next time; one read is never looked at again).
             let Some(handle) = IMAGES.with(|m| {
                 let mut m = m.borrow_mut();
                 if let Some(h) = m.get(path) {
@@ -778,6 +1160,23 @@ impl Pages {
         self.headers.iter().find(|h| h.rect.contains(p.x, p.y))
     }
 
+    /// Before a frame of `cam` (view `slot`): builds what the pages in view lack at its zoom,
+    /// for at most `budget`; whether everything is there (else the view asks for another frame).
+    pub fn prepare(&self, cam: &Camera, slot: Slot, budget: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + budget;
+        let view = cam.view_rect();
+        let erasing = self.erasing.borrow();
+        for page in self.pages.iter().filter(|p| p.rect().intersects(&view)) {
+            let r = page.rect();
+            let local = Rect { x0: view.x0 - r.x0, y0: view.y0 - r.y0, x1: view.x1 - r.x0, y1: view.y1 - r.y0 };
+            let clip = Rectangle::new(Point::ORIGIN, Size::new(r.width(), r.height()));
+            if !page.prepare_ink(cam, slot, local, &self.load, erasing.get(&page.placed.sheet_id), Some(clip), deadline) {
+                return false;
+            }
+        }
+        true
+    }
+
     fn evict_stale(&self) {
         let mut cached: Vec<&Page> = self.pages.iter().filter(|p| p.is_cached()).collect();
         if cached.len() <= MAX_CACHED {
@@ -859,10 +1258,12 @@ pub struct PageView<'a, Message> {
     on_pen: Option<Box<dyn Fn(crate::tablet::pen::PenEvent) -> Message + 'a>>,
     /// n0te Tablet: one finger writes too (two still pan and zoom).
     finger_draws: bool,
+    /// Which view this is (its own GPU caches).
+    slot: Slot,
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None, finger_draws: false }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None, finger_draws: false, slot: Slot::Main }
 }
 
 impl<'a, Message> PageView<'a, Message> {
@@ -883,6 +1284,12 @@ impl<'a, Message> PageView<'a, Message> {
     /// n0te Tablet: one finger writes like the pen.
     pub fn finger_draws(mut self, on: bool) -> Self {
         self.finger_draws = on;
+        self
+    }
+
+    /// Which view this is: every view of the same pages needs GPU caches of its own.
+    pub fn slot(mut self, slot: Slot) -> Self {
+        self.slot = slot;
         self
     }
 
@@ -915,6 +1322,9 @@ struct State {
 fn mouse_sample(p: Point, since: std::time::Instant) -> crate::tablet::pen::Sample {
     crate::tablet::pen::Sample { x: p.x, y: p.y, pressure: 0.5, tilt: (0.0, 0.0), t_ms: since.elapsed().as_millis() as u32 }
 }
+
+/// How long the page view builds meshes before a frame at most (the rest in the next ones).
+const PREPARE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Pixels per wheel "line".
 const LINE_PX: f32 = 48.0;
@@ -949,6 +1359,14 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         // No room (a pane being closed): nothing to report, the camera stays for later.
         if bounds.width < 1.0 || bounds.height < 1.0 {
             return;
+        }
+        // A frame is coming: build a little of what the zoom lacks (cells past a level stand in
+        // as they were), another frame for the rest.
+        if let Event::Window(iced::window::Event::RedrawRequested(_)) = event
+            && self.camera.viewport.width > 0.0
+            && !self.pages.prepare(&self.camera, self.slot, PREPARE_BUDGET)
+        {
+            shell.request_redraw();
         }
         let cam = match state.pending {
             Some((id, seen, published)) if id == self.pages.id && seen == self.camera => published,
@@ -1195,7 +1613,6 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
         if cam.viewport.width <= 0.0 {
             return;
         }
-        let lod = lod_for(cam.zoom);
         let current = pages.current_number(&cam);
         let view = cam.view_rect();
         let label = |r: &mut iced::Renderer, content: String, at: Point, width: f32, color: Color, size: f32, font: iced::Font, align: text::Alignment| {
@@ -1217,28 +1634,22 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             );
         };
         let visible: Vec<&Page> = pages.pages.iter().filter(|p| p.rect().intersects(&view)).collect();
+        let slot = self.slot;
+        // The part of the view on a page, in its own points.
+        let local = |page: &Page| {
+            let r = page.rect();
+            Rect { x0: view.x0 - r.x0, y0: view.y0 - r.y0, x1: view.x1 - r.x0, y1: view.y1 - r.y0 }
+        };
         // Three layers: paper (+ PDF images), then ink, then labels — within one layer iced
         // draws images after meshes, which would put the PDF over the ink.
         renderer.with_layer(bounds, |r| {
             for page in &visible {
                 page.last_frame.set(frame_no);
-                let geometry = page.background(r, lod);
                 let rect = page.rect();
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
-                if light {
-                    let edge = Rectangle::new(at, Size::new(rect.width() * cam.zoom, rect.height() * cam.zoom));
-                    r.fill_quad(
-                        renderer::Quad {
-                            bounds: edge,
-                            border: iced::Border { color: theme::p().border, width: 1.0, radius: 0.0.into() },
-                            ..Default::default()
-                        },
-                        theme::p().paper,
-                    );
-                }
-                r.with_translation(Vector::new(at.x, at.y), |r| {
-                    r.with_transformation(Transformation::scale(cam.zoom / lod), |r| r.draw_geometry(geometry));
-                });
+                let (w, h) = page.size();
+                r.fill_quad(renderer::Quad { bounds: Rectangle::new(at, Size::new(w * cam.zoom, h * cam.zoom)), ..Default::default() }, theme::p().paper);
+                page.draw_pattern(r, at, &cam, slot, local(page), Some((w, h)), frame_no);
                 pages.draw_pdf(r, page, at, &cam, &view, bounds);
                 if page.placed.spec.gaps.is_empty() {
                     pages.draw_images(r, page, at, &cam, bounds);
@@ -1252,7 +1663,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             // Coordinate systems: ink under everything written (over the paper, PDF and images:
             // in the layer before, images go over meshes).
             for page in &visible {
-                let Some(plots) = page.plot_mesh(&pages.load) else { continue };
+                let Some(plots) = page.plot_mesh(&pages.load, slot) else { continue };
                 let rect = page.rect();
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
@@ -1262,24 +1673,18 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             for l in pages.live.borrow().values() {
                 let Some(page) = visible.iter().find(|p| p.placed.sheet_id == l.sheet_id) else { continue };
                 let rect = page.rect();
-                let stroke = Stroke { id: String::new(), brush: l.brush, bounds: Rect::EMPTY, points: l.points.clone() };
-                let meshes = ink_meshes(std::slice::from_ref(&stroke), 1, Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height())));
-                if meshes.is_empty() {
-                    continue;
-                }
+                let Some(cache) = l.mesh(slot, Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height()))) else { continue };
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
-                let cache = mesh::Cache::new(Arc::from(meshes));
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(cache));
                 });
             }
+            let erasing = pages.erasing.borrow();
             for page in &visible {
-                let ink = page.ink_mesh(cam.zoom, &pages.load, pages.erasing.borrow().get(&page.placed.sheet_id));
                 let rect = page.rect();
                 let at = cam.to_screen(bounds, rect.x0, rect.y0);
-                r.with_translation(Vector::new(at.x, at.y), |r| {
-                    r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(ink));
-                });
+                let clip = Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height()));
+                page.draw_ink(r, at, &cam, slot, local(page), &pages.load, erasing.get(&page.placed.sheet_id), Some(clip), frame_no);
             }
         });
         renderer.with_layer(bounds, |r| {
@@ -1437,8 +1842,8 @@ impl<Message> Widget<Message, Theme, iced::Renderer> for Thumb<'_> {
         });
         if !board {
             renderer.with_layer(clip, |r| {
-                let plots = page.plot_mesh(&pages.load);
-                let ink = page.thumb_mesh(&pages.load);
+                let plots = page.plot_mesh(&pages.load, Slot::Thumb);
+                let ink = page.thumb_mesh(&pages.load, zoom);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(zoom), |r| {
                         if let Some(plots) = plots {
@@ -1470,7 +1875,7 @@ mod tests {
     fn live_stroke_stays_until_the_sheet_holds_it() {
         let brush = ink::Brush { width: 1.0, thinning: 0.6, color: 0xFF11_1111, kind: 0 };
         let pts = |x: f32| (0..20).map(|i| ink::InkPoint { x: x + i as f32 * 3.0, y: 100.0 + (i % 3) as f32, pressure: 0.5, t_ms: i * 8 }).collect::<Vec<_>>();
-        let live = LiveInk { sheet_id: "s".into(), brush, points: pts(50.0), done: Some(std::time::Instant::now()) };
+        let live = LiveInk { sheet_id: "s".into(), brush, points: pts(50.0), done: Some(std::time::Instant::now()), ..Default::default() };
         let stored = |x: f32, color: u32| Stroke { id: "a".into(), brush: ink::Brush { color, ..brush }, bounds: Rect::new(x - 0.6, 99.4, x + 57.6, 102.6), points: pts(x) };
         // The earlier save had only another stroke: keep the live one.
         assert!(!stored_has(&[stored(300.0, brush.color)], &live));
@@ -1540,6 +1945,101 @@ mod tests {
     fn argb_unpacks() {
         let c = argb(0xFFD71921);
         assert!((c.r - 215.0 / 255.0).abs() < 1e-6 && (c.a - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn only_the_tiles_in_view_are_drawn() {
+        let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect { x0, y0, x1, y1 };
+        // A 2 m page at 400 % (level 4: tiles of 256 pt): a view of 350 × 225 pt touches a few
+        // tiles, never the hundreds the page has.
+        let big = Some((5669.0, 5669.0));
+        assert_eq!(tiles_in(r(1000.0, 2000.0, 1350.0, 2225.0), big, 256.0), vec![(3, 7), (4, 7), (5, 7), (3, 8), (4, 8), (5, 8)]);
+        assert_eq!(tiles_in(r(0.0, 0.0, 200.0, 200.0), big, 256.0), vec![(0, 0)]);
+        // Exactly on an edge: the tile beyond it isn't touched.
+        assert_eq!(tiles_in(r(0.0, 0.0, 256.0, 256.0), big, 256.0), vec![(0, 0)]);
+        // The view off the page or around it: only the page's tiles.
+        assert!(tiles_in(r(-500.0, -500.0, -10.0, -10.0), big, 256.0).is_empty());
+        assert_eq!(tiles_in(r(-500.0, -500.0, 10.0, 10.0), Some((595.0, 842.0)), 1024.0), vec![(0, 0)]);
+        // A board on its own: endless, tiles left of and above its corner too.
+        assert_eq!(tiles_in(r(-10.0, -10.0, 10.0, 10.0), None, 512.0), vec![(-1, -1), (0, -1), (-1, 0), (0, 0)]);
+        // The last tile ends with the paper.
+        assert_eq!(tile_rect(22, 22, 256.0, big), r(5632.0, 5632.0, 5669.0, 5669.0));
+        assert_eq!(tile_rect(-1, 0, 512.0, None), r(-512.0, 0.0, 0.0, 512.0));
+        // A broken camera (far too many tiles) draws none rather than hang.
+        assert!(tiles_in(r(0.0, 0.0, 1e7, 1e7), None, 1.0).is_empty());
+    }
+
+    #[test]
+    fn a_tiles_ruling_is_the_pages_ruling_there() {
+        // Lines from the second step on, inside the tile (and its line width), up to the page end.
+        let at: Vec<f32> = ticks(20.0, 40.0, 842.0, 95.0, 205.0).collect();
+        assert_eq!(at, vec![100.0, 120.0, 140.0, 160.0, 180.0, 200.0]);
+        assert_eq!(ticks(20.0, 40.0, 842.0, -5.0, 45.0).collect::<Vec<_>>(), vec![40.0]);
+        assert_eq!(ticks(20.0, 20.0, 842.0, 830.0, 900.0).collect::<Vec<_>>(), vec![840.0]);
+        // Endless dots: negative positions too.
+        assert_eq!(ticks(24.0, f32::NEG_INFINITY, f32::INFINITY, -50.0, 0.0).collect::<Vec<_>>(), vec![-48.0, -24.0, 0.0]);
+    }
+
+    #[test]
+    fn strokes_go_into_cells_by_their_middle() {
+        assert_eq!(cell_of(&Rect::new(10.0, 10.0, 100.0, 40.0)), (0, 0));
+        assert_eq!(cell_of(&Rect::new(500.0, 10.0, 600.0, 40.0)), (1, 0), "middle at 550");
+        assert_eq!(cell_of(&Rect::new(-30.0, -30.0, -10.0, -10.0)), (-1, -1));
+        // Thinning keeps the ends and drops samples closer than the tolerance.
+        let pts: Vec<ink::InkPoint> = (0..11).map(|i| ink::InkPoint { x: i as f32 * 0.3, y: 0.0, pressure: 0.5, t_ms: i }).collect();
+        let mut buf = Vec::new();
+        let d = decimate(&pts, 1.0, &mut buf);
+        assert_eq!((d[0].x, d[d.len() - 1].x), (0.0, 3.0));
+        assert!(d.windows(2).take(d.len() - 2).all(|w| w[1].x - w[0].x >= 1.0 - 1e-5));
+        assert_eq!(decimate(&pts, 0.0, &mut buf).len(), 11);
+    }
+
+    #[test]
+    fn a_page_reads_just_what_changed_and_rebuilds_just_those_cells() {
+        let sheet = n0te_core::sheet::Sheet::create(7).unwrap();
+        let brush = ink::Brush::default();
+        let word = |x: f32, y: f32| (0..20).map(|i| ink::InkPoint { x: x + i as f32, y: y + (i % 3) as f32, pressure: 0.5, t_ms: i }).collect::<Vec<_>>();
+        let far = sheet.add_stroke(brush, &word(1500.0, 1500.0)).unwrap();
+        sheet.add_stroke(brush, &word(100.0, 100.0)).unwrap();
+        let none = |_: &n0te_core::sheet::ImageObj| None;
+        let first = SheetContent::read(&sheet, None, none);
+        assert_eq!(first.strokes.len(), 2);
+        let near = sheet.add_stroke(brush, &word(140.0, 100.0)).unwrap();
+        let second = SheetContent::read(&sheet, Some(&first), none);
+        assert_eq!(second.strokes.len(), 3);
+        // The far stroke wasn't decoded again: the same one.
+        let same = |c: &SheetContent| c.strokes.iter().find(|s| s.id == far).cloned().unwrap();
+        assert!(Rc::ptr_eq(&same(&first), &same(&second)));
+        assert!(second.strokes.iter().any(|s| s.id == near));
+
+        // Cells: only the near cell's mesh is built again.
+        let page = Page::new(Placed { sheet_id: "s".into(), node: "n".into(), main_node: "n".into(), spec: SheetSpec { width: 2000.0, height: 2000.0, ..SheetSpec::a4(Background::Blank) }, rect: Rect::new(0.0, 0.0, 2000.0, 2000.0), side: 0, number: 1 });
+        let loads = Rc::new(Cell::new(0));
+        let (c1, c2) = (Rc::new(first), Rc::new(second));
+        let count = loads.clone();
+        let load: Loader = Box::new(move |_, _, _| {
+            count.set(count.get() + 1);
+            SheetContent { strokes: Vec::new(), ..Default::default() }
+        });
+        *page.content.borrow_mut() = Some(c1.clone());
+        let cam = Camera { x: 0.0, y: 0.0, zoom: 1.0, viewport: Size::new(2000.0, 2000.0), origin: Point::ORIGIN };
+        let view = Rect::new(0.0, 0.0, 2000.0, 2000.0);
+        let clip = Some(Rectangle::new(Point::ORIGIN, Size::new(2000.0, 2000.0)));
+        assert!(page.prepare_ink(&cam, Slot::Main, view, &load, None, clip, std::time::Instant::now() + std::time::Duration::from_secs(5)));
+        let mesh_of = |cell: (i32, i32)| page.cells.borrow().map[&cell].meshes[0].3.clone();
+        let (near0, far0) = (mesh_of((0, 0)), mesh_of((2, 2)));
+        *page.content.borrow_mut() = Some(c2);
+        page.generation.set(next_generation());
+        assert!(page.prepare_ink(&cam, Slot::Main, view, &load, None, clip, std::time::Instant::now() + std::time::Duration::from_secs(5)));
+        assert_ne!(mesh_of((0, 0)).id(), near0.id(), "the cell with the new stroke is built again");
+        assert_eq!(mesh_of((2, 2)).id(), far0.id(), "the other keeps its mesh");
+        assert_eq!(loads.get(), 0, "nothing read from disk");
+        // Out of view: not built at all; a deadline gone: nothing built, not complete.
+        let page2 = Page::new(page.placed.clone());
+        *page2.content.borrow_mut() = Some(c1);
+        assert!(page2.prepare_ink(&cam, Slot::Main, Rect::new(0.0, 0.0, 600.0, 600.0), &load, None, clip, std::time::Instant::now() + std::time::Duration::from_secs(5)));
+        assert!(page2.cells.borrow().map[&(2, 2)].meshes.is_empty());
+        assert!(!page2.prepare_ink(&cam, Slot::Main, view, &load, None, clip, std::time::Instant::now()));
     }
 
     #[test]

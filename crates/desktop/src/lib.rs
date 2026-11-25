@@ -15,6 +15,7 @@ pub mod pages;
 pub mod palette;
 pub mod pdf;
 pub mod plots;
+pub mod saver;
 pub mod search;
 pub mod settings;
 pub mod shelf;
@@ -94,7 +95,10 @@ pub fn run_as(mode: Mode, import: Option<std::path::PathBuf>) -> iced::Result {
     for font in theme::FONT_DATA {
         app = app.font(font);
     }
-    app.run()
+    let r = app.run();
+    // Pages still being stored go to disk before the program ends.
+    saver::flush();
+    r
 }
 
 /// The program's own icon for its windows (Windows, X11; Wayland takes it from the .desktop

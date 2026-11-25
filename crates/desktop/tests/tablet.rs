@@ -46,7 +46,9 @@ fn first_page(h: &Harness, fx: f32, fy: f32) -> (String, String, Point) {
     (o.id.clone(), p.placed.sheet_id.clone(), at)
 }
 
+/// The strokes stored on a sheet (after the background saves are done).
 fn strokes(h: &Harness, nb: &str, sheet: &str) -> Vec<n0te_core::sheet::Stroke> {
+    assert!(n0te_desktop::saver::flush(), "pages stored");
     h.app.lib.load_sheet(nb, sheet).unwrap().strokes()
 }
 

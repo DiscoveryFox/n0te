@@ -105,8 +105,9 @@ struct Drawing {
     snapped: bool,
     /// When the pen went down (for the hold timers), in the stroke's own milliseconds.
     started: std::time::Instant,
-    /// The page's strokes as possible lines for arrowheads (ids alongside), read on first need.
-    lines: Option<(Vec<String>, Vec<n0te_core::arrows::LineStroke>)>,
+    /// The strokes around it as possible lines for arrowheads (ids alongside) and the area they
+    /// were read from, read when first needed.
+    lines: Option<(n0te_core::ink::Rect, (Vec<String>, Vec<n0te_core::arrows::LineStroke>))>,
     /// Strokes the snap replaces (the first barb of a two-barb head).
     replaces: Vec<String>,
 }
@@ -193,8 +194,9 @@ pub struct Tablet {
     /// Sheets whose handwriting is to be read (since when), and whether a read runs.
     index_due: HashMap<(String, String), std::time::Instant>,
     indexing: bool,
-    /// Sheets kept open so their undo history lives on: (notebook, sheet) → sheet.
-    sheets: HashMap<(String, String), Sheet>,
+    /// Sheets kept open so their undo history lives on: (notebook, sheet) → sheet, and the
+    /// notebook's change stamp when it last caught up with its file.
+    sheets: HashMap<(String, String), (std::sync::Arc<Sheet>, u64)>,
     /// Our edits, oldest first (undo goes back through them across pages); and what was undone.
     undo: Vec<(String, String)>,
     redo: Vec<(String, String)>,
@@ -624,7 +626,7 @@ impl App {
                 .iter()
                 .map(|(id, b, pts)| {
                     let points = pts.iter().map(|p| InkPoint { x: ox + (p.x - ox) * k + dx, y: oy + (p.y - oy) * k + dy, ..*p }).collect();
-                    (format!("sel:{id}"), LiveInk { sheet_id: sheet.clone(), brush: Brush { width: b.width * k, ..*b }, points, done: None })
+                    (format!("sel:{id}"), LiveInk { sheet_id: sheet.clone(), brush: Brush { width: b.width * k, ..*b }, points, ..Default::default() })
                 })
                 .collect();
             if let Screen::Notebook(split) = &mut self.screen
@@ -712,10 +714,8 @@ impl App {
                     let b = m.bounds;
                     sel.bounds = n0te_core::ink::Rect::new(ox + (b.x0 - ox) * k + dx, oy + (b.y0 - oy) * k + dy, ox + (b.x1 - ox) * k + dx, oy + (b.y1 - oy) * k + dy);
                 }
-            } else if let Screen::Notebook(split) = &mut self.screen
-                && let Some(o) = split.pane_mut(m.pane)
-            {
-                o.pages.reload_sheet(&m.sheet);
+            } else {
+                self.reload_kept(m.pane, &sel.notebook, &m.sheet);
             }
             return Task::none();
         }
@@ -737,9 +737,10 @@ impl App {
         if let Some(mut d) = self.tablet.drawing.take() {
             // Rested long enough before lifting: a shape or an arrowhead after all.
             let mut changed = d.snapped;
-            if !d.snapped && d.points.len() > 4 {
+            let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
+            // Only a pen resting before it lifts makes a shape or a head (else nothing to read).
+            if !d.snapped && d.points.len() > 4 && held > snap::LIFT_HOLD_MS {
                 let zoom = pane_camera(&self.screen, d.pane).map(|c| c.zoom).unwrap_or(1.0);
-                let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
                 let lines = self.drawing_lines(&mut d);
                 if let Some(sn) = snap::on_lift(&d.points, zoom, held, &lines.1, self.tablet.snap_options()) {
                     if let Some(i) = sn.delete
@@ -820,12 +821,13 @@ impl App {
         {
             o.pages.live.borrow_mut().remove(&(LOCAL.to_string(), d.live_id));
         }
-        if let Some(er) = self.tablet.erasing.take()
-            && let Screen::Notebook(split) = &mut self.screen
-            && let Some(o) = split.pane_mut(er.pane)
-        {
-            o.pages.erasing.borrow_mut().remove(&er.sheet);
-            o.pages.reload_sheet(&er.sheet);
+        if let Some(er) = self.tablet.erasing.take() {
+            if let Screen::Notebook(split) = &mut self.screen
+                && let Some(o) = split.pane_mut(er.pane)
+            {
+                o.pages.erasing.borrow_mut().remove(&er.sheet);
+            }
+            self.reload_kept(er.pane, &er.notebook, &er.sheet);
         }
         self.tablet.lassoing = None;
         self.tablet.lasso_outline = None;
@@ -890,13 +892,18 @@ impl App {
     /// The sheet kept open for edits (and undo), loaded on first use.
     fn tablet_sheet(&mut self, nb: &str, sheet: &str) -> Option<&Sheet> {
         let k = (nb.to_string(), sheet.to_string());
+        let stamp = self.lib.change_stamp(nb);
         if !self.tablet.sheets.contains_key(&k) {
             let s = self.lib.load_sheet(nb, sheet).ok()?;
-            self.tablet.sheets.insert(k.clone(), s);
+            self.tablet.sheets.insert(k.clone(), (std::sync::Arc::new(s), stamp));
         }
-        let s = self.tablet.sheets.get(&k)?;
-        // Edits from elsewhere (sync, the other pane) come in first.
-        let _ = self.lib.refresh_sheet(nb, sheet, s);
+        let (s, seen) = self.tablet.sheets.get_mut(&k)?;
+        // Edits from elsewhere (sync, the other pane) come in first: read the file again only
+        // when someone else saved the notebook since (a big page's file takes a while to read).
+        if *seen != stamp && crate::saver::own_stamp(nb) != Some(stamp) {
+            let _ = self.lib.refresh_sheet(nb, sheet, s);
+        }
+        *seen = stamp;
         Some(s)
     }
 
@@ -946,12 +953,47 @@ impl App {
         })
     }
 
-    /// Stores a kept-open sheet (it syncs from there) and redraws the panes showing it.
+    /// Pane `pane` shows sheet `sheet` again as it is (kept open here: from memory, its file
+    /// may still be on its way).
+    fn reload_kept(&mut self, pane: PaneKey, nb: &str, sheet: &str) {
+        let kept = self.tablet.sheets.get(&(nb.to_string(), sheet.to_string())).map(|k| k.0.clone());
+        if let Screen::Notebook(split) = &mut self.screen
+            && let Some(o) = split.pane_mut(pane)
+        {
+            match kept {
+                Some(s) => o.pages.reload_sheet_from(sheet, &s),
+                None => o.pages.reload_sheet(sheet),
+            }
+        }
+    }
+
+    /// Stores a kept-open sheet (it syncs from there; the file is written in the background)
+    /// and redraws the panes showing it (from memory, at once).
     fn store_kept(&mut self, nb: &str, sheet: &str) {
-        let k = (nb.to_string(), sheet.to_string());
-        let Some(s) = self.tablet.sheets.remove(&k) else { return };
-        self.store_sheet(nb, sheet, &s);
-        self.tablet.sheets.insert(k, s);
+        let Some((s, _)) = self.tablet.sheets.get(&(nb.to_string(), sheet.to_string())) else { return };
+        let s = s.clone();
+        crate::saver::save(self.root.clone(), nb, sheet, s.clone());
+        self.redraw_sheet(nb, sheet, &s);
+    }
+
+    /// A kept-open sheet was stored: the panes show what the save merged from disk (others'
+    /// edits), and a failed save is told.
+    pub(crate) fn on_saved(&mut self, saved: crate::saver::Saved) {
+        if let Some(e) = &saved.error {
+            self.say(crate::i18n::trf("Speichern fehlgeschlagen: {}", &[e]));
+        }
+        let k = (saved.notebook.clone(), saved.sheet.clone());
+        if let Some((s, seen)) = self.tablet.sheets.get_mut(&k) {
+            if let Some(stamp) = crate::saver::own_stamp(&saved.notebook) {
+                *seen = stamp;
+            }
+            let s = s.clone();
+            if let Screen::Notebook(split) = &mut self.screen {
+                for o in split.panes.iter_mut().filter(|o| o.id == saved.notebook) {
+                    o.pages.reload_sheet_from(&saved.sheet, &s);
+                }
+            }
+        }
     }
 
     /// Undo (or redo) this app's last edit, on whatever page it was.
@@ -984,21 +1026,33 @@ impl App {
     /// Shows the stroke being drawn as it is now (live ink in its pane).
     fn show_drawing(&mut self) {
         let Some(d) = &self.tablet.drawing else { return };
-        let (sheet, brush, points, id, pane) = (d.sheet.clone(), d.brush, d.points.clone(), d.live_id, d.pane);
         if let Screen::Notebook(split) = &mut self.screen
-            && let Some(o) = split.pane_mut(pane)
+            && let Some(o) = split.pane_mut(d.pane)
         {
-            o.pages.live.borrow_mut().insert((LOCAL.to_string(), id), LiveInk { sheet_id: sheet, brush, points, done: None });
+            let mut live = o.pages.live.borrow_mut();
+            let l = live.entry((LOCAL.to_string(), d.live_id)).or_default();
+            if l.sheet_id != d.sheet {
+                l.sheet_id = d.sheet.clone();
+            }
+            l.brush = d.brush;
+            l.points.clear();
+            l.points.extend_from_slice(&d.points);
         }
     }
 
-    /// The strokes on the drawing's page as lines for arrowheads (read once per stroke).
+    /// The strokes near the one being drawn as lines for arrowheads (a head is at most 120 pt
+    /// big and reaches as far again): none when it can't become a head (too long, not the pen).
     fn drawing_lines(&mut self, d: &mut Drawing) -> (Vec<String>, Vec<n0te_core::arrows::LineStroke>) {
-        if d.lines.is_none() {
-            let strokes = self.tablet_sheet(&d.notebook, &d.sheet).map(|s| s.strokes()).unwrap_or_default();
-            d.lines = Some(strokes.iter().map(|s| (s.id.clone(), n0te_core::arrows::LineStroke::of(s))).unzip());
+        if d.points.len() > snap::MAX_HEAD_SAMPLES || !self.tablet.snap_options().pen {
+            return Default::default();
         }
-        d.lines.clone().unwrap_or_default()
+        let b = d.points.iter().fold(n0te_core::ink::Rect::EMPTY, |r, p| r.include(p.x, p.y)).inflate(140.0);
+        if d.lines.as_ref().is_none_or(|(area, _)| !(area.x0 <= b.x0 && area.y0 <= b.y0 && area.x1 >= b.x1 && area.y1 >= b.y1)) {
+            let area = b.inflate(60.0);
+            let strokes = self.tablet_sheet(&d.notebook, &d.sheet).map(|s| s.strokes_in(Some(area))).unwrap_or_default();
+            d.lines = Some((area, strokes.iter().map(|s| (s.id.clone(), n0te_core::arrows::LineStroke::of(s))).unzip()));
+        }
+        d.lines.as_ref().map(|l| l.1.clone()).unwrap_or_default()
     }
 
     /// Every frame while the pen draws: the hold timers (a shape after 0.5 s at rest, an arrow
