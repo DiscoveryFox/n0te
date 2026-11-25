@@ -55,4 +55,14 @@ class UpdaterTest {
         assertEquals(listOf(1L, -2.5, true, null, "x\"y\\zü"), v["a"])
         assertEquals(emptyMap<String, Any?>(), v["b"])
     }
+
+    @Test fun releaseNotesBecomeWholeItemsUnderGermanHeadings() {
+        val md = "### Added\n\n- Export: pick single pages, even a single side page (\"03 R1\").\n- Graphs: stretch an axis\n  right on the page.\n\n### Fixed\n\n- `a = 3b` when **editing** a row."
+        val s = Updater.noteSections(md)
+        assertEquals(listOf("Neu", "Behoben"), s.map { it.first })
+        assertEquals(listOf("Export: pick single pages, even a single side page (\"03 R1\").", "Graphs: stretch an axis right on the page."), s[0].second)
+        assertEquals(listOf("a = 3b when editing a row."), s[1].second)
+        assertEquals(listOf("" to listOf("Just text")), Updater.noteSections("Just text\n"))
+        assertTrue(Updater.noteSections("").isEmpty())
+    }
 }

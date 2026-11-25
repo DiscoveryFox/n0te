@@ -153,7 +153,8 @@ object SyncHub : SyncListener {
                     refreshDevices()
                 }
                 is FfiSyncEvent.Paired -> refreshDevices()
-                is FfiSyncEvent.GuestJoined, is FfiSyncEvent.GuestLeft, is FfiSyncEvent.RoleChanged, is FfiSyncEvent.AccessRevoked -> refreshGuests()
+                // HostOnline: as a guest, the chip "Gast bei …" shows whether the owner is reachable.
+                is FfiSyncEvent.GuestJoined, is FfiSyncEvent.GuestLeft, is FfiSyncEvent.RoleChanged, is FfiSyncEvent.AccessRevoked, is FfiSyncEvent.HostOnline -> refreshGuests()
                 is FfiSyncEvent.Summoned -> if (openNotebook != event.notebook && event.notebook !in openNotebooks) {
                     // Brought to the owner while elsewhere: open that notebook there.
                     pendingSummon = event

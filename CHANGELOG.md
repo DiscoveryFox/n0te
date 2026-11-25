@@ -6,6 +6,17 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [0.34.1] - 2026-11-26
+
+### Fixed
+
+- Guests of more than one notebook of the same owner kept connecting and disconnecting: the
+  owner saw them come and go, and what they wrote or changed in graphs hardly arrived. Each
+  shared notebook now has its own connection.
+- Opening the same invite link again no longer makes two connections take turns.
+- As a guest, "Gast bei …" now shows whether the owner is actually reachable.
+- Android: long "what's new" and update dialogs scroll, and their buttons always stay in view.
+
 ## [0.34.0] - 2026-11-25
 
 ### Added

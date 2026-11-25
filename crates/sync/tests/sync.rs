@@ -401,6 +401,65 @@ fn two_memberships_of_one_notebook_left_by_an_older_version_become_one() {
     assert_eq!(j, vec![("c".to_string(), "nb2".to_string()), ("b".to_string(), "nb1".to_string())], "the newest of nb1 stays, nb2 untouched");
 }
 
+#[test]
+fn a_guest_of_two_notebooks_of_one_owner_stays_in_both() {
+    // Before 0.34.1 the two connections replaced each other about every second: the owner saw
+    // the guest come and go, and the guest's writing hardly ever arrived.
+    let (ro, rg) = (root("two-o"), root("two-g"));
+    let owner = engine(&ro, "Tablet");
+    let (nb1, s1) = notebook_with_strokes(&ro, "Mathe", 1);
+    let (nb2, s2) = notebook_with_strokes(&ro, "Physik", 1);
+    let owner_events = owner.events().unwrap();
+    {
+        let guest = engine(&rg, "Mia");
+        guest.join(&owner.create_invite(&nb1, Role::ReadWrite, 0).unwrap()).unwrap();
+        guest.join(&owner.create_invite(&nb2, Role::ReadWrite, 0).unwrap()).unwrap();
+        wait("the guest is in both", || owner.status().guests.len() == 2 && guest.joined().iter().all(|j| j.online));
+        wait("both notebooks arrived", || strokes(&rg, &nb1, &s1) == 1 && strokes(&rg, &nb2, &s2) == 1);
+        // Steady: no more comings and goings once both are in.
+        std::thread::sleep(Duration::from_secs(3));
+        let flaps = owner_events.try_iter().filter(|e| matches!(e, Event::GuestJoined { .. } | Event::GuestLeft { .. })).count();
+        assert!(flaps <= 2, "{flaps} joins/leaves: the connections take turns");
+        // Writing in either notebook reaches the owner, saved and live.
+        add_strokes(&rg, &nb1, &s1, 1);
+        guest.notify_local_change(&nb1);
+        add_strokes(&rg, &nb2, &s2, 2);
+        guest.notify_local_change(&nb2);
+        wait("the owner has the guest's strokes", || strokes(&ro, &nb1, &s1) == 2 && strokes(&ro, &nb2, &s2) == 3);
+        let brush = LiveBrush { width: 2.0, thinning: 0.5, color: 0xFF111111, kind: 0 };
+        guest.send_live_stroke(&nb2, &s2, 9, 0, brush, &[0u8; 64], true);
+        wait_event(&owner_events, "the guest's live stroke", |e| matches!(e, Event::LiveStroke { notebook, stroke: 9, .. } if *notebook == nb2));
+    }
+    // After a restart the guest comes back into both, side by side.
+    let guest = engine(&rg, "Mia");
+    wait("back in both", || owner.status().guests.len() == 2 && guest.joined().iter().all(|j| j.online));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(owner.status().guests.len(), 2, "still both");
+}
+
+#[test]
+fn joining_the_same_invite_again_keeps_one_steady_connection() {
+    let (ro, rg) = (root("again-o"), root("again-g"));
+    let owner = engine(&ro, "Tablet");
+    let (nb, s1) = notebook_with_strokes(&ro, "Mathe", 1);
+    let owner_events = owner.events().unwrap();
+    let guest = engine(&rg, "Mia");
+    let link = owner.create_invite(&nb, Role::ReadWrite, 0).unwrap();
+    guest.join(&link).unwrap();
+    wait("in", || owner.status().guests.len() == 1);
+    // The link opened a second time: still one connection, and it stays.
+    guest.join(&link).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    let _ = owner_events.try_iter().count();
+    std::thread::sleep(Duration::from_secs(5));
+    let flaps = owner_events.try_iter().filter(|e| matches!(e, Event::GuestJoined { .. } | Event::GuestLeft { .. })).count();
+    assert_eq!(flaps, 0, "the guest keeps coming and going");
+    assert_eq!((owner.status().guests.len(), guest.joined().len()), (1, 1));
+    add_strokes(&rg, &nb, &s1, 1);
+    guest.notify_local_change(&nb);
+    wait("the owner has the guest's stroke", || strokes(&ro, &nb, &s1) == 2);
+}
+
 fn wait_event(rx: &Receiver<Event>, what: &str, f: impl Fn(&Event) -> bool) -> Event {
     let deadline = Instant::now() + Duration::from_secs(20);
     while let Some(left) = deadline.checked_duration_since(Instant::now()) {

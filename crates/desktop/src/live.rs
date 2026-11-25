@@ -76,6 +76,8 @@ pub enum LiveEvent {
     /// As a guest: the owner brings this view to `viewport` on `sheet` (sheet points).
     Summoned { device: String, notebook: String, sheet: String, viewport: [f32; 4] },
     Revoked { notebook: String },
+    /// As a guest: the connection to the notebook's owner came up / went down.
+    Host { notebook: String, on: bool },
     Error { message: String },
     Disconnected,
 }
@@ -136,6 +138,7 @@ fn parse(line: &str) -> Option<LiveEvent> {
         "join_waiting" => LiveEvent::JoinWaiting { owner: s("owner") },
         "summoned" => LiveEvent::Summoned { device: s("device"), notebook: s("notebook"), sheet: s("sheet"), viewport: f4("viewport").unwrap_or_default() },
         "revoked" => LiveEvent::Revoked { notebook: s("notebook") },
+        "host" => LiveEvent::Host { notebook: s("notebook"), on: v["on"].as_bool().unwrap_or(false) },
         "error" => LiveEvent::Error { message: s("message") },
         _ => return None,
     })

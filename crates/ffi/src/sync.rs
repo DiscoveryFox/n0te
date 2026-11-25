@@ -63,6 +63,8 @@ pub enum FfiSyncEvent {
     GuestLeft { invite: String, notebook: String, device: String },
     RoleChanged { notebook: String, write: bool },
     AccessRevoked { notebook: String },
+    /// Guest side: the connection to the owner of a joined notebook came up / went down.
+    HostOnline { notebook: String, online: bool },
     SyncError { message: String },
     /// Owner side: a new guest waits to be let in (`on`), or doesn't any more.
     GuestWaiting { invite: String, notebook: String, name: String, device: String, on: bool },
@@ -197,6 +199,7 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::GuestLeft { invite, notebook, device } => FfiSyncEvent::GuestLeft { invite, notebook, device },
         Event::RoleChanged { notebook, write } => FfiSyncEvent::RoleChanged { notebook, write },
         Event::AccessRevoked { notebook } => FfiSyncEvent::AccessRevoked { notebook },
+        Event::HostOnline { notebook, online } => FfiSyncEvent::HostOnline { notebook, online },
         Event::SyncError { message } => FfiSyncEvent::SyncError { message },
         Event::GuestWaiting { invite, notebook, name, device, on } => FfiSyncEvent::GuestWaiting { invite, notebook, name, device, on },
         Event::JoinWaiting { owner } => FfiSyncEvent::JoinWaiting { owner },

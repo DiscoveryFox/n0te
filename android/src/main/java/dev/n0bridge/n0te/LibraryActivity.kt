@@ -1188,10 +1188,15 @@ class LibraryActivity : ComponentActivity() {
                 Column(Modifier.width(520.dp).panel().padding(26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Caption("Update bereit")
                     Heading("n0te ${r.version}", 24.sp)
-                    Text("Installiert ist ${Updater.current(this@LibraryActivity)}. Die neue Version ist heruntergeladen und kann gleich installiert werden; n0te startet danach neu.",
-                        color = Ui.Muted, fontSize = 14.sp)
-                    if (r.notes.isNotBlank()) Text(r.notes.lines().filter { it.isNotBlank() }.take(10).joinToString("\n") { it.trim().removePrefix("#").trim() },
-                        color = Ui.Chalk, fontSize = 14.sp, maxLines = 10, modifier = Modifier.heightIn(max = 240.dp).verticalScroll(rememberScrollState()))
+                    // The notes scroll however long they are; the buttons always stay in view.
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("Installiert ist ${Updater.current(this@LibraryActivity)}. Die neue Version ist heruntergeladen und kann gleich installiert werden; n0te startet danach neu.",
+                            color = Ui.Muted, fontSize = 14.sp)
+                        for ((head, items) in Updater.noteSections(r.notes)) {
+                            if (head.isNotEmpty()) Caption(head, Modifier.padding(top = 6.dp))
+                            items.forEach { ChangeItem(it) }
+                        }
+                    }
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                         Btn("Später", BtnKind.QUIET) { later() }
                         Spacer(Modifier.weight(1f))
@@ -1211,7 +1216,8 @@ class LibraryActivity : ComponentActivity() {
                 Column(Modifier.width(520.dp).panel().padding(26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Caption("Neu in Version ${e.version}")
                     Heading(e.title, 24.sp)
-                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // A long list scrolls; the buttons always stay in view.
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         e.items.forEach { ChangeItem(it) }
                     }
                     Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {

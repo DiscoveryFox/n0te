@@ -95,6 +95,8 @@ pub enum Event {
     RoleChanged { notebook: String, write: bool },
     /// Guest side: the owner revoked (or let expire) our invite.
     AccessRevoked { notebook: String },
+    /// Guest side: the connection to the owner of a joined notebook came up / went down.
+    HostOnline { notebook: String, online: bool },
     /// Owner side: a new guest waits to be let in (`on`), or no longer waits (let in,
     /// turned away or gone). Answer with `Engine::admit`.
     GuestWaiting { invite: String, notebook: String, name: String, device: String, on: bool },

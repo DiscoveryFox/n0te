@@ -35,6 +35,41 @@ object Updater {
         val asset: String, val url: String, val apiUrl: String, val size: Long, val sha256: String?,
     )
 
+    /**
+     * Release notes (GitHub Markdown) as (heading, items) for the update dialog: "### Added"
+     * starts a section (in German), every "- " line is an item, and its wrapped lines join it.
+     */
+    fun noteSections(md: String): List<Pair<String, List<String>>> {
+        val out = ArrayList<Pair<String, MutableList<String>>>()
+        fun items(): MutableList<String> {
+            if (out.isEmpty()) out.add("" to mutableListOf())
+            return out.last().second
+        }
+        var blank = true
+        for (raw in md.lines()) {
+            val l = raw.trim()
+            when {
+                l.isEmpty() -> { blank = true; continue }
+                l.startsWith("#") -> out.add(heading(l.trimStart('#').trim()) to mutableListOf())
+                l.startsWith("- ") || l.startsWith("* ") -> items().add(l.substring(2).trim())
+                else -> {
+                    val list = items()
+                    if (blank || list.isEmpty()) list.add(l) else list[list.size - 1] = list.last() + " " + l
+                }
+            }
+            blank = false
+        }
+        return out.filter { it.second.isNotEmpty() }.map { (h, list) -> h to list.map { it.replace("**", "").replace("`", "") } }
+    }
+
+    private fun heading(h: String) = when (h.lowercase()) {
+        "added" -> "Neu"
+        "changed" -> "Geändert"
+        "fixed" -> "Behoben"
+        "removed" -> "Entfernt"
+        else -> h
+    }
+
     sealed class State {
         object Idle : State()
         object Checking : State()

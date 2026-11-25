@@ -2307,6 +2307,8 @@ impl App {
                 self.say(if write { tr("Du darfst jetzt mitschreiben") } else { tr("Ab jetzt nur noch lesen") });
             }
             LiveEvent::Revoked { .. } => self.say(tr("Die Einladung zu diesem Notizbuch wurde widerrufen")),
+            // The chip "Gast bei …" shows whether the owner is reachable.
+            LiveEvent::Host { .. } => self.refresh_guests(),
             LiveEvent::Error { message } => self.say(format!("Sync: {message}")),
             LiveEvent::Disconnected => self.sync = None,
         }

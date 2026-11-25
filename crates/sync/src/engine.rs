@@ -143,6 +143,21 @@ impl Kind {
     fn covers(&self, notebook: &str) -> bool {
         self.scope().is_none_or(|s| s == notebook)
     }
+    fn invite(&self) -> Option<&str> {
+        match self {
+            Kind::Own => None,
+            Kind::Guest { invite, .. } | Kind::Host { invite, .. } => Some(invite),
+        }
+    }
+}
+
+/// Where a session sits in [`Inner::sessions`]: the peer, plus the invite for guests and hosts.
+/// Two devices share one connection for syncing as own devices, but one per shared notebook
+/// (a guest of two notebooks of the same owner: two connections, side by side).
+type SessionKey = (EndpointId, Option<String>);
+
+fn own_key(id: EndpointId) -> SessionKey {
+    (id, None)
 }
 
 struct Session {
@@ -166,6 +181,9 @@ impl Session {
     fn id(&self) -> String {
         self.peer.to_string()
     }
+    fn key(&self) -> SessionKey {
+        (self.peer, self.kind.invite().map(str::to_string))
+    }
 }
 
 struct Inner {
@@ -179,9 +197,11 @@ struct Inner {
     share_view: AtomicBool,
     emit: Box<dyn Fn(Event) + Send + Sync>,
     state: Mutex<State>,
-    sessions: Mutex<HashMap<EndpointId, Arc<Session>>>,
+    sessions: Mutex<HashMap<SessionKey, Arc<Session>>>,
     /// Own devices with a running dial loop.
     dialing: Mutex<HashSet<EndpointId>>,
+    /// Joined invites with a running host loop (one each: two would take turns forever).
+    hosting: Mutex<HashSet<String>>,
     dirty: Mutex<HashSet<String>>,
     dirty_notify: Notify,
     vv_cache: Mutex<HashMap<PathBuf, (SystemTime, u64, Vec<u8>)>>,
@@ -275,6 +295,7 @@ impl Engine {
             state: Mutex::new(state),
             sessions: Mutex::new(HashMap::new()),
             dialing: Mutex::new(HashSet::new()),
+            hosting: Mutex::new(HashSet::new()),
             dirty: Mutex::new(HashSet::new()),
             dirty_notify: Notify::new(),
             vv_cache: Mutex::new(HashMap::new()),
@@ -311,7 +332,7 @@ impl Engine {
             st.joined.iter().filter(|j| !j.revoked).map(|j| j.invite.clone()).collect()
         };
         for invite in joined {
-            rt.spawn(host_loop(inner.clone(), invite, None));
+            spawn_host(&rt, &inner, invite, None);
         }
         Ok(Engine { rt: Some(rt), inner, events: Mutex::new(Some(events_rx)) })
     }
@@ -381,7 +402,7 @@ impl Engine {
             st.devices.retain(|d| d.id != id);
             st.save_devices()?;
         }
-        if let Some(s) = self.inner.sessions.lock().expect("sessions").remove(&pid) {
+        if let Some(s) = self.inner.sessions.lock().expect("sessions").remove(&own_key(pid)) {
             s.conn.close(4u32.into(), b"unpaired");
         }
         Ok(())
@@ -475,7 +496,7 @@ impl Engine {
         }
         let removed: Vec<Arc<Session>> = {
             let mut sessions = self.inner.sessions.lock().expect("sessions");
-            let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| *k).collect();
+            let gone: Vec<SessionKey> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| k.clone()).collect();
             gone.into_iter().filter_map(|k| sessions.remove(&k)).collect()
         };
         for s in removed {
@@ -571,7 +592,7 @@ impl Engine {
 
     fn own_session(&self, device: &str) -> Result<Arc<Session>> {
         let id = parse_id(device)?;
-        self.inner.sessions.lock().expect("sessions").get(&id).filter(|s| s.kind == Kind::Own).cloned().ok_or_else(|| Error::Net("Gerät ist nicht verbunden".into()))
+        self.inner.sessions.lock().expect("sessions").get(&own_key(id)).filter(|s| s.kind == Kind::Own).cloned().ok_or_else(|| Error::Net("Gerät ist nicht verbunden".into()))
     }
 
     /// An invite link for one notebook. `expires`: unix seconds, 0 = never.
@@ -660,10 +681,8 @@ impl Engine {
         let dev = id.to_string();
         let sessions: Vec<Arc<Session>> = {
             let mut map = self.inner.sessions.lock().expect("sessions");
-            match map.get(&id) {
-                Some(s) if matches!(s.kind, Kind::Guest { .. }) => map.remove(&id).into_iter().collect(),
-                _ => Vec::new(),
-            }
+            let keys: Vec<SessionKey> = map.iter().filter(|(k, s)| k.0 == id && matches!(s.kind, Kind::Guest { .. })).map(|(k, _)| k.clone()).collect();
+            keys.iter().filter_map(|k| map.remove(k)).collect()
         };
         let waiting = self.inner.lobby.lock().expect("lobby").iter().find(|k| k.device == id).map(|k| (k.invite.clone(), k.name.clone()));
         {
@@ -755,7 +774,7 @@ impl Engine {
         }
         let removed: Vec<Arc<Session>> = {
             let mut sessions = self.inner.sessions.lock().expect("sessions");
-            let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| *k).collect();
+            let gone: Vec<SessionKey> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Guest { invite: i, .. } if i == invite)).map(|(k, _)| k.clone()).collect();
             gone.into_iter().filter_map(|k| sessions.remove(&k)).collect()
         };
         // Taken out of the map here, so the session's own end won't report it: do it now
@@ -804,7 +823,7 @@ impl Engine {
         };
         if !older.is_empty() {
             let mut sessions = inner.sessions.lock().expect("sessions");
-            let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Host { invite: i, .. } if older.iter().any(|o| o.invite == *i))).map(|(k, _)| *k).collect();
+            let gone: Vec<SessionKey> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Host { invite: i, .. } if older.iter().any(|o| o.invite == *i))).map(|(k, _)| k.clone()).collect();
             for k in gone {
                 if let Some(s) = sessions.remove(&k) {
                     s.conn.close(0u32.into(), b"replaced");
@@ -820,7 +839,7 @@ impl Engine {
                     let _ = st.save_joined();
                     drop(st);
                     for o in older {
-                        self.rt().spawn(host_loop(inner.clone(), o.invite, None));
+                        spawn_host(self.rt(), &inner, o.invite, None);
                     }
                 }
                 return Err(e);
@@ -841,7 +860,7 @@ impl Engine {
             });
             st.save_joined()?;
         }
-        self.rt().spawn(host_loop(inner, invite.id, Some(est)));
+        spawn_host(self.rt(), &inner, invite.id, Some(est));
         Ok(invite.notebook)
     }
 
@@ -856,7 +875,7 @@ impl Engine {
         st.save_joined()?;
         drop(st);
         let mut sessions = self.inner.sessions.lock().expect("sessions");
-        let gone: Vec<EndpointId> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Host { invite: i, .. } if i == invite)).map(|(k, _)| *k).collect();
+        let gone: Vec<SessionKey> = sessions.iter().filter(|(_, s)| matches!(&s.kind, Kind::Host { invite: i, .. } if i == invite)).map(|(k, _)| k.clone()).collect();
         for k in gone {
             if let Some(s) = sessions.remove(&k) {
                 s.conn.close(0u32.into(), b"left");
@@ -966,6 +985,11 @@ fn spawn_dial(rt: &tokio::runtime::Runtime, inner: &Arc<Inner>, id: EndpointId, 
     rt.spawn(dial_loop(inner.clone(), id, first));
 }
 
+/// A session that lasted this long was a real one: the next redial starts quick again. One
+/// that ended sooner (replaced, refused as a duplicate, dropped at once) keeps the wait
+/// growing, so two connections can never take turns every second.
+const STEADY: Duration = Duration::from_secs(20);
+
 /// Keeps an own device connected (redials with backoff while it is paired).
 async fn dial_loop(inner: Arc<Inner>, id: EndpointId, mut first: Option<Established>) {
     let mut backoff = Duration::from_secs(1);
@@ -974,7 +998,7 @@ async fn dial_loop(inner: Arc<Inner>, id: EndpointId, mut first: Option<Establis
             break;
         }
         let Some(addr) = inner.device_addr(&id) else { break };
-        let existing = inner.sessions.lock().expect("sessions").get(&id).cloned();
+        let existing = inner.sessions.lock().expect("sessions").get(&own_key(id)).cloned();
         if let Some(s) = existing {
             tokio::select! {
                 _ = s.ended.notified() => {}
@@ -989,8 +1013,11 @@ async fn dial_loop(inner: Arc<Inner>, id: EndpointId, mut first: Option<Establis
         };
         match est {
             Ok(est) => {
-                backoff = Duration::from_secs(1);
+                let began = std::time::Instant::now();
                 let _ = run_session(inner.clone(), id, Kind::Own, est, true).await;
+                if began.elapsed() >= STEADY {
+                    backoff = Duration::from_secs(1);
+                }
             }
             Err(Error::Rejected(reason)) => (inner.emit)(Event::SyncError { message: format!("Gerät lehnt ab: {reason}") }),
             Err(_) => {}
@@ -1004,7 +1031,47 @@ async fn dial_loop(inner: Arc<Inner>, id: EndpointId, mut first: Option<Establis
     inner.dialing.lock().expect("dialing").remove(&id);
 }
 
-/// Keeps a joined notebook connected to its owner.
+/// Starts the loop that keeps joined `invite` connected, unless one runs already (joined
+/// again): then a fresh connection (`first`) becomes the session and the loop waits for it.
+fn spawn_host(rt: &tokio::runtime::Runtime, inner: &Arc<Inner>, invite: String, first: Option<Established>) {
+    if !inner.hosting.lock().expect("hosting").insert(invite.clone()) {
+        if let Some(est) = first {
+            let inner = inner.clone();
+            rt.spawn(async move {
+                let record = inner.state.lock().expect("state").joined.iter().find(|j| j.invite == invite && !j.revoked).cloned();
+                if let Some(record) = record {
+                    host_session(&inner, &record, est).await;
+                }
+            });
+        }
+        return;
+    }
+    let inner2 = inner.clone();
+    rt.spawn(async move {
+        host_loop(inner2.clone(), invite.clone(), first).await;
+        inner2.hosting.lock().expect("hosting").remove(&invite);
+    });
+}
+
+/// Runs a session with the owner of joined notebook `record` (its rights may have changed).
+async fn host_session(inner: &Arc<Inner>, record: &JoinedRecord, est: Established) {
+    let owner = est.conn.remote_id();
+    let role = est.role.unwrap_or(record.role);
+    if role != record.role {
+        // The owner changed our rights: remember them and tell the app.
+        let mut st = inner.state.lock().expect("state");
+        if let Some(j) = st.joined.iter_mut().find(|j| j.invite == record.invite) {
+            j.role = role;
+        }
+        let _ = st.save_joined();
+        drop(st);
+        (inner.emit)(Event::RoleChanged { notebook: record.notebook.clone(), write: role == Role::ReadWrite });
+    }
+    let kind = Kind::Host { invite: record.invite.clone(), notebook: record.notebook.clone(), role };
+    let _ = run_session(inner.clone(), owner, kind, est, true).await;
+}
+
+/// Keeps a joined notebook connected to its owner (one loop per invite, see [`spawn_host`]).
 async fn host_loop(inner: Arc<Inner>, invite: String, mut first: Option<Established>) {
     let mut backoff = Duration::from_secs(1);
     loop {
@@ -1013,6 +1080,20 @@ async fn host_loop(inner: Arc<Inner>, invite: String, mut first: Option<Establis
         }
         let record = inner.state.lock().expect("state").joined.iter().find(|j| j.invite == invite && !j.revoked).cloned();
         let Some(record) = record else { break };
+        // Connected already (joined again meanwhile): wait for that session to end.
+        if first.is_none()
+            && let Ok(owner) = parse_id(&record.owner)
+        {
+            let existing = inner.sessions.lock().expect("sessions").get(&(owner, Some(invite.clone()))).cloned();
+            if let Some(s) = existing {
+                tokio::select! {
+                    _ = s.ended.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    _ = inner.shutdown.notified() => break,
+                }
+                continue;
+            }
+        }
         let est = match first.take() {
             Some(e) => Ok(e),
             None => match SignedInvite::parse_link(&record.link).and_then(|s| s.verify().map(|i| (s, i))) {
@@ -1022,21 +1103,11 @@ async fn host_loop(inner: Arc<Inner>, invite: String, mut first: Option<Establis
         };
         match est {
             Ok(est) => {
-                backoff = Duration::from_secs(1);
-                let owner = est.conn.remote_id();
-                let role = est.role.unwrap_or(record.role);
-                if role != record.role {
-                    // The owner changed our rights: remember them and tell the app.
-                    let mut st = inner.state.lock().expect("state");
-                    if let Some(j) = st.joined.iter_mut().find(|j| j.invite == invite) {
-                        j.role = role;
-                    }
-                    let _ = st.save_joined();
-                    drop(st);
-                    (inner.emit)(Event::RoleChanged { notebook: record.notebook.clone(), write: role == Role::ReadWrite });
+                let began = std::time::Instant::now();
+                host_session(&inner, &record, est).await;
+                if began.elapsed() >= STEADY {
+                    backoff = Duration::from_secs(1);
                 }
-                let kind = Kind::Host { invite: invite.clone(), notebook: record.notebook.clone(), role };
-                let _ = run_session(inner.clone(), owner, kind, est, true).await;
             }
             Err(Error::Rejected(reason)) => {
                 // Revoked or expired: stop for good.
@@ -1129,7 +1200,7 @@ async fn accept_one(inner: Arc<Inner>, conn: Connection) -> Result<()> {
                 _ = conn.closed() => None,
                 _ = tokio::time::sleep(Duration::from_secs(200)) => None,
             };
-            inner.lobby.lock().expect("lobby").retain(|k| k.device != peer);
+            inner.lobby.lock().expect("lobby").retain(|k| !(k.device == peer && k.invite == invite));
             (inner.emit)(Event::GuestWaiting { invite: invite.clone(), notebook: notebook.clone(), name: name.clone(), device: peer.to_string(), on: false });
             match answer {
                 Some(true) => Ok(Kind::Guest { invite, notebook, role }),
@@ -1190,7 +1261,7 @@ async fn run_session(inner: Arc<Inner>, peer: EndpointId, kind: Kind, est: Estab
     match &kind {
         Kind::Own => (inner.emit)(Event::DeviceOnline { device: inner.device_info(&peer, true) }),
         Kind::Guest { invite, notebook, .. } => (inner.emit)(Event::GuestJoined { invite: invite.clone(), notebook: notebook.clone(), name: session.name.clone(), device: session.id() }),
-        Kind::Host { .. } => {}
+        Kind::Host { notebook, .. } => (inner.emit)(Event::HostOnline { notebook: notebook.clone(), online: true }),
     }
     // Writer.
     let writer = tokio::spawn(async move {
@@ -1306,7 +1377,7 @@ impl Inner {
 
     fn register(&self, s: &Arc<Session>) -> bool {
         let mut map = self.sessions.lock().expect("sessions");
-        if let Some(old) = map.get(&s.peer) {
+        if let Some(old) = map.get(&s.key()) {
             // Both dialed at once: keep the connection dialed by the smaller id; a reconnect
             // in the same direction replaces the old one.
             let new_wins = if old.dialed_by_me == s.dialed_by_me { true } else { s.dialed_by_me == (self.ep.id() < s.peer) };
@@ -1315,16 +1386,17 @@ impl Inner {
             }
             old.conn.close(2u32.into(), b"replaced");
         }
-        map.insert(s.peer, s.clone());
+        map.insert(s.key(), s.clone());
         true
     }
 
     fn unregister(&self, s: &Arc<Session>) {
         let removed = {
             let mut map = self.sessions.lock().expect("sessions");
-            match map.get(&s.peer) {
+            let key = s.key();
+            match map.get(&key) {
                 Some(cur) if Arc::ptr_eq(cur, s) => {
-                    map.remove(&s.peer);
+                    map.remove(&key);
                     true
                 }
                 _ => false,
@@ -1335,7 +1407,7 @@ impl Inner {
             match &s.kind {
                 Kind::Own => (self.emit)(Event::DeviceOffline { id: s.id() }),
                 Kind::Guest { invite, notebook, .. } => (self.emit)(Event::GuestLeft { invite: invite.clone(), notebook: notebook.clone(), device: s.id() }),
-                Kind::Host { .. } => {}
+                Kind::Host { notebook, .. } => (self.emit)(Event::HostOnline { notebook: notebook.clone(), online: false }),
             }
         }
     }

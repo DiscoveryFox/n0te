@@ -11,6 +11,12 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.34.1", "26. Nov. 2026", "Gäste bleiben verbunden", listOf(
+            "Gäste in mehreren deiner Notizbücher bleiben verbunden: vorher kamen und gingen sie ständig, und was sie schrieben oder an Graphen änderten, kam kaum an",
+            "Denselben Einladungslink noch einmal öffnen stört die Verbindung nicht mehr",
+            "Als Gast zeigt „Gast bei …“ jetzt richtig, ob der Besitzer erreichbar ist",
+            "Neuigkeiten und Update-Dialog: lange Listen scrollen, die Knöpfe bleiben immer sichtbar",
+        )),
         Entry("0.34.0", "25. Nov. 2026", "Einzelne Seiten exportieren, riesige Seiten flüssig", listOf(
             "Export: einzelne Seiten wählen, auch nur ein Seitenblatt (z. B. „03 R1“) – auf dem Tablet und am Laptop",
             "Achsen eines Graphen direkt auf der Seite strecken: x- oder y-Achse mit dem Stift ziehen (mit dem Finger, wo Finger schreiben); auf Karopapier rastet sie ein",
