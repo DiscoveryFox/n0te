@@ -32,8 +32,17 @@ object PerfBench {
     @JvmField var on = false
     @JvmField var drawNs = 0L
     @JvmField var recordNs = 0L
+    /** Recordings made (pieces of ink, tiles) since the step began. */
+    @JvmField var recorded = 0
+    /** Why pieces of ink were recorded: new or changed, dropped by Android, pencil grain of a new zoom. */
+    @JvmField val why = IntArray(5)
 
-    private class Step(val name: String, val frames: Int, val frame: (Int) -> Unit)
+    /** A step of [frames] frames, or until [until] (uptime ms, set when it starts) when [seconds] > 0. */
+    private class Step(val name: String, val frames: Int, val seconds: Int = 0, val frame: (Int) -> Unit) {
+        var until = 0L
+    }
+    /** The page view the bench runs in (for the strokes held). */
+    private var target: NotebookView? = null
 
     private val intervals = ArrayList<Float>()
     private val draws = ArrayList<Float>()
@@ -44,6 +53,7 @@ object PerfBench {
     /** Runs [script] (steps separated by commas) on [view] once its notebook is laid out; [createdAt]: the activity's onCreate. */
     fun start(activity: Activity, view: NotebookView, sheetId: String?, script: String, createdAt: Long) {
         val names = script.split(',').map { it.trim() }.filter { it.isNotEmpty() }
+        target = view
         on = true
         listenFrameMetrics(activity.window)
         val choreo = Choreographer.getInstance()
@@ -65,6 +75,16 @@ object PerfBench {
                 when (n) {
                     "fit" -> steps += Step("fit", frames(20)) { if (it == 0) view.fitSheet(p, whole = true, animate = false) }
                     "idle" -> steps += Step("idle", frames(60)) {}
+                    "tour" -> {
+                        // Every page in turn, whole, a few frames each (all of them loaded).
+                        val per = frames(20)
+                        val pages = view.model?.placed?.filter { !it.isBoard }.orEmpty()
+                        steps += Step("tour", per * pages.size) { f -> if (f % per == 0) pages.getOrNull(f / per)?.let { view.fitSheet(it, whole = true, animate = false) } }
+                    }
+                    "rest" -> {
+                        // Back on the page and staying there for a while (pages out of view may let go of their strokes).
+                        steps += Step("rest", Int.MAX_VALUE, seconds = len ?: 30) { f -> if (f == 0) view.fitSheet(p, whole = true, animate = false) }
+                    }
                     "pan" -> {
                         // Zoomed in 4× from the whole page, then across and down the page.
                         var s = 0f; var x0 = 0f; var y0 = 0f
@@ -180,12 +200,13 @@ object PerfBench {
                 if (s != null && i > 0) {
                     intervals += dt; draws += d; records += r
                 }
-                if (s == null || i >= s.frames) {
+                if (s != null && s.seconds > 0 && i == 0) s.until = SystemClock.uptimeMillis() + s.seconds * 1000L
+                if (s == null || i >= s.frames || (s.seconds > 0 && SystemClock.uptimeMillis() > s.until)) {
                     if (s != null) report(s.name)
                     cur = steps.removeFirstOrNull()
                     i = 0
                     if (cur == null) { finish(); return }
-                    intervals.clear(); draws.clear(); records.clear(); synchronized(totals) { totals.clear() }
+                    intervals.clear(); draws.clear(); records.clear(); recorded = 0; why.fill(0); synchronized(totals) { totals.clear() }
                 }
                 cur?.frame?.invoke(i)
                 i++
@@ -212,7 +233,7 @@ object PerfBench {
     private fun report(name: String) {
         val fm = synchronized(totals) { ArrayList(totals) }
         val jank = intervals.count { it > 20f }
-        log(name, "frames ${intervals.size}, interval ${stats(intervals)}, janky ${if (intervals.isEmpty()) 0 else jank * 100 / intervals.size}%; onDraw ${stats(draws)} (re-record ${stats(records)}, sum ${"%.0f".format(records.sum())} ms); FrameMetrics total ${stats(fm)}; ${memory()}")
+        log(name, "frames ${intervals.size}, interval ${stats(intervals)}, janky ${if (intervals.isEmpty()) 0 else jank * 100 / intervals.size}%; onDraw ${stats(draws)} (re-record ${stats(records)}, sum ${"%.0f".format(records.sum())} ms, $recorded recordings: ${why[0]} new, ${why[1]} dropped, ${why[2]} grain; ${why[3]} plans, ${why[4]} chunks made); FrameMetrics total ${stats(fm)}; ${memory()}")
     }
 
     private fun stats(v: List<Float>): String {
@@ -226,7 +247,8 @@ object PerfBench {
         val mi = Debug.MemoryInfo()
         Debug.getMemoryInfo(mi)
         fun mb(k: String) = (mi.getMemoryStat(k)?.toIntOrNull() ?: 0) / 1024
-        return "PSS ${mb("summary.total-pss")} MB (graphics ${mb("summary.graphics")}, native ${mb("summary.native-heap")}, java ${mb("summary.java-heap")})"
+        val held = target?.model?.sheets?.values?.sumOf { it.strokes.size } ?: 0
+        return "PSS ${mb("summary.total-pss")} MB (graphics ${mb("summary.graphics")}, native ${mb("summary.native-heap")}, java ${mb("summary.java-heap")}), $held strokes held"
     }
 
     private fun log(step: String, msg: String) = Log.i(N0te.TAG, "bench $step: $msg")
