@@ -218,7 +218,31 @@ impl Plot {
     /// equation: the letter only on the right across, else the first one). None otherwise.
     fn curve_of_letters(&self, input: &str) -> Option<Plot> {
         let known: HashSet<String> = self.objs.iter().map(|o| o.name()).collect();
-        let letters = lang::unknown_letters(input, &known);
+        let (across, up, def) = self.letters_curve(input, &known)?;
+        let mut p = self.add_one(&def).ok()?;
+        p.name_axes(&across, &up);
+        Some(p)
+    }
+
+    /// Object `id` changed to `a = 3b` (two letters that name nothing yet, its own old name
+    /// counting as free): the same curve as typed (see [`Plot::curve_of_letters`]). None
+    /// otherwise, and for an object others use (they keep a number).
+    fn curve_of_letters_at(&self, id: &str, input: &str) -> Option<Plot> {
+        if !self.dependents(id).is_empty() {
+            return None;
+        }
+        let own = self.objs.iter().find(|o| o.id == id)?.name();
+        let known: HashSet<String> = self.objs.iter().map(|o| o.name()).filter(|n| *n != own).collect();
+        let (across, up, def) = self.letters_curve(input, &known)?;
+        let mut p = self.set_def_plain(id, &def).ok()?;
+        p.name_axes(&across, &up);
+        Some(p)
+    }
+
+    /// For [`Plot::curve_of_letters`]: the letter across, the letter up and the curve's
+    /// definition (`a(b) = 3b`, `2x + 3y = 6`), with [known] the names in use.
+    fn letters_curve(&self, input: &str, known: &HashSet<String>) -> Option<(String, String, String)> {
+        let letters = lang::unknown_letters(input, known);
         let letter = |s: &str| s.len() == 1 && s.chars().all(|c| c.is_ascii_lowercase() && !matches!(c, 'x' | 'y' | 't' | 'e'));
         let mut all = known.clone();
         all.extend(letters.iter().cloned());
@@ -226,12 +250,12 @@ impl Plot {
         if parsed.param.is_some() || parsed.polar || nodes_of(&parsed).iter().any(|n| has_var(n)) {
             return None;
         }
-        let (across, up, def) = match (&parsed.name, &parsed.body) {
-            (Some(l), lang::Body::Expr(_)) if letters.len() == 1 && letter(l) && letter(&letters[0]) && !known.contains(l) => {
+        match (&parsed.name, &parsed.body) {
+            (Some(l), lang::Body::Expr(_)) if letters.len() == 1 && letter(l) && letter(&letters[0]) && !known.contains(l) && letters[0] != *l => {
                 let r = letters[0].clone();
                 let rest = input.trim();
                 let rest = rest[lang_eq(rest)? + 1..].trim();
-                (r.clone(), l.clone(), format!("{l}({r}) = {rest}"))
+                Some((r.clone(), l.clone(), format!("{l}({r}) = {rest}")))
             }
             (_, lang::Body::Equation(lhs, rhs)) if letters.len() == 2 && letters.iter().all(|s| letter(s)) => {
                 let side = |n: &lang::Node| {
@@ -245,13 +269,10 @@ impl Plot {
                 let (h, v) = if r_only.len() == 1 && l_only.len() == 1 { (r_only[0].clone(), l_only[0].clone()) } else { (letters[0].clone(), letters[1].clone()) };
                 let to_x = lang::rename_name(input, &h, "x", &all);
                 let def = lang::rename_name(&to_x, &v, "y", &all);
-                (h, v, def)
+                Some((h, v, def))
             }
-            _ => return None,
-        };
-        let mut p = self.add_one(&def).ok()?;
-        p.name_axes(&across, &up);
-        Some(p)
+            _ => None,
+        }
     }
 
     /// The axes named `across` and `up` where they have no names of their own yet.
@@ -420,14 +441,20 @@ impl Plot {
     /// The plot with an object's definition changed. Without a name it keeps its old one; with
     /// a new name the objects that use it follow. Refused (Err, German) when the object or one
     /// that depends on it would be wrong afterwards.
-    /// Letters that name nothing yet become sliders, as with [`Plot::add`].
+    /// Letters that name nothing yet become sliders, as with [`Plot::add`] — and like there, two
+    /// of them without x and y (`a = 3b`) make the curve `a(b) = 3b` instead.
     pub fn set_def(&self, id: &str, def: &str) -> Result<Plot, String> {
         match self.set_def_plain(id, def) {
             Ok(p) => Ok(p),
-            Err(e) => match self.with_sliders_for(def) {
-                Some((p, _)) => p.set_def_plain(id, def).map_err(|_| e),
-                None => Err(e),
-            },
+            Err(e) => {
+                if let Some(p) = self.curve_of_letters_at(id, def) {
+                    return Ok(p);
+                }
+                match self.with_sliders_for(def) {
+                    Some((p, _)) => p.set_def_plain(id, def).map_err(|_| e),
+                    None => Err(e),
+                }
+            }
         }
     }
 
@@ -1258,6 +1285,47 @@ mod tests {
         let used = plot().add("k = 2").unwrap().add("b = 3k").unwrap().add("g(x) = k x").unwrap();
         let c = used.as_curve(&used.objs[1].id).unwrap();
         assert_eq!(defs(&c)[..2], ["k = 2", "b(k) = 3k"]);
+    }
+
+    #[test]
+    fn editing_a_row_to_two_letters_makes_the_curve_as_typing_does() {
+        let defs = |p: &Plot| p.objs.iter().map(|o| o.def.clone()).collect::<Vec<_>>();
+        // A function edited to a = 3b: the curve a(b) = 3b in the same row, axes b and a.
+        let p = plot().add("f(x) = x^2").unwrap();
+        let id = p.objs[0].id.clone();
+        let e = p.set_def(&id, "a = 3b").unwrap();
+        assert_eq!(defs(&e), ["a(b) = 3b"]);
+        assert_eq!(e.objs[0].id, id, "the same row");
+        assert_eq!((e.x_name.as_str(), e.y_name.as_str()), ("b", "a"));
+        assert_eq!(func(&e, 0).eval(2.0), 6.0);
+        assert_eq!(e.curve_switch(&id), Some(true));
+        // The row's own name counts as free: a = 2 edited to a = 3b.
+        let n = plot().add("a = 2").unwrap();
+        let e = n.set_def(&n.objs[0].id, "a = 3b").unwrap();
+        assert_eq!(defs(&e), ["a(b) = 3b"]);
+        // Without a name it keeps its own (a = 3b's way: b across, the row's name up).
+        let e = p.set_def(&id, "u = v^2").unwrap();
+        assert_eq!(defs(&e), ["u(v) = v^2"]);
+        // An equation of two letters: an equation of x and y, the axes named after the letters.
+        let e = p.set_def(&id, "2a + 3b = 6").unwrap();
+        assert_eq!(defs(&e), ["f: 2x + 3y = 6"]);
+        assert_eq!((e.x_name.as_str(), e.y_name.as_str()), ("a", "b"));
+        // Editing the curve keeps it a curve.
+        let c = plot().add("a = 3b").unwrap();
+        let e = c.set_def(&c.objs[0].id, "a = 5b").unwrap();
+        assert_eq!(defs(&e), ["a(b) = 5b"]);
+        // A number others use stays a number: sliders as before.
+        let used = plot().add("a = 2").unwrap().add("g(x) = a x").unwrap();
+        let e = used.set_def(&used.objs[0].id, "a = 3b").unwrap();
+        assert_eq!(defs(&e), ["a = 3b", "g(x) = a x", "b = 1"]);
+        assert_eq!(e.values()[0], Ok(Val::Num(3.0)));
+        // A slider already there: a number of it, as typing does.
+        let s = plot().add("b = 4").unwrap().add("f(x) = x").unwrap();
+        let e = s.set_def(&s.objs[1].id, "a = 3b").unwrap();
+        assert_eq!(defs(&e), ["b = 4", "a = 3b"]);
+        // Three letters, or x in it: sliders as before.
+        let e = p.set_def(&id, "a = 3b + c").unwrap();
+        assert_eq!(defs(&e), ["a = 3b + c", "b = 1", "c = 1"]);
     }
 
     #[test]
