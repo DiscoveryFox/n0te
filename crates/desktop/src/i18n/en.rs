@@ -557,7 +557,7 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("Eigene …", "Custom …"),
     ("Breite", "Width"),
     ("Höhe", "Height"),
-    ("Jede Seite zwischen 25 mm und 1,4 m", "Each side between 25 mm and 1.4 m"),
+    ("Jede Seite zwischen 25 mm und 5 m", "Each side between 25 mm and 5 m"),
     ("Nur lesen: Papier und Format ändert, wer dich eingeladen hat.", "Read only: only the person who invited you can change paper and format."),
     ("PDF-Seite: Hintergrund und Format ({}) kommen aus der PDF.", "PDF page: background and format ({}) come from the PDF."),
     ("Ein Board ist unendlich groß, mit Punktraster.", "A board is endless, with a dot grid."),

@@ -11,9 +11,12 @@ pub struct Format {
     pub height: f32,
 }
 
-/// The smallest and largest side a page may have (1 inch, about 1.4 m).
+/// The smallest and largest side a page may have: 1 inch, and 200 inches (about 5 m: the
+/// largest page PDF viewers show reliably, so every page still exports).
 pub const MIN_PT: f32 = 72.0;
-pub const MAX_PT: f32 = 4000.0;
+pub const MAX_PT: f32 = 14400.0;
+/// [`MAX_PT`] in millimetres.
+pub const MAX_MM: f32 = 5080.0;
 
 pub const FORMATS: &[Format] = &[
     Format { id: "a4", name: "A4", width: 595.0, height: 842.0 },

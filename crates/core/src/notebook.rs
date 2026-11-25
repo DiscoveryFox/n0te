@@ -959,7 +959,8 @@ mod tests {
         // Nothing below to push: the page gets longer by the space all the same.
         let p = plan_space(&a4, 800.0, 60.0, Below::default());
         assert_eq!((p.dy, p.height), (60.0, 902.0));
-        assert_eq!(plan_space(&SheetSpec { height: 3990.0, ..a4.clone() }, 3900.0, 60.0, Below::default()).height, 4000.0, "not past the largest page");
+        let max = crate::format::MAX_PT;
+        assert_eq!(plan_space(&SheetSpec { height: max - 10.0, ..a4.clone() }, max - 100.0, 60.0, Below::default()).height, max, "not past the largest page");
 
         // A PDF page splits where the space goes in and grows by it.
         let pdf = pdf_spec();

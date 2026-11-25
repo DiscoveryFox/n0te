@@ -4083,7 +4083,7 @@ impl App {
         names = names.push(choice(tr("Eigene …"), custom, Some(Message::CustomSize(self.size_text.is_none()))));
         let mut col = column![turns, names].spacing(8);
         if let Some((tw, th)) = &self.size_text {
-            let mm = |t: &str| t.trim().replace(',', ".").parse::<f32>().ok().filter(|v| (25.4..=1400.0).contains(v));
+            let mm = |t: &str| t.trim().replace(',', ".").parse::<f32>().ok().filter(|v| (25.4..=n0te_core::format::MAX_MM).contains(v));
             let apply = match (mm(tw), mm(th)) {
                 (Some(a), Some(b)) => Some(on(format::mm_to_pt(a), format::mm_to_pt(b))),
                 _ => None,
@@ -4098,7 +4098,7 @@ impl App {
                     Space::new().width(6),
                     button(theme::btn_small(tr("Übernehmen"))).padding(theme::pad()).on_press_maybe(apply).style(theme::secondary),
                     Space::new().width(10),
-                    text(if ok { "" } else { tr("Jede Seite zwischen 25 mm und 1,4 m") }).size(12).color(theme::p().muted),
+                    text(if ok { "" } else { tr("Jede Seite zwischen 25 mm und 5 m") }).size(12).color(theme::p().muted),
                 ]
                 .spacing(8)
                 .align_y(Alignment::Center),

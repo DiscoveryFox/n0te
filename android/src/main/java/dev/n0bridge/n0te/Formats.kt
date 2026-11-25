@@ -39,8 +39,8 @@ object Formats {
         val (short, long) = if (w <= h) w to h else h to w
         return if (landscape) long to short else short to long
     }
-    /** Sides a page may have (the core refuses others): 1 inch … about 1.4 m. */
-    val sideMm = 25.4f..1400f
+    /** Sides a page may have (the core refuses others): 1 inch … 200 inches (about 5 m, the largest PDF page). */
+    val sideMm = 25.4f..5080f
     /** "210 × 297 mm". */
     fun mmText(w: Float, h: Float) = "%.0f × %.0f mm".format(mm(w), mm(h))
 }
@@ -92,7 +92,7 @@ private fun CustomSize(w: Float, h: Float, onChange: (Float, Float) -> Unit) {
         Field(th, "mm", number = true, label = "Höhe (mm)", modifier = Modifier.width(110.dp)) { th = it }
         Btn("Übernehmen", BtnKind.SECONDARY, enabled = ok) { if (ok) { focus.clearFocus(); onChange(Formats.pt(nw!!), Formats.pt(nh!!)) } }
     }
-    if (!ok) Text("Jede Seite zwischen 25 mm und 1,4 m", color = Ui.Muted, fontSize = 12.sp)
+    if (!ok) Text("Jede Seite zwischen 25 mm und 5 m", color = Ui.Muted, fontSize = 12.sp)
 }
 
 /** "Hoch" / "Quer" with a little page drawn the same way round. */
