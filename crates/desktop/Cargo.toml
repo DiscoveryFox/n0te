@@ -22,6 +22,8 @@ n0te-platform.workspace = true
 serde_json = "1"
 iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "wayland", "x11", "crisp", "thread-pool", "canvas", "advanced", "highlighter", "image", "qr_code", "svg"] }
 raw-window-handle = "0.6"
+# "Mit der Kamera scannen" (webcam/): QR codes read in pure Rust (a port of quirc).
+rqrr = { version = "0.11", default-features = false }
 
 # Touchpad gestures (pinch, glide after a swipe) straight from Wayland: winit has none on Linux.
 # n0te Tablet's pen on Windows: WM_POINTER through a window subclass (tablet/pen.rs).
@@ -48,3 +50,5 @@ embed-resource = "3.0"
 [dev-dependencies]
 iced_test = "0.14"
 png = "0.18"
+# QR codes to scan in the webcam tests (the crate iced's qr_code widget draws with).
+qrcode = { version = "0.13", default-features = false }
