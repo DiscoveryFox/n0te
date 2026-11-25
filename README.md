@@ -44,8 +44,8 @@ Legend: ● available · ◐ partly / built but not yet tried on real hardware (
 
 | Area | Android | n0te Laptop · Linux | n0te Laptop · Windows | n0te Tablet · Windows (preview) |
 |---|:---:|:---:|:---:|:---:|
-| [Ink and pens](#ink-and-pens) | ● | ◐ shows ink | ◐ shows ink | ◐ pens, marker, eraser, pressure, tilt, eraser end, palm, finger mode |
-| [Shapes, arrows, lasso](#shapes-arrows-lasso) | ● | ◐ shows them | ◐ shows them | ◐ shapes, arrowheads, lasso (move, scale, copy) |
+| [Ink and pens](#ink-and-pens) | ● | ◐ shows ink | ◐ shows ink | ◐ pens, marker, eraser, pressure, tilt, eraser end, palm, finger mode, ruler, writing magnifier, scribble to delete |
+| [Shapes, arrows, lasso](#shapes-arrows-lasso) | ● | ◐ shows them | ◐ shows them | ◐ shapes, arrowheads, lasso (move, scale, copy), insert space |
 | [Pages and notebooks](#pages-and-notebooks) | ● | ● | ● | ● |
 | [PDF](#pdf) | ● | ● | ● | ● |
 | [Text and LaTeX](#text-and-latex) | ● | ● | ◐ formulas need TeX | ◐ formulas need TeX |
@@ -61,8 +61,9 @@ Legend: ● available · ◐ partly / built but not yet tried on real hardware (
 n0te Laptop draws no ink by design: handwriting is the tablet's job. n0te Tablet for Windows is
 n0te Laptop's interface plus the tablet's tools: the Windows pen (pressure, tilt, eraser end,
 barrel button, hover, palm rejection), the tablet's pen types and palettes, eraser, lasso, shapes
-and arrowheads (the same recognizers as the Android app, ported to the shared core), laser, text
-tool, finger mode and handwriting search. The Windows builds are new: they are built on GitHub
+and arrowheads (the same recognizers as the Android app, ported to the shared core), insert space,
+ruler, writing magnifier, scribble to delete, the "+" at the page edges, boards on their own,
+laser, text tool, finger mode and handwriting search. The Windows builds are new: they are built on GitHub
 Actions and have not been tried on real Windows pen devices yet, so expect rough edges and
 please report what you find.
 
@@ -77,7 +78,9 @@ Fountain pen, ballpoint, pencil (with grain), brush and marker, in your colours 
 appears under the pen with low latency, and the hand can rest on the screen while writing.
 *Example:* hold the width button and a slider appears; hold a colour for a picker with
 pipette and palettes; the pen's side button erases; scribbling over a word deletes it. The laser
-pointer leaves a short trail for presenting. *(Picture: n0te Laptop showing what the tablet wrote.)*
+pointer leaves a short trail for presenting. The ruler moves with one finger and turns with
+two, and the pen follows its edge; the writing magnifier (Schreiblupe) lets you write large in a
+strip at the bottom while its frame moves along the page. *(Picture: n0te Laptop showing what the tablet wrote.)*
 
 ### Shapes, arrows, lasso
 
@@ -98,7 +101,8 @@ Android tablet.)*
 
 A notebook is a column of pages with nested, foldable groups ("Lectures › Week 3") and side pages
 left and right of any page, plus infinite boards. Paper: blank, lines, squares (any size), dots,
-Cornell; formats A3 to A6, Letter, square, 16:9 slide or your own size, portrait or landscape.
+Cornell; formats A3 to A6, Letter, square, 16:9 slide or your own size up to 5 m a side, portrait
+or landscape. Even a 2 × 2 m page full of ink stays smooth: only what is in view is drawn.
 *Example:* hold the `+` at the right edge of a page to add a side page there (or below it for the
 next page); fold a group by its title; the outline shows page pictures and bookmarks; on the laptop
 Page Down pages through and Ctrl+R turns a page to landscape.
@@ -108,7 +112,7 @@ Page Down pages through and Ctrl+R turns a page to landscape.
 ![Lecture slides imported as PDF: ink from the tablet on the slide, a text box and the notes column typed on the laptop](docs/screenshots/pdf.png)
 
 Import lecture slides, write on them on the tablet, add blank pages between or beside slides and
-export everything, the current page or picked pages. The ink is exported as vectors in its own
+export everything, the current page or picked pages (any page or side page on its own). The ink is exported as vectors in its own
 PDF layer ("n0te ink"), so it can be hidden in a PDF viewer. *Example:* drop a PDF into the laptop
 window (or Ctrl+O); circle a term on the tablet; type a note next to the slide with Ctrl+M (the
 notes column); Ctrl+E exports.
@@ -177,7 +181,8 @@ edge to open it beside; the divider snaps at a third, half and two thirds.
 Pair once with a QR code, then notebooks, PDFs and images sync whenever both devices are online,
 directly in the same network or through encrypted relays, and merge if both were edited offline.
 On the laptop the small `n0te-sync` service keeps the library current even while the app is
-closed. See [Pairing quickstart](#pairing-quickstart).
+closed. A device with a camera scans the QR code itself ("Mit der Kamera scannen", also on a
+laptop's webcam). See [Pairing quickstart](#pairing-quickstart).
 
 ### Live sessions
 
@@ -284,6 +289,9 @@ its changes (from [CHANGELOG.md](CHANGELOG.md)) and has these files:
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.34.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.0) | 2026-11-25 | Export single pages and side pages; huge pages stay smooth; n0te Tablet gets the ruler, insert space, writing magnifier, scribble to delete, "+" and boards; pairing with the webcam |
+| [0.33.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.33.0) | 2026-11-25 | Graphs with domains, axes stretched separately, implicit/parametric/polar curves, fractions; open PDFs with n0te; fast big selections |
+| [0.32.1](https://github.com/DiscoveryFox/n0te/releases/tag/v0.32.1) | 2026-11-24 | Automatic updates from this repo (Windows and Android) |
 | [0.32.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.32.0) | 2026-11-24 | First public release: the Android app, n0te Laptop for Windows and Linux, n0te Tablet for Windows as a preview; insert space sideways on the tablet |
 
 Versions before 0.32.0 were private builds of the Android app; their history is in the

@@ -11,6 +11,15 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.34.0", "25. Nov. 2026", "Einzelne Seiten exportieren, riesige Seiten flüssig", listOf(
+            "Export: einzelne Seiten wählen, auch nur ein Seitenblatt (z. B. „03 R1“) – auf dem Tablet und am Laptop",
+            "Achsen eines Graphen direkt auf der Seite strecken: x- oder y-Achse mit dem Stift ziehen (mit dem Finger, wo Finger schreiben); auf Karopapier rastet sie ein",
+            "„a = 3b“ wird auch beim Bearbeiten einer Zeile zur Kurve a(b) = 3b, wie beim Eintippen",
+            "Riesige Seiten (z. B. 2 × 2 m) und Boards bleiben flüssig: nur Sichtbares wird gezeichnet, viel Tinte kommt aus Kacheln, lange nicht gesehene Seiten geben Speicher frei",
+            "Eigene Seitengrößen bis 5 m pro Seite (vorher 1,4 m)",
+            "Am Laptop: Koppeln und Einladungen per Kamera („Mit der Kamera scannen“); große Seiten bleiben auch dort flüssig",
+            "n0te Tablet für Windows: Lineal, Platz einfügen, Schreiblupe, Wegkritzeln, „+“ an den Seiten und Boards für sich – wie auf dem Tablet",
+        )),
         Entry("0.33.0", "25. Nov. 2026", "Graphen mit Grenzen, schnelle Auswahl", listOf(
             "Definitionsbereiche wie in der Schule: f(x) = x², 0 ≤ x ≤ 2 (auch „für …“ oder in Klammern); die Enden als Punkt oder Kreis, im Graphen ziehbar, in den Einstellungen „von/bis“",
             "Achsen einzeln strecken: an der x- oder y-Achse ziehen ändert nur diese Achse, z. B. y in Hunderterschritten und x in Einern",

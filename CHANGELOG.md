@@ -6,6 +6,35 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [0.34.0] - 2026-11-25
+
+### Added
+
+- Export (tablet and laptop): pick single pages, even a single side page ("03 R1").
+- Graphs (Android): stretch an interactive graph's x or y axis right on the page: drag the axis
+  with the pen (or a finger where fingers write); on squared paper it snaps to the squares.
+- n0te Tablet: a ruler. Move it with one finger, turn it with two (it snaps at 45°); the pen
+  follows its edge.
+- n0te Tablet: insert space. Put the pen down and drag down or sideways: everything below or to
+  the right moves along and the page grows; dragging back takes the space out again.
+- n0te Tablet: writing magnifier ("Schreiblupe"). Write large in the strip at the bottom and the
+  frame on the page moves along; also "Mitwandern beim Schreiben" (a setting).
+- n0te Tablet: scribble quickly over strokes to delete them.
+- n0te Tablet: the "+" at the page edges adds a page below or a side page (tap or drag); boards
+  open on their own, endless, with a small overview map.
+- n0te Laptop and n0te Tablet: pair and accept invites with the camera. "Mit der Kamera scannen"
+  reads the other device's QR code with the webcam (Windows: front or back camera; Linux: V4L2).
+
+### Changed
+
+- Very large pages (2 × 2 m) and big boards stay smooth on Android, n0te Laptop and n0te
+  Tablet: only what is in view is drawn. Android draws dense ink from tiles and lets go of pages
+  not seen for a while. On Windows and Linux only what changed is rebuilt after a stroke, and it
+  is saved in the background.
+- Your own page sizes can be up to 5 m a side (was 1.4 m).
+- Graphs: editing a row to `a = 3b` makes the curve a(b) = 3b, as typing it does. A row that
+  other objects use keeps its sliders.
+
 ## [0.33.0] - 2026-11-25
 
 ### Added
