@@ -3,7 +3,6 @@ package dev.n0bridge.n0te
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
-import android.graphics.RenderNode
 import android.os.SystemClock
 import uniffi.n0te_ffi.FfiBackground
 import uniffi.n0te_ffi.FfiBrush
@@ -101,12 +100,15 @@ class SheetState(val id: String) {
     @Volatile var handle: SheetHandle? = null
     var strokes: MutableList<InkStroke> = ArrayList()
     var loading = false
-    /** The ink recorded per page view (two panes can show this sheet, also at other sizes). */
-    private val nodes = java.util.WeakHashMap<Any, RenderNode>()
-    private val validFor = java.util.Collections.newSetFromMap(java.util.WeakHashMap<Any, Boolean>())
-    fun nodeFor(view: Any): RenderNode = nodes.getOrPut(view) { RenderNode("sheet-$id") }
-    fun nodeValid(view: Any) = view in validFor
-    fun nodeRecorded(view: Any) { validFor += view }
+    /** The ink recorded per page view (two panes can show this sheet, also at other sizes), in chunks. */
+    private val inks = java.util.WeakHashMap<Any, InkChunks>()
+    fun inkFor(view: Any): InkChunks = inks.getOrPut(view) { InkChunks("sheet-$id") }
+    /** Every page view lets go of its recordings of this sheet's ink. */
+    fun dropInk() { for (ink in inks.values) ink.discard() }
+    /** When a page view last drew this sheet (see [NotebookModel.trim]). */
+    var seenAt = 0L
+    /** Its strokes were let go (long out of view); read again from [handle] when it shows. */
+    var trimmed = false
     /** Text boxes typed on the laptop (shown, not edited here yet). */
     var texts: List<uniffi.n0te_ffi.FfiTextBox> = emptyList()
     /** Width of the sheet as laid out (a text page's body wraps in it). */
@@ -121,8 +123,8 @@ class SheetState(val id: String) {
     /** Counts the sheet's changes (the outline's page pictures are drawn anew when it moves on). */
     var version = 0; private set
 
+    /** Something drawn changed: the ink's chunks with changed strokes are recorded anew when they show. */
     fun invalidateNode() {
-        validFor.clear()
         version++
     }
 }
@@ -263,21 +265,69 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun ensureLoaded(id: String, pageWidth: Float = A4_W) {
         val st = state(id)
         st.pageWidth = pageWidth
-        if (st.handle != null || st.loading) return
+        if (st.loading) return
+        if (st.handle != null) { if (st.trimmed) reloadTrimmed(st); return }
         st.loading = true
         N0te.background({
+            val t0 = SystemClock.uptimeMillis()
             val h = nb.openSheet(id)
-            Triple(h, inkStrokes(h.allStrokes()), h.textBoxesWithBody(pageWidth))
+            val raw = h.allStrokes()
+            val t1 = SystemClock.uptimeMillis()
+            val ink = inkStrokes(raw)
+            if (PerfBench.on) android.util.Log.i(N0te.TAG, "bench load $id: ${raw.size} strokes, core ${t1 - t0} ms, outlines to paths ${SystemClock.uptimeMillis() - t1} ms")
+            Triple(h, ink, h.textBoxesWithBody(pageWidth))
         }) { r ->
             st.loading = false
             r.getOrNull()?.let { (h, strokes, texts) ->
                 st.handle = h
                 st.strokes = strokes.toMutableList()
+                st.trimmed = false
                 st.texts = texts
                 st.images = runCatching { h.images() }.getOrDefault(emptyList())
                 st.invalidateNode()
                 onChanged()
             }
+        }
+    }
+
+    /**
+     * Lets go of the strokes (outlines, paths, recordings) of pages no page view has drawn for a
+     * while once more than [KEEP_STROKES] are held, the longest unseen first: memory doesn't grow
+     * with every page looked at. The core keeps them ([SheetState.handle]); a page that shows
+     * again reads them anew. Never the pages in [keep] (a selection, text being typed) or one with
+     * strokes being erased or carried.
+     */
+    fun trim(keep: Set<String>, now: Long = SystemClock.uptimeMillis()) {
+        var held = 0
+        for (st in sheets.values) held += st.strokes.size
+        if (held <= KEEP_STROKES) return
+        val idle = sheets.values.filter {
+            it.handle != null && !it.loading && !it.trimmed && it.strokes.isNotEmpty() && it.id !in keep &&
+                it.hidden.isEmpty() && it.floating.isEmpty() && now - it.seenAt > TRIM_UNSEEN_MS
+        }.sortedBy { it.seenAt }
+        for (st in idle) {
+            if (held <= KEEP_STROKES * 3 / 4) break
+            held -= st.strokes.size
+            st.strokes = ArrayList()
+            st.trimmed = true
+            st.dropInk()
+            st.invalidateNode()
+        }
+    }
+
+    /** A trimmed sheet's strokes from its handle again (I/O thread; changes made meanwhile are in the core, so they come along). */
+    private fun reloadTrimmed(st: SheetState) {
+        val h = st.handle ?: return
+        st.loading = true
+        N0te.background({ inkStrokes(h.allStrokes()) }) { r ->
+            st.loading = false
+            val strokes = r.getOrNull() ?: return@background
+            // Loaded otherwise meanwhile (an undo, a change from the laptop): that one stays.
+            if (!st.trimmed) return@background
+            st.strokes = strokes.toMutableList()
+            st.trimmed = false
+            st.invalidateNode()
+            onChanged()
         }
     }
 
@@ -710,6 +760,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     private fun applyReload(st: SheetState, r: Result<List<InkStroke>>) {
         r.getOrNull()?.let {
             st.strokes = it.toMutableList()
+            st.trimmed = false
             st.handle?.let { h -> st.images = runCatching { h.images() }.getOrDefault(st.images) }
             st.hidden.clear()
             st.floating = emptySet()
@@ -1052,6 +1103,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
             val (outline, reloaded) = r.getOrNull() ?: return@background
             for ((st, strokes, texts) in reloaded) {
                 st.strokes = strokes.toMutableList()
+                st.trimmed = false
                 // What is still being typed here stays on screen (it is written in a moment).
                 st.texts = texts.map { b -> pendingText[st.id to b.id]?.let { b.copy(text = it) } ?: b }
                 st.hidden.clear()
@@ -1066,6 +1118,10 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
 
     companion object {
         const val A4_W = 595f
+        /** Strokes held for drawing before pages long out of view let go of theirs (see [trim]). */
+        const val KEEP_STROKES = 60_000
+        /** How long a page must have been out of every view before it lets go of its strokes. */
+        const val TRIM_UNSEEN_MS = 20_000L
         const val TOP = 40f
         const val HEADER_H = 34f
         /** Gap between page rows and between side sheets (settings). */
