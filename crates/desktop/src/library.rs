@@ -62,6 +62,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     theme::caption(tr("Einladung öffnen")),
                     row![
                         iced::widget::text_input("n0te://invite/…", link).on_input(Message::JoinLink).on_submit(Message::Join).padding(10).size(14).style(theme::field),
+                        // The invite's QR code off another screen.
+                        if crate::webcam::supported() {
+                            Element::from(row![Space::new().width(8), button(theme::btn(tr("Mit der Kamera scannen"))).padding(theme::pad()).on_press(Message::Scan(crate::webcam::Msg::Open(crate::webcam::Purpose::Join))).style(theme::secondary)])
+                        } else {
+                            Space::new().into()
+                        },
                         Space::new().width(8),
                         button(theme::btn(tr("Beitreten"))).padding(theme::pad()).on_press(Message::Join).style(theme::accent_button),
                         Space::new().width(6),

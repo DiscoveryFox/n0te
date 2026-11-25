@@ -112,6 +112,8 @@ pub enum Message {
     /// The pair code typed or pasted (from another device's "koppeln"), and using it.
     PairEnter(String),
     PairAccept,
+    /// "Mit der Kamera scannen" (pair code or invite): the camera panel.
+    Scan(crate::webcam::Msg),
     PairToTablet,
     PairSent(Result<String, String>),
     ShowShare(bool),
@@ -399,6 +401,8 @@ pub struct App {
     /// The pairing code as a QR code (the tablet scans it; no n0bridge needed).
     pub pair_qr: Option<iced::widget::qr_code::Data>,
     pub joining: Option<String>,
+    /// The camera panel scanning a pair code or invite (its camera runs while it is open).
+    pub scan: Option<crate::webcam::Scanner>,
     /// History panel open: checkpoints (unix time, "date  size").
     pub history: Option<Vec<(u64, String)>>,
     /// Change stamps of the notebooks on screen (saves by other processes on this machine).
@@ -529,6 +533,7 @@ impl App {
             share_qr: None,
             pair_qr: None,
             joining: None,
+            scan: None,
             history: None,
             stamps: HashMap::new(),
             offline: true,
@@ -608,6 +613,7 @@ impl App {
             crate::latex::subscription().map(|_| Message::FormulaReady),
             Subscription::run(ticks).map(|_| Message::Tick),
             live::subscription().map(Message::Live),
+            crate::webcam::subscription(self.scan.as_ref()).map(Message::Scan),
             iced::event::listen_with(|e, _, _| match e {
                 iced::Event::Window(iced::window::Event::FileDropped(p)) => Some(Message::FileDropped(p)),
                 // A click catches a gliding page.
@@ -1393,6 +1399,20 @@ impl App {
                     Err(e) => self.say(trf("Koppeln: {}", &[&e])),
                 }
             }
+            // A code the camera read closes the panel: a pair code pairs like a pasted one, an
+            // invite goes into the join dialog (in the library).
+            Message::Scan(m) => match crate::webcam::update(&mut self.scan, m) {
+                crate::webcam::Outcome::Nothing => {}
+                crate::webcam::Outcome::Pair(code) => {
+                    self.pair_enter = code;
+                    return self.handle(Message::PairAccept);
+                }
+                crate::webcam::Outcome::Invite(link) => {
+                    self.show_settings = false;
+                    let back = if matches!(self.screen, Screen::Library) { Task::none() } else { self.handle(Message::Back) };
+                    return Task::batch([back, self.handle(Message::JoinLink(link))]);
+                }
+            },
             Message::PairToTablet => {
                 let Some(code) = self.pair_code.clone().filter(|_| n0bridge_installed()) else { return Task::none() };
                 return Task::perform(
@@ -3125,6 +3145,13 @@ impl App {
     }
 
     fn shortcut(&mut self, key: Key, m: keyboard::Modifiers) -> Task<Message> {
+        // The camera panel is on top of everything: Esc closes it (and lets go of the camera).
+        if self.scan.is_some() {
+            if let Key::Named(Named::Escape) = key.as_ref() {
+                self.scan = None;
+            }
+            return Task::none();
+        }
         // The palette takes the arrows and Esc while it is open.
         if self.palette.is_some() {
             return match key.as_ref() {
@@ -3298,7 +3325,9 @@ impl App {
             Screen::Library => crate::shelf::layers(self, library::view(self)),
             Screen::Notebook(s) => split::layers(self, s, sidebar::layers(self, self.notebook_view(s))),
         };
-        let overlay: Option<Element<'_, Message>> = if let Some(w) = &self.size_warning {
+        let overlay: Option<Element<'_, Message>> = if let Some(s) = &self.scan {
+            Some(crate::webcam::view(s).map(Message::Scan))
+        } else if let Some(w) = &self.size_warning {
             Some(self.size_warning_view(w))
         } else if let Some((q, sel)) = &self.palette {
             Some(palette::view(q, &self.palette_items(), *sel))
@@ -3589,15 +3618,18 @@ impl App {
             );
         }
         // The other way round: a code (or n0te-pair: link) another device shows, typed or pasted
-        // here — n0te Tablet on Windows pairs with a laptop like this (no camera needed).
-        col = col.push(
-            row![
-                text_input(tr("Code eines anderen Geräts einfügen (n0te-pair:…)"), &self.pair_enter).on_input(Message::PairEnter).on_submit(Message::PairAccept).padding(8).size(13).style(theme::field),
-                button(theme::btn_small(tr("Koppeln"))).padding(theme::pad()).on_press_maybe((!self.pair_enter.trim().is_empty()).then_some(Message::PairAccept)).style(theme::secondary),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        );
+        // here — n0te Tablet on Windows pairs with a laptop like this — or read off its screen
+        // with the camera.
+        let mut enter = row![
+            text_input(tr("Code eines anderen Geräts einfügen (n0te-pair:…)"), &self.pair_enter).on_input(Message::PairEnter).on_submit(Message::PairAccept).padding(8).size(13).style(theme::field),
+            button(theme::btn_small(tr("Koppeln"))).padding(theme::pad()).on_press_maybe((!self.pair_enter.trim().is_empty()).then_some(Message::PairAccept)).style(theme::secondary),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        if crate::webcam::supported() {
+            enter = enter.push(button(theme::btn_small(tr("Mit der Kamera scannen"))).padding(theme::pad()).on_press(Message::Scan(crate::webcam::Msg::Open(crate::webcam::Purpose::Pair))).style(theme::secondary));
+        }
+        col = col.push(enter);
         let pair_label = if crate::mode() == crate::Mode::Tablet { tr("Gerät koppeln (Code zeigen)") } else { tr("Tablet koppeln") };
         match &self.pair_code {
             None => col = col.push(button(theme::btn(pair_label)).padding(theme::pad()).on_press(Message::PairStart).style(theme::secondary)),
