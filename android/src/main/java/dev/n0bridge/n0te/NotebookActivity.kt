@@ -1615,12 +1615,12 @@ class NotebookActivity : ComponentActivity() {
             exportIds(ids, if (all) "" else "-Seite-$currentPage", toLaptop)
         }
 
-        /** Pages picked in the dialog, each with its side pages (left ones first), in notebook order. */
-        fun exportPicked(rows: List<FfiOutlineRow.Sheet>, toLaptop: Boolean) {
+        /** Pages picked in the dialog (main pages and side pages each on their own), in notebook order. */
+        fun exportPicked(rows: List<FfiOutlineRow.Sheet>, picked: Set<String>, toLaptop: Boolean) {
             pagePicker = null
-            if (rows.isEmpty()) return
-            val ids = rows.flatMap { r -> r.left.reversed().map { it.sheetId } + r.sheetId + r.right.map { it.sheetId } }
-            exportIds(ids, "-${rows.size}-Seiten", toLaptop)
+            val ids = rows.flatMap { r -> r.left.reversed().map { it.sheetId } + r.sheetId + r.right.map { it.sheetId } }.filter { it in picked }
+            if (ids.isEmpty()) return
+            exportIds(ids, "-${ids.size}-Seiten", toLaptop)
         }
 
         fun exportIds(ids: List<String>?, suffix: String, toLaptop: Boolean) {
@@ -2529,13 +2529,17 @@ class NotebookActivity : ComponentActivity() {
             }
         }
 
-        /** Pick pages to share: all pages, also those in folded groups. */
+        /** A page's sheet and its side pages (left ones first). */
+        fun rowIds(r: FfiOutlineRow.Sheet): List<String> = r.left.reversed().map { it.sheetId } + r.sheetId + r.right.map { it.sheetId }
+
+        /** Pick pages to share: all pages, also those in folded groups; side pages each on their own. */
         @Composable
         fun PagePicker(rows: List<FfiOutlineRow>) {
             val sheets = remember(rows) { rows.filterIsInstance<FfiOutlineRow.Sheet>() }
+            // Sheet ids: main pages and side pages each on their own (a single side page works too).
             val picked = remember(rows) {
                 androidx.compose.runtime.mutableStateListOf<String>().also { l ->
-                    view.currentSheet()?.let { cur -> sheets.firstOrNull { it.node == cur.node }?.let { l += it.node } }
+                    view.currentSheet()?.let { cur -> sheets.firstOrNull { it.node == cur.node || it.left.any { s -> s.node == cur.node } || it.right.any { s -> s.node == cur.node } }?.let { l += rowIds(it) } }
                 }
             }
             Dialog(onDismissRequest = { pagePicker = null }) {
@@ -2543,7 +2547,7 @@ class NotebookActivity : ComponentActivity() {
                     Row(Modifier.padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Caption("Seiten teilen", Modifier.weight(1f))
                         Text(Voice.cased("Alle"), color = Ui.Chalk, fontSize = 12.sp, fontFamily = Voice.labelFont,
-                            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { picked.clear(); picked.addAll(sheets.map { it.node }) }.padding(8.dp))
+                            modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { picked.clear(); picked.addAll(sheets.flatMap { rowIds(it) }) }.padding(8.dp))
                         Text(Voice.cased("Keine"), color = Ui.Chalk, fontSize = 12.sp, fontFamily = Voice.labelFont,
                             modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { picked.clear() }.padding(8.dp))
                     }
@@ -2553,10 +2557,10 @@ class NotebookActivity : ComponentActivity() {
                         items(numbered, key = { (r, _) -> when (r) { is FfiOutlineRow.Group -> r.node; is FfiOutlineRow.Sheet -> r.node } }) { (r, n) ->
                             when (r) {
                                 is FfiOutlineRow.Group -> {
-                                    val inside = groupSheets(rows, r)
-                                    val all = inside.isNotEmpty() && inside.all { it.node in picked }
+                                    val inside = groupSheets(rows, r).flatMap { rowIds(it) }
+                                    val all = inside.isNotEmpty() && inside.all { it in picked }
                                     Row(
-                                        Modifier.fillMaxWidth().clickable { if (all) picked.removeAll(inside.map { it.node }) else inside.forEach { if (it.node !in picked) picked += it.node } }
+                                        Modifier.fillMaxWidth().clickable { if (all) picked.removeAll(inside) else inside.forEach { if (it !in picked) picked += it } }
                                             .padding(start = (16 + r.depth.toInt() * 14).dp, end = 16.dp, top = 9.dp, bottom = 5.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
@@ -2566,10 +2570,11 @@ class NotebookActivity : ComponentActivity() {
                                         Text("${inside.size}", color = Ui.Muted, fontSize = 12.sp, fontFamily = Voice.metaFont)
                                     }
                                 }
-                                is FfiOutlineRow.Sheet -> {
-                                    val on = r.node in picked
+                                is FfiOutlineRow.Sheet -> Column {
+                                    val on = r.sheetId in picked
+                                    // The page with its side pages; each side page below on its own.
                                     Row(
-                                        Modifier.fillMaxWidth().clickable { if (on) picked.remove(r.node) else picked += r.node }
+                                        Modifier.fillMaxWidth().clickable { val ids = rowIds(r); if (on) picked.removeAll(ids) else ids.forEach { if (it !in picked) picked += it } }
                                             .padding(start = (16 + r.depth.toInt() * 14).dp, end = 16.dp, top = 7.dp, bottom = 7.dp),
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
@@ -2577,22 +2582,38 @@ class NotebookActivity : ComponentActivity() {
                                         Text("%02d".format(n), color = if (on) Ui.Red else Ui.Muted, fontSize = 12.sp, fontFamily = Voice.metaFont, modifier = Modifier.padding(start = 10.dp).width(30.dp))
                                         Text(r.title.ifBlank { if (r.spec.width <= 0f) "Board" else if (r.spec.pdfBlob != null) "PDF-Seite ${r.spec.pdfPage + 1u}" else if (r.spec.background == FfiBackground.TEXT) "Textseite" else "Seite" },
                                             color = Ui.Chalk, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                        val sides = r.left.size + r.right.size
-                                        if (sides > 0) Text("+$sides", color = Ui.Muted, fontSize = 12.sp, fontFamily = Voice.metaFont)
+                                    }
+                                    val sides = r.left.mapIndexed { i, sd -> Triple(sd, "L${i + 1}", "links") }.reversed() + r.right.mapIndexed { i, sd -> Triple(sd, "R${i + 1}", "rechts") }
+                                    for ((sd, label, where) in sides) {
+                                        val sOn = sd.sheetId in picked
+                                        Row(
+                                            Modifier.fillMaxWidth().clickable { if (sOn) picked.remove(sd.sheetId) else picked += sd.sheetId }
+                                                .padding(start = (46 + r.depth.toInt() * 14).dp, end = 16.dp, top = 5.dp, bottom = 5.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            CheckBox(sOn)
+                                            Text("%02d %s".format(n, label), color = if (sOn) Ui.Red else Ui.Muted, fontSize = 12.sp, fontFamily = Voice.metaFont, modifier = Modifier.padding(start = 10.dp).width(56.dp))
+                                            Text("Seitenblatt $where" + when {
+                                                sd.spec.width <= 0f -> " · Board"
+                                                sd.spec.pdfBlob != null -> " · PDF-Seite ${sd.spec.pdfPage + 1u}"
+                                                sd.spec.background == FfiBackground.TEXT -> " · Textseite"
+                                                else -> ""
+                                            }, color = Ui.Chalk.copy(alpha = 0.85f), fontSize = 12.5.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                    val chosen = sheets.filter { it.node in picked }
-                    val total = chosen.sumOf { 1 + it.left.size + it.right.size }
-                    Text(if (chosen.isEmpty()) "Keine Seite gewählt" else "${chosen.size} Seiten ($total mit Seitenblättern)", color = Ui.Muted, fontSize = 12.sp,
+                    val pickedSet = picked.toSet()
+                    val total = pickedSet.size
+                    Text(if (total == 0) "Keine Seite gewählt" else if (total == 1) "1 Seite" else "$total Seiten", color = Ui.Muted, fontSize = 12.sp,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp))
                     Row(Modifier.padding(horizontal = 16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Btn("Abbrechen", BtnKind.QUIET) { pagePicker = null }
                         Spacer(Modifier.weight(1f))
-                        Pill("An den Laptop") { exportPicked(chosen, toLaptop = true) }
-                        Pill("Teilen …", primary = true) { exportPicked(chosen, toLaptop = false) }
+                        Pill("An den Laptop") { exportPicked(sheets, pickedSet, toLaptop = true) }
+                        Pill("Teilen …", primary = true) { exportPicked(sheets, pickedSet, toLaptop = false) }
                     }
                 }
             }

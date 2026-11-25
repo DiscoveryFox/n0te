@@ -182,7 +182,7 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("Seiten unten antippen", "Pick pages below"),
     ("{} Seite gewählt", "{} page picked"),
     ("{} Seiten gewählt", "{} pages picked"),
-    ("Seiten (+n: Seitenblätter, kommen mit)", "Pages (+n: side pages, included)"),
+    ("Seiten (L/R: Seitenblätter, einzeln wählbar)", "Pages (L/R: side pages, each on its own)"),
     ("Seitenblätter", "Side pages"),
     ("direkt nach ihrer Seite", "right after their page"),
     ("am Ende", "at the end"),

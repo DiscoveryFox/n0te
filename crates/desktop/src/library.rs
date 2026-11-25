@@ -424,13 +424,19 @@ pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportW
     .spacing(14);
     if mode == ExportWhat::Picked {
         let mut chips = Vec::new();
-        for p in o.pages.pages.iter().filter(|p| p.placed.side == 0) {
-            let on = picked.contains(&p.placed.node);
-            let sides = o.pages.pages.iter().filter(|s| s.placed.main_node == p.placed.node && s.placed.side != 0).count();
-            let label = format!("{:02}{}", p.placed.number, if sides > 0 { format!(" +{sides}") } else { String::new() });
-            chips.push(button(text(label).font(theme::MONO).size(12)).padding([6, 11]).on_press(Message::TogglePick(p.placed.node.clone())).style(theme::tab(on)).into());
+        // Every page on its own, side pages too ("03 L1", "03 R2"), in reading order.
+        let mut rows: Vec<&n0te_core::layout::Placed> = o.pages.pages.iter().map(|p| &p.placed).collect();
+        rows.sort_by_key(|p| (p.number, p.side));
+        for p in rows {
+            let on = picked.contains(&p.node);
+            let label = match p.side {
+                0 => format!("{:02}", p.number),
+                s if s < 0 => format!("{:02} L{}", p.number, -s),
+                s => format!("{:02} R{}", p.number, s),
+            };
+            chips.push(button(text(label).font(theme::MONO).size(12)).padding([6, 11]).on_press(Message::TogglePick(p.node.clone())).style(theme::tab(on)).into());
         }
-        col = col.push(theme::caption(tr("Seiten (+n: Seitenblätter, kommen mit)")));
+        col = col.push(theme::caption(tr("Seiten (L/R: Seitenblätter, einzeln wählbar)")));
         col = col.push(iced::widget::scrollable(iced::widget::Row::with_children(chips).spacing(6).wrap().vertical_spacing(6)).style(theme::scroll_dark).height(Length::Fixed(190.0)));
     }
     let order = |at_end: bool, label: &str| button(text(label.to_string()).size(12)).padding([6, 11]).on_press(Message::ExportSidesAtEnd(at_end)).style(theme::tab(sides_at_end == at_end));

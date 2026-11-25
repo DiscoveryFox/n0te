@@ -184,6 +184,22 @@ fn pdf_import_insert_and_export() {
     assert!(std::fs::metadata(&picked).unwrap().len() < bytes.len() as u64);
 }
 
+#[test]
+fn a_single_side_page_can_be_exported_on_its_own() {
+    let mut h = opened("sideexport");
+    let root = h.app.root.clone();
+    h.app.export_dir = root.join("out");
+    let side = open(&h).pages.pages.iter().find(|p| p.placed.side != 0).expect("the demo has side pages").placed.clone();
+    h.message(Message::ShowExport(true));
+    h.message(Message::TogglePick(side.node.clone()));
+    h.message(Message::Export(n0te_desktop::app::ExportWhat::Picked));
+    let path = h.app.last_export.clone().expect("exported");
+    assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF"));
+    // The exporter counts what it wrote: just the side page, without its page.
+    let status = h.app.status.clone().unwrap_or_default();
+    assert!(status.starts_with("1 Seiten exportiert"), "{status}");
+}
+
 /// A one-page PDF of 595 × 842 pt with a full-width blue band at page y 200..400.
 fn banded_pdf(app: &App) -> Vec<u8> {
     use n0te_pdf::pdfium_render::prelude::*;

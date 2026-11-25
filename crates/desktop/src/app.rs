@@ -3082,8 +3082,9 @@ impl App {
                 o.pages.index_of_number(current).map(|i| row(&o.pages.pages[i].placed.node))
             }
             ExportWhat::Picked => {
+                // Each picked page on its own (a side page without its page works too).
                 let picked = self.export.clone().unwrap_or_default();
-                Some(o.pages.pages.iter().filter(|p| p.placed.side == 0 && picked.contains(&p.placed.node)).flat_map(|p| row(&p.placed.node)).collect())
+                Some(o.pages.pages.iter().filter(|p| picked.contains(&p.placed.node)).map(|p| p.placed.sheet_id.clone()).collect())
             }
         };
         if selected.as_ref().is_some_and(|s| s.is_empty()) {
