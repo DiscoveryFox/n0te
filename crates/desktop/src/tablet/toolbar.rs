@@ -1,6 +1,7 @@
 //! n0te Tablet's tool bar (under the notebook's top bar), laid out like the Android app's:
-//! tools, the pen type, six colours of the current palette, four widths, undo / redo; with a
-//! selection, its actions. Big enough for a finger or the pen.
+//! tools, the pen type, six colours of the current palette, four widths, the ruler, the writing
+//! magnifier, a board on its own, undo / redo; with a selection, its actions. Big enough for a
+//! finger or the pen.
 
 use iced::widget::{Space, button, column, container, row, text};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
@@ -50,7 +51,16 @@ fn tool_label(t: Tool) -> &'static str {
         Tool::Lasso => tr("Lasso"),
         Tool::Text => tr("Text"),
         Tool::Laser => tr("Laser"),
+        Tool::Space => tr("Platz"),
     }
+}
+
+/// What the bar shows besides the tools: whether the page in the middle is a board (and open
+/// on its own).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Bar {
+    /// None: no board there; Some(open): a board, open on its own or not.
+    pub board: Option<bool>,
 }
 
 pub fn pen_label(p: PenType) -> &'static str {
@@ -106,13 +116,13 @@ fn tool_button<'a>(label: &str, on: bool, m: Msg) -> Element<'a, Message> {
 }
 
 /// The bar itself.
-pub fn view(t: &Tablet) -> Element<'_, Message> {
+pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
     let mut tools = row![].spacing(4).align_y(Alignment::Center);
     // "Stift" shows the pen type and opens its menu when already chosen.
     let pen_on = t.tool == Tool::Pen;
     let pen_msg = if pen_on { Msg::PenMenu(!t.pen_menu) } else { Msg::Tool(Tool::Pen) };
     tools = tools.push(tool_button(&format!("{} ▾", pen_label(t.pen)), pen_on, pen_msg));
-    for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso, Tool::Text, Tool::Laser] {
+    for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso, Tool::Space, Tool::Text, Tool::Laser] {
         tools = tools.push(tool_button(tool_label(tool), t.tool == tool, Msg::Tool(tool)));
     }
     if t.tool == Tool::Eraser {
@@ -145,6 +155,15 @@ pub fn view(t: &Tablet) -> Element<'_, Message> {
     if !t.clip_is_empty() && t.selection.is_none() {
         bar = bar.push(button(theme::btn_small(tr("Einfügen"))).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost));
     }
+    // The ruler, the writing magnifier and a board on its own (like the tablet's right group).
+    bar = bar.push(tool_button(tr("Lineal"), t.ruler.is_some(), Msg::Ruler(t.ruler.is_none())));
+    if extra.board != Some(true) {
+        bar = bar.push(tool_button(tr("Lupe"), t.loupe.is_some(), Msg::Loupe(t.loupe.is_none())));
+    }
+    if let Some(open) = extra.board {
+        bar = bar.push(tool_button(tr("Board"), open, Msg::Board(!open)));
+    }
+    bar = bar.push(Space::new().width(8));
     bar = bar.push(undo).push(redo);
     container(bar).padding([4, 10]).width(Length::Fill).style(theme::chrome).into()
 }
@@ -168,6 +187,9 @@ pub fn pen_menu(t: &Tablet) -> Element<'_, Message> {
     }
     col = col.push(
         iced::widget::toggler(t.finger_draws).label(tr("Mit dem Finger schreiben")).on_toggle(|on| msg(Msg::FingerDraws(on))).size(18).text_size(13).spacing(10).style(theme::switch),
+    );
+    col = col.push(
+        iced::widget::toggler(t.write_flow).label(tr("Mitwandern beim Schreiben")).on_toggle(|on| msg(Msg::WriteFlow(on))).size(18).text_size(13).spacing(10).style(theme::switch),
     );
     col = col.push(iced::widget::scrollable(pals).direction(iced::widget::scrollable::Direction::Horizontal(Default::default())).width(Length::Fixed(260.0)));
     container(col).padding(8).style(theme::menu).into()

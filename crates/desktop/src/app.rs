@@ -76,6 +76,8 @@ pub enum Message {
     DismissStatus,
     /// A PDF tile arrived (redraw).
     TileReady,
+    /// n0te Tablet: a page kept open was stored (in the background).
+    Saved(crate::saver::Saved),
     /// A LaTeX formula finished rendering (redraw).
     FormulaReady,
     /// Show the other device's view as a red frame.
@@ -610,6 +612,7 @@ impl App {
         Subscription::batch([
             keyboard::listen().map(Message::Key),
             Pdf::subscription().map(|_| Message::TileReady),
+            if crate::mode() == crate::Mode::Tablet { crate::saver::subscription().map(Message::Saved) } else { Subscription::none() },
             crate::latex::subscription().map(|_| Message::FormulaReady),
             Subscription::run(ticks).map(|_| Message::Tick),
             live::subscription().map(Message::Live),
@@ -731,16 +734,12 @@ impl App {
         let nid = id.to_string();
         let pages = Pages::new(
             layout,
-            Box::new(move |sheet| {
-                lib.load_sheet(&nid, sheet)
-                    .map(|s| SheetContent {
-                        strokes: s.strokes(),
-                        texts: s.text_boxes(),
-                        body: s.page_text(),
-                        images: s.images().into_iter().filter_map(|i| lib.blob_path(&i.blob).ok().map(|p| (i, p))).collect(),
-                        plots: s.plots(),
-                    })
-                    .unwrap_or_default()
+            Box::new(move |sheet, open, old| {
+                let image = |i: &n0te_core::sheet::ImageObj| lib.blob_path(&i.blob).ok();
+                match open {
+                    Some(s) => SheetContent::read(s, old, image),
+                    None => lib.load_sheet(&nid, sheet).map(|s| SheetContent::read(&s, old, image)).unwrap_or_default(),
+                }
             }),
             self.pdf.clone(),
         );
@@ -1178,6 +1177,7 @@ impl App {
                 }
             }
             Message::TileReady => {}
+            Message::Saved(saved) => self.on_saved(saved),
             Message::FileDropped(p) => {
                 let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                 return match ext.as_str() {
@@ -1307,7 +1307,9 @@ impl App {
                 };
                 for nb in shown {
                     let now = self.lib.change_stamp(&nb);
-                    if self.stamps.insert(nb.clone(), now).is_some_and(|before| before != now) {
+                    // Our own background save: everything it merged is in memory already.
+                    let ours = crate::saver::own_stamp(&nb) == Some(now);
+                    if self.stamps.insert(nb.clone(), now).is_some_and(|before| before != now) && !ours {
                         self.refresh_open(&nb, true, &[]);
                     }
                 }
@@ -2723,6 +2725,7 @@ impl App {
         let done = f(&o.nb);
         let _ = self.lib.save_notebook(&o.nb);
         let id = o.id.clone();
+        self.saved_here(&id);
         self.relayout_book(&id);
         self.changed(&id, Some(&[]));
         if let Err(e) = done {
@@ -2910,11 +2913,27 @@ impl App {
         if let Err(e) = self.lib.save_sheet(nb, sheet_id, sheet) {
             self.say(trf("Speichern fehlgeschlagen: {}", &[&e]));
         }
+        self.saved_here(nb);
+        self.redraw_sheet(nb, sheet_id, sheet);
+    }
+
+    /// Notebook `nb` was just saved by this app: the next look for saves elsewhere doesn't read
+    /// it all again for that.
+    pub(crate) fn saved_here(&mut self, nb: &str) {
+        if let Some(s) = self.stamps.get_mut(nb) {
+            *s = self.lib.change_stamp(nb);
+        }
+    }
+
+    /// Every pane showing sheet `sheet_id` of notebook `nb` shows it as `sheet` is now (just
+    /// stored, or about to be); the same text page open (and not typed in) in another pane
+    /// shows the new text.
+    pub(crate) fn redraw_sheet(&mut self, nb: &str, sheet_id: &str, sheet: &Sheet) {
         let lib = self.lib.clone();
         if let Screen::Notebook(s) = &mut self.screen {
             let body = sheet.page_text();
             for o in s.panes.iter_mut().filter(|o| o.id == nb) {
-                o.pages.reload_sheet(sheet_id);
+                o.pages.reload_sheet_from(sheet_id, sheet);
                 if let Some(t) = &mut o.text_page
                     && t.sheet_id == sheet_id
                     && !t.dirty
@@ -3798,7 +3817,13 @@ impl App {
             }
             None => Space::new().height(0).into(),
         };
-        let tablet_bar: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet { crate::tablet::toolbar::view(&self.tablet) } else { Space::new().height(0).into() };
+        let tablet_bar: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet {
+            // A board in the middle of the active pane (open on its own or not).
+            let board = o.pages.board.as_ref().map(|_| true).or_else(|| o.pages.index_of_number(o.pages.current_number(&o.camera)).filter(|&i| o.pages.pages[i].placed.is_board()).map(|_| false));
+            crate::tablet::toolbar::view(&self.tablet, crate::tablet::toolbar::Bar { board })
+        } else {
+            Space::new().height(0).into()
+        };
         let panes: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet && self.tablet.pen_menu {
             stack![split::view(self, s), container(crate::tablet::toolbar::pen_menu(&self.tablet)).padding([4, 10])].into()
         } else {
@@ -3823,11 +3848,19 @@ impl App {
         let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold);
         // n0te Tablet: the pen (and the mouse) write; laptop: a double click makes a text box.
         let tablet = crate::mode() == crate::Mode::Tablet;
-        let page_view = if tablet { page_view.on_pen(Message::Pen).finger_draws(self.tablet.finger_draws) } else { page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot) };
+        let page_view = if tablet {
+            let key = o.key;
+            let ruler = self.tablet.ruler.filter(|(k, _)| *k == key).map(|(_, r)| r);
+            let view = iced::Rectangle::new(o.camera.origin, o.camera.viewport);
+            let spots = self.handles_in(key).iter().map(|h| o.camera.to_screen(view, h.at.x, h.at.y)).collect();
+            page_view.on_pen(Message::Pen).finger_draws(self.tablet.finger_draws).ruler(ruler, move |r| Message::Tablet(crate::tablet::Msg::RulerMoved(key, r))).pen_spots(spots)
+        } else {
+            page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot)
+        };
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));
-        if tablet && let Some(overlay) = crate::tablet::overlay::view(&self.tablet, o) {
-            layers.push(overlay);
+        if tablet {
+            layers.extend(crate::tablet::overlay::layers(self, o));
         }
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
