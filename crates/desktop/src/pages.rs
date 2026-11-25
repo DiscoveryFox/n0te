@@ -69,6 +69,20 @@ pub enum Slot {
     Loupe,
     /// The outline's small pictures.
     Thumb,
+    /// The part of a page moved by space going in, in the page view and in the magnifier.
+    MainMoved,
+    LoupeMoved,
+}
+
+impl Slot {
+    /// The caches for a second, moved picture of the same page in this view.
+    pub fn moved(self) -> Slot {
+        match self {
+            Slot::Main | Slot::MainMoved => Slot::MainMoved,
+            Slot::Loupe | Slot::LoupeMoved => Slot::LoupeMoved,
+            Slot::Thumb => Slot::Thumb,
+        }
+    }
 }
 
 /// What a sheet holds.
@@ -822,6 +836,105 @@ impl LiveInk {
     }
 }
 
+/// A page as the view draws it: where its top-left corner is (page points), its paper's
+/// extent (None: endless), its look if not its own (space going into a PDF page), and the parts
+/// of its content (page-local clip, how far the content in it moves).
+struct Shown<'a> {
+    page: &'a Page,
+    origin: Point,
+    extent: Option<(f32, f32)>,
+    spec: Option<SheetSpec>,
+    parts: Vec<(Option<Rect>, (f32, f32))>,
+}
+
+/// The little map of a board on its own (top right): everything drawn on it, and where the view
+/// is (as on the tablet).
+fn draw_minimap(r: &mut iced::Renderer, bounds: Rectangle, page: &Page, load: &Loader, view: &Rect) {
+    let content = page.content(load);
+    let o = page.rect();
+    let ink = content.strokes.iter().fold(Rect::EMPTY, |a, s| a.union(&s.bounds));
+    let ink = if ink.is_empty() { ink } else { Rect::new(ink.x0 + o.x0, ink.y0 + o.y0, ink.x1 + o.x0, ink.y1 + o.y0) };
+    let all = if ink.is_empty() { *view } else { view.union(&ink) };
+    let (mw, mh) = (200.0, 140.0);
+    let k = (mw / all.width().max(1.0)).min(mh / all.height().max(1.0));
+    let (ox, oy) = (bounds.x + bounds.width - mw - 16.0, bounds.y + 16.0);
+    let mx = |x: f32| ox + (x - all.x0) * k + (mw - all.width() * k) / 2.0;
+    let my = |y: f32| oy + (y - all.y0) * k + (mh - all.height() * k) / 2.0;
+    r.fill_quad(
+        renderer::Quad { bounds: Rectangle::new(Point::new(ox - 8.0, oy - 8.0), Size::new(mw + 16.0, mh + 16.0)), border: iced::Border { radius: 14.0.into(), ..Default::default() }, ..Default::default() },
+        Color::from_rgba8(0x1A, 0x1A, 0x1A, 0.9),
+    );
+    for s in content.strokes.iter() {
+        let b = &s.bounds;
+        let (x0, y0) = (mx(b.x0 + o.x0), my(b.y0 + o.y0));
+        let (x1, y1) = (mx(b.x1 + o.x0).max(x0 + 1.5), my(b.y1 + o.y0).max(y0 + 1.5));
+        r.fill_quad(renderer::Quad { bounds: Rectangle::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)), ..Default::default() }, Color::from_rgb8(0xE8, 0xE8, 0xE8));
+    }
+    let (x0, y0, x1, y1) = (mx(view.x0), my(view.y0), mx(view.x1), my(view.y1));
+    r.fill_quad(
+        renderer::Quad { bounds: Rectangle::new(Point::new(x0, y0), Size::new(x1 - x0, y1 - y0)), border: iced::Border { color: theme::p().accent, width: 2.0, radius: 0.0.into() }, ..Default::default() },
+        Color::TRANSPARENT,
+    );
+}
+
+/// A board open on its own: which, and the camera of the pages to go back to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BoardMode {
+    pub sheet_id: String,
+    pub back: Camera,
+}
+
+/// Space going into (or out of) a page while the pen drags: what lies past the line at `at`
+/// moves by `d`, the page takes `size` (a PDF page `gaps`). `axis` None: which way isn't clear
+/// yet (the page shows as it is).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpacePreview {
+    pub sheet_id: String,
+    /// Where the pen went down (sheet points).
+    pub at: (f32, f32),
+    pub axis: Option<n0te_core::notebook::Axis>,
+    pub d: f32,
+    pub size: (f32, f32),
+    pub gaps: Vec<(f32, f32)>,
+}
+
+impl SpacePreview {
+    /// How far page `o` moves while space goes into page `p` (pages further down move with its
+    /// bottom; the pages of its row with its sides).
+    pub fn shift_of(&self, p: &Placed, o: &Placed) -> (f32, f32) {
+        use n0te_core::notebook::Axis;
+        match self.axis {
+            Some(Axis::Down) if o.rect.y0 >= p.rect.y1 - 0.5 => (0.0, self.size.1 - p.rect.height()),
+            Some(Axis::Right) if o.main_node == p.main_node && o.sheet_id != p.sheet_id => {
+                let widen = self.size.0 - p.rect.width();
+                let dx = match p.side {
+                    0 if o.side < 0 => -widen / 2.0,
+                    0 => widen / 2.0,
+                    s if s < 0 && o.side < s => -widen,
+                    s if s > 0 && o.side > s => widen,
+                    _ => 0.0,
+                };
+                (dx, 0.0)
+            }
+            _ => (0.0, 0.0),
+        }
+    }
+
+    /// Where page `p`'s left edge goes while it widens (the layout keeps a main page in the
+    /// middle, a left side page against it, a right one where it starts).
+    pub fn own_shift(&self, p: &Placed) -> f32 {
+        if self.axis != Some(n0te_core::notebook::Axis::Right) {
+            return 0.0;
+        }
+        let widen = self.size.0 - p.rect.width();
+        match p.side {
+            0 => -widen / 2.0,
+            s if s < 0 => -widen,
+            _ => 0.0,
+        }
+    }
+}
+
 /// The laid-out notebook.
 pub struct Pages {
     /// Other devices' views (live session).
@@ -834,6 +947,10 @@ pub struct Pages {
     pub show_remote_frame: Cell<bool>,
     /// The spot just jumped to, lighting up.
     pub flash: Option<Flash>,
+    /// A board open on its own (n0te Tablet): endless paper, nothing else shown.
+    pub board: Option<BoardMode>,
+    /// Space going into a page while the pen drags (n0te Tablet): how the pages look meanwhile.
+    pub space: RefCell<Option<SpacePreview>>,
     pub pages: Vec<Page>,
     pub headers: Vec<Header>,
     pub bounds: Rect,
@@ -856,6 +973,8 @@ impl Pages {
             erasing: RefCell::new(HashMap::new()),
             show_remote_frame: Cell::new(true),
             flash: None,
+            board: None,
+            space: RefCell::new(None),
             pages: layout.sheets.into_iter().map(Page::new).collect(),
             headers: layout.headers,
             bounds: layout.bounds,
@@ -950,7 +1069,7 @@ impl Pages {
     pub fn visible_texts(&self, cam: &Camera) -> Vec<(String, Rect, TextBox)> {
         let view = cam.view_rect();
         let mut out = Vec::new();
-        for p in self.pages.iter().filter(|p| p.rect().intersects(&view)) {
+        for p in self.pages.iter().filter(|p| self.board.as_ref().map_or(p.rect().intersects(&view), |b| b.sheet_id == p.placed.sheet_id)) {
             let c = p.content(&self.load);
             if p.placed.spec.background == Background::Text {
                 // The text page's body, inside the page margins (an empty page shows a hint).
@@ -965,9 +1084,43 @@ impl Pages {
         out
     }
 
-    /// The sheet under a page point.
+    /// The sheet under a page point (a board open on its own: it, everywhere).
     pub fn sheet_at(&self, x: f32, y: f32) -> Option<&Placed> {
-        self.pages.iter().map(|p| &p.placed).find(|p| p.rect.contains(x, y))
+        self.page_at(x, y).map(|p| &p.placed)
+    }
+
+    fn page_at(&self, x: f32, y: f32) -> Option<&Page> {
+        match &self.board {
+            Some(b) => self.pages.iter().find(|p| p.placed.sheet_id == b.sheet_id),
+            None => self.pages.iter().find(|p| p.rect().contains(x, y)),
+        }
+    }
+
+    /// The board open on its own.
+    pub fn board_page(&self) -> Option<&Page> {
+        let b = self.board.as_ref()?;
+        self.pages.iter().find(|p| p.placed.sheet_id == b.sheet_id)
+    }
+
+    /// Opens board `sheet_id` on its own, the view fitting its frame and everything drawn
+    /// around it (`cam`: the pages' camera, kept to go back to). The new camera.
+    pub fn enter_board(&mut self, sheet_id: &str, cam: Camera) -> Option<Camera> {
+        let page = self.pages.iter().find(|p| p.placed.sheet_id == sheet_id && p.placed.is_board())?;
+        let r = page.rect();
+        let mut fit = r;
+        for s in &page.content(&self.load).strokes {
+            fit = fit.union(&Rect::new(s.bounds.x0 + r.x0, s.bounds.y0 + r.y0, s.bounds.x1 + r.x0, s.bounds.y1 + r.y0));
+        }
+        let zoom = ((cam.viewport.width / fit.width().max(1.0)).min(cam.viewport.height / fit.height().max(1.0)) * 0.9).clamp(MIN_ZOOM, MAX_ZOOM);
+        let (cx, cy) = ((fit.x0 + fit.x1) / 2.0, (fit.y0 + fit.y1) / 2.0);
+        self.board = Some(BoardMode { sheet_id: sheet_id.to_string(), back: cam });
+        Some(Camera { x: cx - cam.viewport.width / zoom / 2.0, y: cy - cam.viewport.height / zoom / 2.0, zoom, ..cam })
+    }
+
+    /// Back from a board to the pages: the camera they had (in the view's size now).
+    pub fn exit_board(&mut self, now: Camera) -> Option<Camera> {
+        let b = self.board.take()?;
+        Some(self.clamp(Camera { viewport: now.viewport, origin: now.origin, ..b.back }))
     }
 
     /// A text page's first line (its name in the outline when it has none): Markdown marks
@@ -979,14 +1132,14 @@ impl Pages {
 
     /// The coordinate system under a page point: (sheet id, plot id).
     pub fn plot_at(&self, x: f32, y: f32) -> Option<(String, String)> {
-        let page = self.pages.iter().find(|p| p.rect().contains(x, y))?;
+        let page = self.page_at(x, y)?;
         let r = page.rect();
         page.plot_at(&self.load, x - r.x0, y - r.y0).map(|id| (page.placed.sheet_id.clone(), id))
     }
 
     /// The text box at page point (x, y): (sheet id, box id). A box is as tall as its lines.
     pub fn text_at(&self, x: f32, y: f32) -> Option<(String, String)> {
-        let page = self.pages.iter().find(|p| p.rect().contains(x, y))?;
+        let page = self.page_at(x, y)?;
         let r = page.rect();
         let (lx, ly) = (x - r.x0, y - r.y0);
         let content = page.content(&self.load);
@@ -1012,10 +1165,15 @@ impl Pages {
     /// that place (the software renderer clips images only to their layer), so whatever goes on
     /// the page over the PDF must be drawn in a later layer.
     fn draw_pdf(&self, r: &mut iced::Renderer, page: &Page, at: Point, cam: &Camera, view: &Rect, clip: Rectangle) {
+        self.draw_pdf_as(r, page, &page.placed.spec, at, cam, view, clip);
+    }
+
+    /// Like [`Pages::draw_pdf`], as if the page were `spec` (space going in: other gaps).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_pdf_as(&self, r: &mut iced::Renderer, page: &Page, spec: &SheetSpec, at: Point, cam: &Camera, view: &Rect, clip: Rectangle) {
         use iced::advanced::image::{FilterMethod, Image, Renderer as _};
-        let spec = &page.placed.spec;
         let (Some(pdf), Some((blob, index))) = (&self.pdf, &spec.pdf) else { return };
-        let rect = page.rect();
+        let rect = Rect::new(page.rect().x0, page.rect().y0, page.rect().x0 + spec.width, page.rect().y0 + spec.height);
         let size = n0te_pdf::PageSize { width: spec.width, height: spec.base_height() };
         let visible = Rect::new(view.x0.max(rect.x0) - rect.x0, view.y0.max(rect.y0) - rect.y0, view.x1.min(rect.x1) - rect.x0, view.y1.min(rect.y1) - rect.y0);
         let b = pdf::bucket(cam.zoom);
@@ -1085,6 +1243,9 @@ impl Pages {
         self.headers = layout.headers;
         self.bounds = layout.bounds;
         self.total_pages = layout.total_pages;
+        if self.board.as_ref().is_some_and(|b| !self.pages.iter().any(|p| p.placed.sheet_id == b.sheet_id)) {
+            self.board = None;
+        }
     }
 
     pub fn page_of_sheet(&self, sheet_id: &str) -> Option<usize> {
@@ -1096,8 +1257,12 @@ impl Pages {
         (0..self.pages.len()).filter(|&i| self.pages[i].placed.side == 0).collect()
     }
 
-    /// The main page under the vertical centre of the viewport (its number).
+    /// The main page under the vertical centre of the viewport (its number; a board open on its
+    /// own: its).
     pub fn current_number(&self, camera: &Camera) -> u32 {
+        if let Some(p) = self.board_page() {
+            return p.placed.number;
+        }
         let cy = camera.y + camera.viewport.height / camera.zoom / 2.0;
         let mut best = self.pages.iter().find(|p| p.placed.side == 0).map(|p| p.placed.number).unwrap_or(0);
         for p in self.pages.iter().filter(|p| p.placed.side == 0) {
@@ -1139,7 +1304,8 @@ impl Pages {
     /// Keeps the content reachable: at most half a viewport of empty space around it.
     pub fn clamp(&self, mut c: Camera) -> Camera {
         c.zoom = c.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
-        if self.bounds.is_empty() || c.viewport.width <= 0.0 {
+        // A board on its own is endless.
+        if self.bounds.is_empty() || c.viewport.width <= 0.0 || self.board.is_some() {
             return c;
         }
         let (vw, vh) = (c.viewport.width / c.zoom, c.viewport.height / c.zoom);
@@ -1157,7 +1323,57 @@ impl Pages {
     }
 
     fn header_at(&self, p: Point) -> Option<&Header> {
+        if self.board.is_some() {
+            return None;
+        }
         self.headers.iter().find(|h| h.rect.contains(p.x, p.y))
+    }
+
+    /// The pages to draw for `view`, each where and as it shows: a board on its own; while space
+    /// goes into a page, it longer (wider) with its content past the line moved, the pages
+    /// further down (beside it) moved along.
+    fn shown(&self, view: &Rect) -> Vec<Shown<'_>> {
+        if let Some(p) = self.board_page() {
+            return vec![Shown { page: p, origin: Point::new(p.rect().x0, p.rect().y0), extent: None, spec: None, parts: vec![(None, (0.0, 0.0))] }];
+        }
+        let space = self.space.borrow();
+        let target = space.as_ref().and_then(|sp| self.pages.iter().find(|p| p.placed.sheet_id == sp.sheet_id).map(|p| (sp, p)));
+        let mut out = Vec::new();
+        for page in &self.pages {
+            let r = page.rect();
+            let plain = Shown { page, origin: Point::new(r.x0, r.y0), extent: Some(page.size()), spec: None, parts: vec![(None, (0.0, 0.0))] };
+            let sh = match target {
+                Some((sp, t)) if t.placed.sheet_id == page.placed.sheet_id && sp.axis.is_some() => {
+                    use n0te_core::notebook::Axis;
+                    let (w, h) = sp.size;
+                    let spec = SheetSpec { width: w, height: h, gaps: sp.gaps.clone(), ..page.placed.spec.clone() };
+                    let parts = match sp.axis {
+                        Some(Axis::Down) => vec![(Some(Rect::new(0.0, 0.0, w, sp.at.1)), (0.0, 0.0)), (Some(Rect::new(0.0, sp.at.1 + sp.d.max(0.0), w, h)), (0.0, sp.d))],
+                        _ => vec![(Some(Rect::new(0.0, 0.0, sp.at.0, h)), (0.0, 0.0)), (Some(Rect::new(sp.at.0 + sp.d.max(0.0), 0.0, w, h)), (sp.d, 0.0))],
+                    };
+                    Shown { origin: Point::new(r.x0 + sp.own_shift(&page.placed), r.y0), extent: Some((w, h)), spec: Some(spec), parts, ..plain }
+                }
+                Some((sp, t)) => {
+                    let (dx, dy) = sp.shift_of(&t.placed, &page.placed);
+                    Shown { origin: Point::new(r.x0 + dx, r.y0 + dy), ..plain }
+                }
+                None => plain,
+            };
+            let (w, h) = sh.extent.unwrap_or((0.0, 0.0));
+            if Rect::new(sh.origin.x, sh.origin.y, sh.origin.x + w, sh.origin.y + h).intersects(view) {
+                out.push(sh);
+            }
+        }
+        out
+    }
+
+    /// While space goes into a page: below which y (page points) the group titles move, and how
+    /// far.
+    fn header_shift(&self) -> Option<(f32, f32)> {
+        let space = self.space.borrow();
+        let sp = space.as_ref().filter(|sp| sp.axis == Some(n0te_core::notebook::Axis::Down))?;
+        let p = self.pages.iter().find(|p| p.placed.sheet_id == sp.sheet_id)?;
+        Some((p.rect().y1 - 0.5, sp.size.1 - p.rect().height()))
     }
 
     /// Before a frame of `cam` (view `slot`): builds what the pages in view lack at its zoom,
@@ -1166,11 +1382,19 @@ impl Pages {
         let deadline = std::time::Instant::now() + budget;
         let view = cam.view_rect();
         let erasing = self.erasing.borrow();
-        for page in self.pages.iter().filter(|p| p.rect().intersects(&view)) {
+        if self.space.borrow().is_some() {
+            return true;
+        }
+        let board = self.board_page();
+        let shown: Vec<&Page> = match board {
+            Some(b) => vec![b],
+            None => self.pages.iter().filter(|p| p.rect().intersects(&view)).collect(),
+        };
+        for page in shown {
             let r = page.rect();
             let local = Rect { x0: view.x0 - r.x0, y0: view.y0 - r.y0, x1: view.x1 - r.x0, y1: view.y1 - r.y0 };
-            let clip = Rectangle::new(Point::ORIGIN, Size::new(r.width(), r.height()));
-            if !page.prepare_ink(cam, slot, local, &self.load, erasing.get(&page.placed.sheet_id), Some(clip), deadline) {
+            let clip = board.is_none().then(|| Rectangle::new(Point::ORIGIN, Size::new(r.width(), r.height())));
+            if !page.prepare_ink(cam, slot, local, &self.load, erasing.get(&page.placed.sheet_id), clip, deadline) {
                 return false;
             }
         }
@@ -1260,10 +1484,18 @@ pub struct PageView<'a, Message> {
     finger_draws: bool,
     /// Which view this is (its own GPU caches).
     slot: Slot,
+    /// The writing magnifier's strip: its camera is the app's, as given (no size to report,
+    /// nothing kept within bounds), and only the page shows.
+    fixed: bool,
+    /// n0te Tablet: the ruler lying in this view; fingers on it move and turn it.
+    ruler: Option<crate::tablet::tools::Ruler>,
+    on_ruler: Option<Box<dyn Fn(crate::tablet::tools::Ruler) -> Message + 'a>>,
+    /// n0te Tablet: window points where a finger acts like the pen (the "+").
+    spots: Vec<Point>,
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None, finger_draws: false, slot: Slot::Main }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None, finger_draws: false, slot: Slot::Main, fixed: false, ruler: None, on_ruler: None, spots: Vec::new() }
 }
 
 impl<'a, Message> PageView<'a, Message> {
@@ -1293,6 +1525,28 @@ impl<'a, Message> PageView<'a, Message> {
         self
     }
 
+    /// The writing magnifier's strip: the camera is used as given (its viewport is the strip),
+    /// nothing but the page shows.
+    pub fn fixed(mut self) -> Self {
+        self.fixed = true;
+        self
+    }
+
+    /// n0te Tablet: window points where a finger acts like the pen (the "+" beside the current
+    /// row: a tap or a drag adds a page, as with the pen).
+    pub fn pen_spots(mut self, spots: Vec<Point>) -> Self {
+        self.spots = spots;
+        self
+    }
+
+    /// n0te Tablet: the ruler in this view; one finger on it moves it, a second turns it
+    /// (snapping to 45°), reported as they move.
+    pub fn ruler(mut self, ruler: Option<crate::tablet::tools::Ruler>, on_ruler: impl Fn(crate::tablet::tools::Ruler) -> Message + 'a) -> Self {
+        self.ruler = ruler;
+        self.on_ruler = Some(Box::new(on_ruler));
+        self
+    }
+
     /// A click on a coordinate system: (sheet id, plot id) — its editor opens.
     pub fn on_plot_click(mut self, f: impl Fn(String, String) -> Message + 'a) -> Self {
         self.on_plot = Some(Box::new(f));
@@ -1317,6 +1571,20 @@ struct State {
     fingers: Vec<(u64, Point)>,
     /// Finger writing: the finger that writes and since when.
     finger_pen: Option<(u64, std::time::Instant)>,
+    /// Fingers moving the ruler: the first (id, position), a second that turns it, the ruler
+    /// as moved so far, its angle unsnapped and the line between the fingers' angle.
+    ruler_drag: Option<RulerDrag>,
+    /// A board on its own: its little map shows until then (after the view moved).
+    mini_until: Option<std::time::Instant>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RulerDrag {
+    a: (u64, Point),
+    b: Option<(u64, Point)>,
+    ruler: crate::tablet::tools::Ruler,
+    raw: f32,
+    line: f32,
 }
 
 fn mouse_sample(p: Point, since: std::time::Instant) -> crate::tablet::pen::Sample {
@@ -1328,6 +1596,80 @@ const PREPARE_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// Pixels per wheel "line".
 const LINE_PX: f32 = 48.0;
+
+impl<Message> PageView<'_, Message> {
+    /// The view moved: on a board on its own its little map shows for a moment.
+    fn moved(&self, state: &mut State, shell: &mut Shell<'_, Message>) {
+        if self.pages.board.is_some() && !self.fixed {
+            let until = std::time::Instant::now() + std::time::Duration::from_millis(900);
+            state.mini_until = Some(until);
+            shell.request_redraw_at(until + std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// A touch while the ruler lies in the view: moves and turns it (`drag`: the fingers on it so
+/// far; `first`: no other finger is down). None: not the ruler's; Some(None): its, nothing to
+/// report; Some(Some(r)): the ruler now.
+fn ruler_touch(drag: &mut Option<RulerDrag>, ruler: crate::tablet::tools::Ruler, t: iced::touch::Event, cam: &Camera, bounds: Rectangle, first: bool) -> Option<Option<crate::tablet::tools::Ruler>> {
+    use iced::touch::Event as T;
+    let angle = |a: Point, b: Point| (b.y - a.y).atan2(b.x - a.x);
+    match (t, drag.as_mut()) {
+        (T::FingerPressed { id, position }, None) => {
+            let at = cam.to_page(bounds, position);
+            if !first || !bounds.contains(position) || !ruler.contains(at.x, at.y) {
+                return None;
+            }
+            *drag = Some(RulerDrag { a: (id.0, position), b: None, ruler, raw: ruler.angle, line: 0.0 });
+            Some(None)
+        }
+        (T::FingerPressed { id, position }, Some(d)) if d.b.is_none() => {
+            d.b = Some((id.0, position));
+            d.line = angle(d.a.1, position);
+            Some(None)
+        }
+        (T::FingerPressed { .. }, Some(_)) => Some(None),
+        (T::FingerMoved { id, position }, Some(d)) if d.a.0 == id.0 || d.b.is_some_and(|b| b.0 == id.0) => {
+            let (a0, b0) = (d.a.1, d.b.map(|b| b.1));
+            if d.a.0 == id.0 {
+                d.a.1 = position;
+            } else if let Some(b) = &mut d.b {
+                b.1 = position;
+            }
+            match (b0, d.b) {
+                (Some(b0), Some((_, b1))) => {
+                    let (m0, m1) = (Point::new((a0.x + b0.x) / 2.0, (a0.y + b0.y) / 2.0), Point::new((d.a.1.x + b1.x) / 2.0, (d.a.1.y + b1.y) / 2.0));
+                    let line = angle(d.a.1, b1);
+                    let mut turn = line - d.line;
+                    if turn > std::f32::consts::PI {
+                        turn -= std::f32::consts::TAU;
+                    } else if turn < -std::f32::consts::PI {
+                        turn += std::f32::consts::TAU;
+                    }
+                    d.raw += turn;
+                    d.line = line;
+                    let moved = crate::tablet::tools::Ruler { cx: d.ruler.cx + (m1.x - m0.x) / cam.zoom, cy: d.ruler.cy + (m1.y - m0.y) / cam.zoom, ..d.ruler };
+                    d.ruler = moved.turned_to(d.raw);
+                }
+                _ => d.ruler = crate::tablet::tools::Ruler { cx: d.ruler.cx + (d.a.1.x - a0.x) / cam.zoom, cy: d.ruler.cy + (d.a.1.y - a0.y) / cam.zoom, ..d.ruler },
+            }
+            Some(Some(d.ruler))
+        }
+        (T::FingerLifted { id, .. } | T::FingerLost { id, .. }, Some(d)) if d.a.0 == id.0 || d.b.is_some_and(|b| b.0 == id.0) => {
+            match d.b {
+                Some(b) if d.a.0 == id.0 => {
+                    d.a = b;
+                    d.b = None;
+                }
+                Some(_) => d.b = None,
+                None => *drag = None,
+            }
+            Some(None)
+        }
+        (_, Some(_)) => Some(None),
+        _ => None,
+    }
+}
 
 impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Message> {
     fn tag(&self) -> tree::Tag {
@@ -1372,6 +1714,8 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             Some((id, seen, published)) if id == self.pages.id && seen == self.camera => published,
             _ => self.camera,
         };
+        // The magnifier's strip: its camera as given, in the strip.
+        let cam = if self.fixed { Camera { viewport: bounds.size(), origin: bounds.position(), ..cam } } else { cam };
         // Tell the app our size and place (first frame, resizes, sidebar); it owns the camera.
         if cam.viewport != bounds.size() || cam.origin != bounds.position() {
             let next = if cam.viewport.width <= 0.0 { self.pages.initial_camera(bounds.size()) } else { self.pages.clamp(resized(cam, bounds.size(), self.pages.column_at(&cam))) };
@@ -1411,10 +1755,23 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     // A palm resting while the pen writes: ignore it.
                     if crate::tablet::pen::in_range() {
                         state.fingers.clear();
+                        state.ruler_drag = None;
+                        return;
+                    }
+                    // Fingers on the ruler move it (one) and turn it (two), as on the tablet.
+                    if let (Some(ruler), Some(on_ruler)) = (self.ruler, &self.on_ruler)
+                        && let Some(moved) = ruler_touch(&mut state.ruler_drag, ruler, *t, &cam, bounds, state.fingers.is_empty() && state.finger_pen.is_none())
+                    {
+                        if let Some(r) = moved {
+                            shell.publish(on_ruler(r));
+                        }
+                        shell.capture_event();
                         return;
                     }
                     // Finger writing: one finger writes; a second one turns it into pan / zoom.
-                    if self.finger_draws {
+                    // A finger on a spot that acts like the pen (a "+"), or writing with a finger.
+                    let spot = matches!(*t, touch::Event::FingerPressed { position, .. } if self.spots.iter().any(|s| s.distance(position) < crate::tablet::tools::HANDLE_HIT));
+                    if self.finger_draws || spot || state.finger_pen.is_some() {
                         let fe = |phase, p: Point, since| PenEvent { phase, samples: vec![mouse_sample(p, since)], eraser: false, barrel: false, real: false };
                         match *t {
                             touch::Event::FingerPressed { id, position } if state.fingers.is_empty() && state.finger_pen.is_none() && bounds.contains(position) => {
@@ -1485,6 +1842,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                         if c != cam {
                             state.pending = Some((self.pages.id, self.camera, c));
                             shell.publish((self.on_camera)(c));
+                            self.moved(state, shell);
                         }
                         shell.capture_event();
                     }
@@ -1567,6 +1925,7 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             if c != cam {
                 state.pending = Some((self.pages.id, self.camera, c));
                 shell.publish((self.on_camera)(c));
+                self.moved(state, shell);
             }
             shell.capture_event();
         }
@@ -1633,64 +1992,114 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 bounds,
             );
         };
-        let visible: Vec<&Page> = pages.pages.iter().filter(|p| p.rect().intersects(&view)).collect();
         let slot = self.slot;
-        // The part of the view on a page, in its own points.
-        let local = |page: &Page| {
-            let r = page.rect();
-            Rect { x0: view.x0 - r.x0, y0: view.y0 - r.y0, x1: view.x1 - r.x0, y1: view.y1 - r.y0 }
+        let shown = pages.shown(&view);
+        let visible: Vec<&Page> = shown.iter().map(|s| s.page).collect();
+        let board = pages.board.is_some();
+        // A board on its own: paper everywhere.
+        if board {
+            renderer.fill_quad(renderer::Quad { bounds, ..Default::default() }, theme::p().paper);
+        }
+        // The screen rectangle of a part (page-local `clip`) of a page drawn at `at`.
+        let part_rect = |at: Point, clip: &Rect| Rectangle::new(Point::new(at.x + clip.x0 * cam.zoom, at.y + clip.y0 * cam.zoom), Size::new(clip.width() * cam.zoom, clip.height() * cam.zoom));
+        // The part of the view on a page drawn at `origin` (page points), in its own points.
+        let local = |origin: Point, shift: (f32, f32)| Rect { x0: view.x0 - origin.x - shift.0, y0: view.y0 - origin.y - shift.1, x1: view.x1 - origin.x - shift.0, y1: view.y1 - origin.y - shift.1 };
+        // Draws `f` for each part of a page (clipped to it, its content moved), with where the
+        // content's top-left lands and the part of the view on it.
+        // (The moved part draws through caches of its own: one mesh drawn twice in a frame would
+        // land where it was drawn last.)
+        let parts = |r: &mut iced::Renderer, sh: &Shown, f: &mut dyn FnMut(&mut iced::Renderer, Point, Rect, Slot)| {
+            let at = cam.to_screen(bounds, sh.origin.x, sh.origin.y);
+            for (i, (clip, shift)) in sh.parts.iter().enumerate() {
+                let slot = if i == 0 { slot } else { slot.moved() };
+                let content = Point::new(at.x + shift.0 * cam.zoom, at.y + shift.1 * cam.zoom);
+                let seen = local(sh.origin, *shift);
+                match clip {
+                    None => f(r, content, seen, slot),
+                    Some(c) => {
+                        let Some(area) = part_rect(at, c).intersection(&bounds) else { continue };
+                        let seen = Rect { x0: seen.x0.max(c.x0 - shift.0), y0: seen.y0.max(c.y0 - shift.1), x1: seen.x1.min(c.x1 - shift.0), y1: seen.y1.min(c.y1 - shift.1) };
+                        r.with_layer(area, |r| f(r, content, seen, slot));
+                    }
+                }
+            }
         };
         // Three layers: paper (+ PDF images), then ink, then labels — within one layer iced
         // draws images after meshes, which would put the PDF over the ink.
         renderer.with_layer(bounds, |r| {
-            for page in &visible {
+            for sh in &shown {
+                let page = sh.page;
                 page.last_frame.set(frame_no);
-                let rect = page.rect();
-                let at = cam.to_screen(bounds, rect.x0, rect.y0);
-                let (w, h) = page.size();
-                r.fill_quad(renderer::Quad { bounds: Rectangle::new(at, Size::new(w * cam.zoom, h * cam.zoom)), ..Default::default() }, theme::p().paper);
-                page.draw_pattern(r, at, &cam, slot, local(page), Some((w, h)), frame_no);
-                pages.draw_pdf(r, page, at, &cam, &view, bounds);
-                if page.placed.spec.gaps.is_empty() {
+                let at = cam.to_screen(bounds, sh.origin.x, sh.origin.y);
+                if let Some((w, h)) = sh.extent {
+                    r.fill_quad(renderer::Quad { bounds: Rectangle::new(at, Size::new(w * cam.zoom, h * cam.zoom)), ..Default::default() }, theme::p().paper);
+                }
+                page.draw_pattern(r, at, &cam, slot, local(sh.origin, (0.0, 0.0)), sh.extent, frame_no);
+                let spec = sh.spec.as_ref().unwrap_or(&page.placed.spec);
+                // The view as if the page were where it belongs (it may be shown moved).
+                let (ox, oy) = (sh.origin.x - page.rect().x0, sh.origin.y - page.rect().y0);
+                pages.draw_pdf_as(r, page, spec, at, &cam, &Rect { x0: view.x0 - ox, y0: view.y0 - oy, x1: view.x1 - ox, y1: view.y1 - oy }, bounds);
+                if spec.gaps.is_empty() && sh.parts.len() == 1 && sh.parts[0].0.is_none() {
                     pages.draw_images(r, page, at, &cam, bounds);
                 } else {
                     // Over the layers of a split PDF page's stretches.
-                    r.with_layer(bounds, |r| pages.draw_images(r, page, at, &cam, bounds));
+                    r.with_layer(bounds, |r| parts(r, sh, &mut |r, at, _, _| pages.draw_images(r, page, at, &cam, bounds)));
                 }
             }
         });
         renderer.with_layer(bounds, |r| {
             // Coordinate systems: ink under everything written (over the paper, PDF and images:
             // in the layer before, images go over meshes).
-            for page in &visible {
-                let Some(plots) = page.plot_mesh(&pages.load, slot) else { continue };
-                let rect = page.rect();
-                let at = cam.to_screen(bounds, rect.x0, rect.y0);
-                r.with_translation(Vector::new(at.x, at.y), |r| {
-                    r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(plots));
+            for sh in &shown {
+                if sh.page.plot_mesh(&pages.load, slot).is_none() {
+                    continue;
+                }
+                parts(r, sh, &mut |r, at, _, slot| {
+                    let Some(plots) = sh.page.plot_mesh(&pages.load, slot) else { return };
+                    r.with_translation(Vector::new(at.x, at.y), |r| {
+                        r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(plots));
+                    });
                 });
             }
             for l in pages.live.borrow().values() {
-                let Some(page) = visible.iter().find(|p| p.placed.sheet_id == l.sheet_id) else { continue };
-                let rect = page.rect();
-                let Some(cache) = l.mesh(slot, Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height()))) else { continue };
-                let at = cam.to_screen(bounds, rect.x0, rect.y0);
+                let Some(sh) = shown.iter().find(|s| s.page.placed.sheet_id == l.sheet_id) else { continue };
+                let rect = sh.page.rect();
+                let clip = if board { Rectangle::new(Point::new(-1e6, -1e6), Size::new(2e6, 2e6)) } else { Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height())) };
+                let Some(cache) = l.mesh(slot, clip) else { continue };
+                let at = cam.to_screen(bounds, sh.origin.x, sh.origin.y);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(cache));
                 });
             }
             let erasing = pages.erasing.borrow();
-            for page in &visible {
+            for sh in &shown {
+                let page = sh.page;
                 let rect = page.rect();
-                let at = cam.to_screen(bounds, rect.x0, rect.y0);
-                let clip = Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height()));
-                page.draw_ink(r, at, &cam, slot, local(page), &pages.load, erasing.get(&page.placed.sheet_id), Some(clip), frame_no);
+                let clip = (!board).then(|| Rectangle::new(Point::ORIGIN, Size::new(rect.width(), rect.height())));
+                parts(r, sh, &mut |r, at, seen, slot| page.draw_ink(r, at, &cam, slot, seen, &pages.load, erasing.get(&page.placed.sheet_id), clip, frame_no));
             }
         });
+        // The magnifier shows a part of one page: no numbers, titles or marks.
+        if self.fixed {
+            pages.evict_stale();
+            return;
+        }
+        if board {
+            // Where the view is on the board, for a moment after it moved.
+            let state = _tree.state.downcast_ref::<State>();
+            if state.mini_until.is_some_and(|t| std::time::Instant::now() < t)
+                && let Some(page) = pages.board_page()
+            {
+                renderer.with_layer(bounds, |r| draw_minimap(r, bounds, page, &pages.load, &view));
+            }
+            pages.evict_stale();
+            return;
+        }
         renderer.with_layer(bounds, |r| {
-            for page in &visible {
+            for sh in &shown {
+                let page = sh.page;
                 let rect = page.rect();
-                let at = cam.to_screen(bounds, rect.x0, rect.y0);
+                let at = cam.to_screen(bounds, sh.origin.x, sh.origin.y);
                 // Number left of main pages, "3 L1" above side pages, BOARD over boards.
                 if cam.zoom >= 0.18 {
                     let p = &page.placed;
@@ -1710,9 +2119,12 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     }
                 }
             }
-            // Group titles: fold mark, title, page count, a hairline.
+            // Group titles: fold mark, title, page count, a hairline (further down while space
+            // goes into a page above).
+            let header_shift = pages.header_shift();
             for h in pages.headers.iter().filter(|h| h.rect.intersects(&view)) {
-                let at = cam.to_screen(bounds, h.rect.x0, h.rect.y0);
+                let dy = header_shift.filter(|(below, _)| h.rect.y0 >= *below).map_or(0.0, |(_, d)| d);
+                let at = cam.to_screen(bounds, h.rect.x0, h.rect.y0 + dy);
                 let hh = h.rect.height() * cam.zoom;
                 let w = h.rect.width() * cam.zoom;
                 let size = (15.0 * cam.zoom).clamp(9.0, 22.0);

@@ -3785,7 +3785,13 @@ impl App {
             }
             None => Space::new().height(0).into(),
         };
-        let tablet_bar: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet { crate::tablet::toolbar::view(&self.tablet) } else { Space::new().height(0).into() };
+        let tablet_bar: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet {
+            // A board in the middle of the active pane (open on its own or not).
+            let board = o.pages.board.as_ref().map(|_| true).or_else(|| o.pages.index_of_number(o.pages.current_number(&o.camera)).filter(|&i| o.pages.pages[i].placed.is_board()).map(|_| false));
+            crate::tablet::toolbar::view(&self.tablet, crate::tablet::toolbar::Bar { board })
+        } else {
+            Space::new().height(0).into()
+        };
         let panes: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet && self.tablet.pen_menu {
             stack![split::view(self, s), container(crate::tablet::toolbar::pen_menu(&self.tablet)).padding([4, 10])].into()
         } else {
@@ -3810,11 +3816,19 @@ impl App {
         let page_view = pages::page_view(&o.pages, o.camera, Message::Camera, Message::Fold);
         // n0te Tablet: the pen (and the mouse) write; laptop: a double click makes a text box.
         let tablet = crate::mode() == crate::Mode::Tablet;
-        let page_view = if tablet { page_view.on_pen(Message::Pen).finger_draws(self.tablet.finger_draws) } else { page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot) };
+        let page_view = if tablet {
+            let key = o.key;
+            let ruler = self.tablet.ruler.filter(|(k, _)| *k == key).map(|(_, r)| r);
+            let view = iced::Rectangle::new(o.camera.origin, o.camera.viewport);
+            let spots = self.handles_in(key).iter().map(|h| o.camera.to_screen(view, h.at.x, h.at.y)).collect();
+            page_view.on_pen(Message::Pen).finger_draws(self.tablet.finger_draws).ruler(ruler, move |r| Message::Tablet(crate::tablet::Msg::RulerMoved(key, r))).pen_spots(spots)
+        } else {
+            page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot)
+        };
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));
-        if tablet && let Some(overlay) = crate::tablet::overlay::view(&self.tablet, o) {
-            layers.push(overlay);
+        if tablet {
+            layers.extend(crate::tablet::overlay::layers(self, o));
         }
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];

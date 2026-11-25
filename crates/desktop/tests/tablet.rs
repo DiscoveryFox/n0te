@@ -214,3 +214,259 @@ fn holding_the_pen_still_makes_a_wobbly_line_straight() {
     let (x0, x1) = s.points.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.x), hi.max(p.x)));
     assert!(x1 - x0 > 150.0 / open(&h).camera.zoom, "as long as drawn");
 }
+
+/// The notebook's sheet spec as laid out now.
+fn spec_of(h: &Harness, sheet: &str) -> n0te_core::notebook::SheetSpec {
+    open(h).pages.pages.iter().find(|p| p.placed.sheet_id == sheet).expect("page").placed.spec.clone()
+}
+
+/// The window point at page point (x, y).
+fn win(h: &Harness, x: f32, y: f32) -> Point {
+    let cam = open(h).camera;
+    cam.to_screen(Rectangle::new(cam.origin, cam.viewport), x, y)
+}
+
+#[test]
+fn the_pen_follows_the_rulers_edge_and_fingers_move_and_turn_it() {
+    use iced::touch::{Event as T, Finger};
+    let mut h = opened("ruler");
+    h.message(Message::Tablet(Msg::Ruler(true)));
+    let r = h.app.tablet.ruler.expect("ruler on").1;
+    let (nb, sheet, _) = first_page(&h, 0.5, 0.5);
+    let old: Vec<String> = strokes(&h, &nb, &sheet).into_iter().map(|s| s.id).collect();
+    let page = open(&h).pages.pages.iter().find(|p| p.placed.sheet_id == sheet).unwrap().placed.rect;
+    // Down just under the bottom edge, wobbling along: the stroke lies on the edge.
+    let edge = r.cy + n0te_desktop::tablet::tools::RULER_W / 2.0;
+    h.press_at(win(&h, r.cx - 150.0, edge + 6.0));
+    for i in 1..=20 {
+        let wob = if i % 2 == 0 { 7.0 } else { 2.0 };
+        h.move_to(win(&h, r.cx - 150.0 + i as f32 * 15.0, edge + wob));
+    }
+    h.release();
+    let s = strokes(&h, &nb, &sheet).into_iter().find(|s| !old.contains(&s.id)).expect("stored");
+    let want = edge + s.brush.width / 2.0 - page.y0;
+    assert!(s.points.iter().all(|p| (p.y - want).abs() < 0.05), "on the edge: {want} vs {:?}", s.points.iter().map(|p| p.y).collect::<Vec<_>>());
+    assert!(s.points.last().unwrap().x - s.points[0].x > 250.0, "as long as drawn");
+    h.screenshot(shots().join("tablet-03-ruler.png"));
+
+    // One finger on it moves it.
+    let zoom = open(&h).camera.zoom;
+    let c = win(&h, r.cx, r.cy);
+    h.events(&[iced::Event::Touch(T::FingerPressed { id: Finger(1), position: c })]);
+    h.events(&[iced::Event::Touch(T::FingerMoved { id: Finger(1), position: Point::new(c.x + 60.0, c.y + 20.0) })]);
+    let moved = h.app.tablet.ruler.unwrap().1;
+    assert!((moved.cx - (r.cx + 60.0 / zoom)).abs() < 0.01 && (moved.cy - (r.cy + 20.0 / zoom)).abs() < 0.01, "moved: {moved:?}");
+    let cam_before = open(&h).camera;
+    // A second finger turns it: 44° comes out as 45°.
+    let a = Point::new(c.x + 60.0, c.y + 20.0);
+    let b0 = Point::new(a.x + 100.0, a.y);
+    h.events(&[iced::Event::Touch(T::FingerPressed { id: Finger(2), position: b0 })]);
+    let turn = 44.0f32.to_radians();
+    h.events(&[iced::Event::Touch(T::FingerMoved { id: Finger(2), position: Point::new(a.x + 100.0 * turn.cos(), a.y + 100.0 * turn.sin()) })]);
+    let turned = h.app.tablet.ruler.unwrap().1;
+    assert!((turned.angle - 45.0f32.to_radians()).abs() < 1e-4, "snapped to 45°: {}", turned.angle.to_degrees());
+    h.events(&[iced::Event::Touch(T::FingerLifted { id: Finger(1), position: a }), iced::Event::Touch(T::FingerLifted { id: Finger(2), position: b0 })]);
+    assert_eq!(open(&h).camera, cam_before, "the pages didn't move meanwhile");
+    h.message(Message::Tablet(Msg::Ruler(false)));
+    assert!(h.app.tablet.ruler.is_none());
+}
+
+#[test]
+fn space_goes_in_downwards_and_sideways_and_undo_takes_it_out() {
+    let mut h = opened("space");
+    let (nb, sheet, mid) = first_page(&h, 0.5, 0.2);
+    let page = open(&h).pages.pages.iter().find(|p| p.placed.sheet_id == sheet).unwrap().placed.rect;
+    let cam = open(&h).camera;
+    let line = (mid.y - cam.origin.y) / cam.zoom + cam.y - page.y0;
+    let before = strokes(&h, &nb, &sheet);
+    let below: Vec<&n0te_core::sheet::Stroke> = before.iter().filter(|s| (s.bounds.y0 + s.bounds.y1) / 2.0 >= line).collect();
+    assert!(!below.is_empty(), "something below the line");
+    h.message(Message::Tablet(Msg::Tool(Tool::Space)));
+    // Down 80 px: everything below moves down by about that (whole millimetres on blank paper).
+    h.press_at(mid);
+    for i in 1..=8 {
+        h.move_to(Point::new(mid.x + (i % 2) as f32, mid.y + i as f32 * 10.0));
+    }
+    assert!(open(&h).pages.space.borrow().as_ref().is_some_and(|p| p.d > 70.0 / cam.zoom), "the preview shows it");
+    h.screenshot(shots().join("tablet-04-space.png"));
+    h.release();
+    assert!(open(&h).pages.space.borrow().is_none());
+    let after = strokes(&h, &nb, &sheet);
+    let y_of = |id: &str, s: &[n0te_core::sheet::Stroke]| s.iter().find(|x| x.id == id).unwrap().bounds.y0;
+    let d = y_of(&below[0].id, &after) - below[0].bounds.y0;
+    assert!((d - 80.0 / cam.zoom).abs() < 3.0, "moved down {d}");
+    for s in &below {
+        assert!((y_of(&s.id, &after) - s.bounds.y0 - d).abs() < 0.05, "all below by the same: {} vs {d}, middle {} line {line}", y_of(&s.id, &after) - s.bounds.y0, (s.bounds.y0 + s.bounds.y1) / 2.0);
+    }
+    let above = before.iter().find(|s| (s.bounds.y0 + s.bounds.y1) / 2.0 < line - 5.0).expect("above");
+    assert_eq!(y_of(&above.id, &after), above.bounds.y0, "above stays");
+    assert!(spec_of(&h, &sheet).height >= 842.0, "the page as long or longer");
+    // One undo takes it all back.
+    h.message(Message::Tablet(Msg::Undo));
+    assert!((y_of(&below[0].id, &strokes(&h, &nb, &sheet)) - below[0].bounds.y0).abs() < 0.05, "undone");
+    assert_eq!(spec_of(&h, &sheet).height, 842.0);
+
+    // Sideways: what lies right of the line moves right, the page gets wider if pushed.
+    let start = win(&h, page.x0 + 300.0, page.y0 + 400.0);
+    let right: Vec<n0te_core::sheet::Stroke> = strokes(&h, &nb, &sheet).into_iter().filter(|s| (s.bounds.x0 + s.bounds.x1) / 2.0 >= 300.0).collect();
+    drag(&mut h, start, Point::new(start.x + 120.0, start.y + 2.0), 10);
+    let now = strokes(&h, &nb, &sheet);
+    let r0 = right.iter().max_by(|a, b| a.bounds.x1.total_cmp(&b.bounds.x1)).expect("something right");
+    let dx = now.iter().find(|s| s.id == r0.id).unwrap().bounds.x0 - r0.bounds.x0;
+    assert!((dx - 120.0 / cam.zoom).abs() < 3.0, "moved right {dx}");
+    let w = spec_of(&h, &sheet).width;
+    assert!(w >= r0.bounds.x1 + dx, "the page holds it: {w}");
+    h.message(Message::Tablet(Msg::Undo));
+    assert_eq!(spec_of(&h, &sheet).width, 595.0, "undo: as wide as before");
+
+    // Nothing below: the page itself gets longer.
+    let last = strokes(&h, &nb, &sheet).iter().map(|s| s.bounds.y1).fold(0.0f32, f32::max);
+    let bottom = win(&h, page.x0 + 300.0, page.y0 + last + 30.0);
+    drag(&mut h, bottom, Point::new(bottom.x, bottom.y + 60.0), 6);
+    let grown = spec_of(&h, &sheet).height;
+    assert!(grown > 842.0 + 50.0 / cam.zoom, "longer: {grown}");
+    let status = h.app.status.clone().unwrap_or_default();
+    assert!(status.starts_with("Platz eingefügt"), "told: {status}");
+}
+
+#[test]
+fn a_scribble_over_ink_deletes_it() {
+    let mut h = opened("scribble");
+    let (nb, sheet, a) = first_page(&h, 0.3, 0.8);
+    let before = strokes(&h, &nb, &sheet).len();
+    drag(&mut h, a, Point::new(a.x + 120.0, a.y), 8);
+    assert_eq!(strokes(&h, &nb, &sheet).len(), before + 1);
+    // A quick zigzag across it.
+    h.press_at(Point::new(a.x + 30.0, a.y - 12.0));
+    for i in 1..=16 {
+        let x = a.x + 30.0 + i as f32 * 4.0;
+        let y = if i % 2 == 0 { a.y - 12.0 } else { a.y + 12.0 };
+        h.move_to(Point::new(x, y));
+    }
+    h.release();
+    assert_eq!(strokes(&h, &nb, &sheet).len(), before, "the line and the scribble are gone");
+    assert_eq!(h.app.status.as_deref(), Some("1 Strich weggekritzelt"));
+    // Undo brings the line back.
+    h.message(Message::Tablet(Msg::Undo));
+    assert_eq!(strokes(&h, &nb, &sheet).len(), before + 1);
+}
+
+#[test]
+fn the_plus_adds_a_page_below_and_side_pages() {
+    use n0te_desktop::tablet::tools::HandleDir;
+    let mut h = opened("handles");
+    // The whole page in view (its "+" below too).
+    h.message(Message::Zoom(0.5));
+    h.events(&[]);
+    let count = |h: &Harness| open(h).pages.pages.len();
+    let handles = |h: &Harness| {
+        let o = open(h);
+        let g = h.app.settings.layout();
+        n0te_desktop::tablet::tools::handles(&o.pages, &o.camera, g.side_gap, g.row_gap)
+    };
+    let hs = handles(&h);
+    assert_eq!(hs.len(), 3, "left, right, below");
+    h.screenshot(shots().join("tablet-05-plus.png"));
+    let n = count(&h);
+    let main = hs[0].main_node.clone();
+    // A tap on the "+" below: a page after this one.
+    let below = hs.iter().find(|x| x.dir == HandleDir::Below).unwrap().at;
+    h.click(win(&h, below.x, below.y));
+    assert_eq!(count(&h), n + 1, "a page added");
+    let o = open(&h);
+    let i = o.pages.pages.iter().position(|p| p.placed.node == main).unwrap();
+    let next = o.pages.pages[i + 1..].iter().find(|p| p.placed.side == 0).unwrap();
+    assert!(!next.placed.is_board() && next.placed.spec.pdf.is_none());
+    // Back to the first page; drag the right "+" outwards: a side page on the right.
+    let first = o.pages.pages[i].placed.sheet_id.clone();
+    h.message(Message::Jump(first.clone()));
+    h.events(&[]);
+    let right = handles(&h).into_iter().find(|x| x.dir == HandleDir::Right).unwrap();
+    let p = win(&h, right.at.x, right.at.y);
+    drag(&mut h, p, Point::new(p.x + 80.0, p.y), 4);
+    assert_eq!(count(&h), n + 2);
+    assert!(open(&h).pages.pages.iter().any(|q| q.placed.main_node == right.main_node && q.placed.side == 1), "a right side page");
+    // Dragged back: nothing.
+    h.message(Message::Jump(first));
+    h.events(&[]);
+    let left = handles(&h).into_iter().find(|x| x.dir == HandleDir::Left).unwrap();
+    let p = win(&h, left.at.x, left.at.y);
+    drag(&mut h, p, Point::new(p.x + 70.0, p.y), 4);
+    assert_eq!(count(&h), n + 2, "dragged back: no page");
+    // A finger tap on a "+" adds its page too (fingers elsewhere move the pages).
+    use iced::touch::{Event as T, Finger};
+    let below = handles(&h).into_iter().find(|x| x.dir == HandleDir::Below).unwrap();
+    let p = win(&h, below.at.x, below.at.y);
+    h.events(&[iced::Event::Touch(T::FingerPressed { id: Finger(7), position: p })]);
+    h.events(&[iced::Event::Touch(T::FingerLifted { id: Finger(7), position: p })]);
+    assert_eq!(count(&h), n + 3, "a finger on the +");
+}
+
+#[test]
+fn a_board_opens_on_its_own_endless_and_back() {
+    assert!(n0te_desktop::set_mode(Mode::Tablet));
+    let root = temp_root("board");
+    let lib = Library::open(&root).unwrap();
+    let id = demo::save_into(&lib);
+    let nb = lib.load_notebook(&id).unwrap();
+    let (_, end) = n0te_desktop::pdf::position_after(&nb, None);
+    let (_, board) = nb.add_sheet(None, end, &n0te_core::notebook::SheetSpec::board()).unwrap();
+    lib.save_notebook(&nb).unwrap();
+    let size = Size::new(1400.0, 900.0);
+    let mut h = Harness::new(App::new(&root), "wgpu", size, 1.0).or_else(|| Harness::new(App::new(&root), "tiny-skia", size, 1.0)).expect("a renderer");
+    h.message(Message::Open(id.clone()));
+    h.events(&[]);
+    h.message(Message::Jump(board.clone()));
+    h.events(&[]);
+    let column = open(&h).camera;
+    h.message(Message::Tablet(Msg::Board(true)));
+    h.events(&[]);
+    assert!(open(&h).pages.board.is_some(), "open on its own");
+    // Endless: the view goes far beyond the frame, the pen writes there.
+    for _ in 0..4 {
+        h.scroll(Point::new(700.0, 500.0), 0.0, 1500.0);
+    }
+    let cam = open(&h).camera;
+    let frame = open(&h).pages.pages.iter().find(|p| p.placed.sheet_id == board).unwrap().placed.rect;
+    assert!(cam.y + cam.viewport.height / cam.zoom < frame.y0, "far above the frame: {} vs {}", cam.y, frame.y0);
+    let a = Point::new(600.0, 500.0);
+    drag(&mut h, a, Point::new(a.x + 100.0, a.y + 30.0), 8);
+    let s = strokes(&h, &id, &board);
+    assert_eq!(s.len(), 1);
+    assert!(s[0].bounds.y1 < 0.0, "written above the frame: {:?}", s[0].bounds);
+    h.screenshot(shots().join("tablet-06-board.png"));
+    h.message(Message::Tablet(Msg::Board(false)));
+    assert!(open(&h).pages.board.is_none());
+    assert_eq!((open(&h).camera.x, open(&h).camera.y, open(&h).camera.zoom), (column.x, column.y, column.zoom), "back where it was");
+}
+
+#[test]
+fn the_writing_magnifier_writes_into_its_frame_and_moves_on() {
+    let mut h = opened("loupe");
+    h.message(Message::Tablet(Msg::Loupe(true)));
+    let l = h.app.tablet.loupe.clone().expect("open");
+    let (_, strip, cam) = h.app.loupe_view().expect("strip");
+    h.events(&[]);
+    h.screenshot(shots().join("tablet-07-loupe.png"));
+    let nb = open(&h).id.clone();
+    let old: Vec<String> = strokes(&h, &nb, &l.sheet).into_iter().map(|s| s.id).collect();
+    // Writing in the strip lands in the frame, small.
+    let a = Point::new(strip.x + strip.width * 0.1, strip.y + strip.height * 0.6);
+    drag(&mut h, a, Point::new(a.x + strip.width * 0.3, a.y + 5.0), 12);
+    let s = strokes(&h, &nb, &l.sheet).into_iter().find(|s| !old.contains(&s.id)).expect("written");
+    let len = s.points.last().unwrap().x - s.points[0].x;
+    assert!((len - strip.width * 0.3 / cam.zoom).abs() < 2.0, "as long as in the strip / its zoom: {len}");
+    assert!((s.points[0].x - (l.x + strip.width * 0.1 / cam.zoom)).abs() < 2.0, "at the frame's place: {} vs {}", s.points[0].x, l.x);
+    // A tap in the strip's right part moves the frame on (and writes no dot).
+    let n = strokes(&h, &nb, &l.sheet).len();
+    h.click(Point::new(strip.x + strip.width * 0.92, strip.y + strip.height * 0.5));
+    let moved = h.app.tablet.loupe.clone().unwrap();
+    assert!(moved.x > l.x + l.w * 0.5, "moved on: {} → {}", l.x, moved.x);
+    assert_eq!(strokes(&h, &nb, &l.sheet).len(), n, "no dot");
+    // The next line: down, back to where lines begin.
+    h.message(Message::Tablet(Msg::LoupeNewLine));
+    let next = h.app.tablet.loupe.clone().unwrap();
+    assert!(next.y > moved.y && next.x == next.line_x, "next line: {:?}", (next.x, next.y));
+    h.message(Message::Tablet(Msg::Loupe(false)));
+    assert!(h.app.tablet.loupe.is_none());
+}

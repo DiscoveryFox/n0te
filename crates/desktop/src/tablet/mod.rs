@@ -13,8 +13,10 @@
 pub mod keyboard;
 pub mod overlay;
 pub mod pen;
+pub mod extras;
 pub mod recognize;
 pub mod toolbar;
+pub mod tools;
 
 use std::collections::HashMap;
 
@@ -43,6 +45,8 @@ pub enum Tool {
     Text,
     /// A red point the others see (live session, guests).
     Laser,
+    /// Put the pen down and drag: space goes into the page there, down or sideways.
+    Space,
 }
 
 /// How the eraser erases.
@@ -78,6 +82,20 @@ pub enum Msg {
     Frame,
     /// Handwriting of a sheet was read (notebook, sheet, lines, keys to drop).
     Indexed(String, String, Vec<n0te_core::sheet::IndexLine>, Vec<String>),
+    /// The ruler on / off.
+    Ruler(bool),
+    /// Fingers moved the ruler (in that pane).
+    RulerMoved(PaneKey, tools::Ruler),
+    /// The writing magnifier on / off.
+    Loupe(bool),
+    /// Its frame back or on along the line.
+    LoupeStep(bool),
+    /// Its frame to the next line.
+    LoupeNewLine,
+    /// A finger slid (or pinched) the paper in its strip: the strip's camera now.
+    LoupeCamera(crate::pages::Camera),
+    /// The board in view on its own / back to the pages.
+    Board(bool),
 }
 
 /// A stroke being written.
@@ -110,6 +128,10 @@ struct Drawing {
     lines: Option<(n0te_core::ink::Rect, (Vec<String>, Vec<n0te_core::arrows::LineStroke>))>,
     /// Strokes the snap replaces (the first barb of a two-barb head).
     replaces: Vec<String>,
+    /// Written through the magnifier: its strip's camera (else the pane's).
+    map: Option<Camera>,
+    /// Along the ruler's edge (-1 top, 1 bottom; 0 free).
+    edge: i8,
 }
 
 /// The eraser under way.
@@ -123,6 +145,8 @@ struct Erasing {
     path: Vec<(f32, f32, f32)>,
     /// Strokes touched so far (stroke mode).
     hit: Vec<String>,
+    /// Erasing through the magnifier: its strip's camera (else the pane's).
+    map: Option<Camera>,
 }
 
 /// The selection being moved (or scaled from its bottom-right corner).
@@ -148,6 +172,16 @@ struct Lassoing {
     sheet: String,
     origin: (f32, f32),
     polygon: Vec<f32>,
+}
+
+/// One of this app's edits, for undo / redo.
+#[derive(Debug, Clone)]
+pub(crate) enum Edit {
+    /// An edit of a sheet (in the sheet's own history): (notebook, sheet).
+    Sheet(String, String),
+    /// Space put in or taken out: the sheet's part when something moved, and the page's
+    /// shape before and after (notebook, sheet, moved, node, before, after).
+    Space(String, String, bool, String, extras::Shape, extras::Shape),
 }
 
 /// Selected strokes on one sheet.
@@ -183,6 +217,14 @@ pub struct Tablet {
     pub lasso_outline: Option<(PaneKey, Vec<Point>)>,
     /// The laser point (pane, page point) while the laser tool touches.
     pub laser: Option<(PaneKey, Point)>,
+    /// The ruler on the pages (in that pane).
+    pub ruler: Option<(PaneKey, tools::Ruler)>,
+    /// The writing magnifier, when open.
+    pub loupe: Option<extras::Loupe>,
+    /// Space being dragged into a page.
+    pub space: Option<extras::SpaceDrag>,
+    /// A "+" being tapped or dragged.
+    pub handle: Option<extras::HandleDrag>,
     drawing: Option<Drawing>,
     erasing: Option<Erasing>,
     lassoing: Option<Lassoing>,
@@ -198,8 +240,8 @@ pub struct Tablet {
     /// notebook's change stamp when it last caught up with its file.
     sheets: HashMap<(String, String), (std::sync::Arc<Sheet>, u64)>,
     /// Our edits, oldest first (undo goes back through them across pages); and what was undone.
-    undo: Vec<(String, String)>,
-    redo: Vec<(String, String)>,
+    undo: Vec<Edit>,
+    redo: Vec<Edit>,
     next_live: u64,
 }
 
@@ -222,6 +264,10 @@ impl Default for Tablet {
             selection: None,
             lasso_outline: None,
             laser: None,
+            ruler: None,
+            loupe: None,
+            space: None,
+            handle: None,
             drawing: None,
             erasing: None,
             lassoing: None,
@@ -261,6 +307,7 @@ impl Tablet {
                         "eraser" => Tool::Eraser,
                         "lasso" => Tool::Lasso,
                         "text" => Tool::Text,
+                        "space" => Tool::Space,
                         _ => Tool::Pen,
                     }
                 }
@@ -293,6 +340,7 @@ impl Tablet {
             Tool::Eraser => "eraser",
             Tool::Lasso => "lasso",
             Tool::Text => "text",
+            Tool::Space => "space",
             Tool::Pen | Tool::Laser => "pen",
         };
         let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
@@ -346,7 +394,7 @@ impl Tablet {
     }
     /// Whether the pen is doing something right now (drawing, erasing, lasso).
     pub fn busy(&self) -> bool {
-        self.drawing.is_some() || self.erasing.is_some() || self.lassoing.is_some() || self.moving.is_some()
+        self.drawing.is_some() || self.erasing.is_some() || self.lassoing.is_some() || self.moving.is_some() || self.space.is_some() || self.handle.is_some()
     }
 }
 
@@ -368,12 +416,19 @@ impl App {
         if self.palette.is_some() || self.show_settings || self.show_help || self.history.is_some() || self.share.is_some() || self.page_panel || self.show_pdf_import || self.plot_edit.is_some() || self.tablet.pen_menu {
             return Vec::new();
         }
-        s.panes.iter().filter(|o| o.text_page.as_ref().is_none_or(|t| t.docked)).map(|o| Rectangle::new(o.camera.origin, o.camera.viewport)).collect()
+        let areas = s.panes.iter().filter(|o| o.text_page.as_ref().is_none_or(|t| t.docked)).map(|o| Rectangle::new(o.camera.origin, o.camera.viewport)).collect();
+        self.without_loupe_controls(areas)
     }
 
     /// Toolbar actions.
     pub(crate) fn on_tablet(&mut self, m: Msg) -> Task<Message> {
         let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_));
+        if let Msg::Tool(t) = m
+            && t != Tool::Space
+            && let Some(sp) = self.tablet.space.take()
+        {
+            self.end_space(sp, false);
+        }
         let task = self.tablet_action(m);
         if remember && self.persist_settings {
             self.tablet.save();
@@ -445,6 +500,17 @@ impl App {
             }
             Msg::Paste => self.paste_strokes(),
             Msg::Frame => self.tablet_frame(),
+            Msg::Ruler(on) => self.set_ruler(on),
+            Msg::RulerMoved(key, r) => {
+                if self.tablet.ruler.is_some_and(|(k, _)| k == key) {
+                    self.tablet.ruler = Some((key, r));
+                }
+            }
+            Msg::Loupe(on) => self.set_loupe(on),
+            Msg::LoupeStep(forward) => self.loupe_step(forward),
+            Msg::LoupeNewLine => self.loupe_new_line(),
+            Msg::LoupeCamera(c) => self.loupe_camera(c),
+            Msg::Board(on) => self.set_board(on),
             Msg::Indexed(nb, sheet, put, drop) => {
                 self.tablet.indexing = false;
                 if (!put.is_empty() || !drop.is_empty())
@@ -489,11 +555,32 @@ impl App {
     fn pen_down(&mut self, e: &PenEvent, s: pen::Sample) -> Task<Message> {
         self.pen_cancel();
         let Some((key, cam, at)) = locate(self, s.x, s.y) else { return Task::none() };
+        let p = Point::new(s.x, s.y);
+        // The magnifier's strip: the pen writes into its frame; on the frame's corner it resizes it.
+        if let Some((lcam, lat)) = self.loupe_map(key, p) {
+            return self.pen_down_at(e, s, key, lcam, lat, Some(lcam));
+        }
+        if self.loupe_corner_down(key, p) {
+            return Task::none();
+        }
+        // A "+" beside the current row: a page there (tap, or drag outwards).
+        if self.handle_down(key, &cam, p) {
+            return Task::none();
+        }
+        self.pen_down_at(e, s, key, cam, at, None)
+    }
+
+    /// The pen down at page point `at` of pane `key` (`map`: through the magnifier's camera).
+    fn pen_down_at(&mut self, e: &PenEvent, s: pen::Sample, key: PaneKey, cam: Camera, at: Point, map: Option<Camera>) -> Task<Message> {
         let Screen::Notebook(split) = &mut self.screen else { return Task::none() };
         split.active = key;
         let Some(o) = split.pane(key) else { return Task::none() };
         let notebook = o.id.clone();
         let tool = if e.eraser || e.barrel { Tool::Eraser } else { self.tablet.tool };
+        // Through the magnifier only ink and the eraser, on its page.
+        if map.is_some() && !matches!(tool, Tool::Pen | Tool::Marker | Tool::Eraser) {
+            return Task::none();
+        }
         // A tap on a group title folds or unfolds the group.
         if let Some(node) = o.pages.header_node_at(at) {
             self.fold_group(key, node);
@@ -511,8 +598,12 @@ impl App {
             self.say(crate::i18n::tr("Nur lesen: ändern kann, wer dich eingeladen hat"));
             return Task::none();
         }
+        if tool == Tool::Space {
+            self.space_down(key, &placed, at);
+            return Task::none();
+        }
         let origin = (placed.rect.x0, placed.rect.y0);
-        let local = (at.x - origin.0, at.y - origin.1);
+        let mut local = (at.x - origin.0, at.y - origin.1);
         // On the selection: move it (from its bottom-right corner: scale it).
         if let Some(sel) = self.tablet.selection.clone()
             && sel.notebook == notebook
@@ -546,6 +637,17 @@ impl App {
                 let t = &mut self.tablet;
                 t.selection = None;
                 let brush = t.brush();
+                // At the ruler's edge: the stroke follows it.
+                let edge = match t.ruler {
+                    Some((k, r)) if k == key && map.is_none() => r.edge_at(at.x, at.y, tools::RULER_EDGE_PX / cam.zoom),
+                    _ => 0,
+                };
+                if edge != 0
+                    && let Some((_, r)) = t.ruler
+                {
+                    let (x, y) = r.snap(at.x, at.y, edge, brush.width);
+                    local = (x - origin.0, y - origin.1);
+                }
                 let fountain = (tool == Tool::Pen && t.pen == PenType::Fountain).then(|| Fountain::new(t.fountain));
                 t.next_live += 1;
                 t.drawing = Some(Drawing {
@@ -567,13 +669,15 @@ impl App {
                     started: std::time::Instant::now(),
                     lines: None,
                     replaces: Vec::new(),
+                    map,
+                    edge,
                 });
                 self.pen_move(s);
             }
             Tool::Eraser => {
                 let radius = self.tablet.eraser_size / cam.zoom;
                 let mode = if e.eraser || e.barrel { EraserMode::Stroke } else { self.tablet.eraser_mode };
-                self.tablet.erasing = Some(Erasing { pane: key, notebook, sheet: placed.sheet_id.clone(), origin, mode, path: vec![(local.0, local.1, radius)], hit: Vec::new() });
+                self.tablet.erasing = Some(Erasing { pane: key, notebook, sheet: placed.sheet_id.clone(), origin, mode, path: vec![(local.0, local.1, radius)], hit: Vec::new(), map });
                 self.erase_step();
             }
             Tool::Lasso => {
@@ -581,7 +685,7 @@ impl App {
                 self.tablet.lassoing = Some(Lassoing { pane: key, notebook, sheet: placed.sheet_id.clone(), origin, polygon: vec![local.0, local.1] });
                 self.tablet.lasso_outline = Some((key, vec![at]));
             }
-            Tool::Text | Tool::Laser => {}
+            Tool::Text | Tool::Laser | Tool::Space => {}
         }
         Task::none()
     }
@@ -605,6 +709,9 @@ impl App {
             if let Some((sheet, x0, y0)) = hit {
                 self.send_laser(key, &sheet, Some((at.x - x0, at.y - y0)));
             }
+            return;
+        }
+        if self.extras_move(Point::new(s.x, s.y)) {
             return;
         }
         if let Some(m) = &mut self.tablet.moving {
@@ -640,8 +747,15 @@ impl App {
             return;
         }
         if let Some(d) = &mut self.tablet.drawing {
-            let Some(cam) = pane_camera(&self.screen, d.pane) else { return };
-            let at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
+            let Some(cam) = d.map.or_else(|| pane_camera(&self.screen, d.pane)) else { return };
+            let mut at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
+            // Along the ruler: on its edge.
+            if d.edge != 0
+                && let Some((_, r)) = self.tablet.ruler
+            {
+                let (x, y) = r.snap(at.x, at.y, d.edge, d.brush.width);
+                at = Point::new(x, y);
+            }
             let (x, y) = (at.x - d.origin.0, at.y - d.origin.1);
             let t = s.t_ms.wrapping_sub(d.t0);
             // Snapped: the shape follows the pen (a line's end, a box's corner).
@@ -673,7 +787,7 @@ impl App {
             return;
         }
         if let Some(er) = &mut self.tablet.erasing {
-            let Some(cam) = pane_camera(&self.screen, er.pane) else { return };
+            let Some(cam) = er.map.or_else(|| pane_camera(&self.screen, er.pane)) else { return };
             let at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
             let r = self.tablet.eraser_size / cam.zoom;
             er.path.push((at.x - er.origin.0, at.y - er.origin.1, r));
@@ -691,6 +805,15 @@ impl App {
     }
 
     fn pen_up(&mut self, tap: bool) -> Task<Message> {
+        if self.extras_up() {
+            return Task::none();
+        }
+        // The magnifier: a tap in its strip's right part moves its frame on, a tap on a page
+        // puts the frame there (no dot either way).
+        if tap && self.loupe_tap() {
+            self.pen_cancel();
+            return Task::none();
+        }
         if let Some((key, _)) = self.tablet.laser.take() {
             self.send_laser(key, "", None);
             return Task::none();
@@ -735,11 +858,16 @@ impl App {
             }
         }
         if let Some(mut d) = self.tablet.drawing.take() {
+            // A quick zigzag over ink deletes what it crosses (and isn't kept itself).
+            if d.brush.kind != n0te_core::ink::KIND_MARKER && !d.snapped && d.edge == 0 && tools::is_scribble(&d.points) && self.scribble_away(&d) {
+                return Task::none();
+            }
             // Rested long enough before lifting: a shape or an arrowhead after all.
             let mut changed = d.snapped;
             let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
-            // Only a pen resting before it lifts makes a shape or a head (else nothing to read).
-            if !d.snapped && d.points.len() > 4 && held > snap::LIFT_HOLD_MS {
+            // Only a pen resting before it lifts makes a shape or a head (else nothing to read);
+            // never along the ruler.
+            if !d.snapped && d.edge == 0 && d.points.len() > 4 && held > snap::LIFT_HOLD_MS {
                 let zoom = pane_camera(&self.screen, d.pane).map(|c| c.zoom).unwrap_or(1.0);
                 let lines = self.drawing_lines(&mut d);
                 if let Some(sn) = snap::on_lift(&d.points, zoom, held, &lines.1, self.tablet.snap_options()) {
@@ -773,6 +901,7 @@ impl App {
                 l.done = Some(std::time::Instant::now());
             }
             let replaces = d.replaces.clone();
+            let through_loupe = d.map.is_some();
             self.tablet.drawing = Some(d);
             self.send_live(true);
             self.tablet.drawing = None;
@@ -782,6 +911,9 @@ impl App {
                 }
                 s.add_stroke(brush, &points).map(|_| ())
             });
+            if through_loupe {
+                self.loupe_after_stroke(&sheet, &points);
+            }
             return Task::none();
         }
         if let Some(er) = self.tablet.erasing.take() {
@@ -831,6 +963,7 @@ impl App {
         }
         self.tablet.lassoing = None;
         self.tablet.lasso_outline = None;
+        self.extras_cancel();
     }
 
     /// Shows what the eraser takes so far (hidden strokes / cut area) before it is stored.
@@ -909,22 +1042,35 @@ impl App {
 
     /// Changes a sheet through its kept-open copy, stores it and remembers the edit for undo.
     pub(crate) fn edit_tracked(&mut self, nb: &str, sheet: &str, f: impl FnOnce(&Sheet) -> n0te_core::Result<()>) {
+        if self.edit_kept(nb, sheet, f) {
+            self.remember(Edit::Sheet(nb.to_string(), sheet.to_string()));
+        }
+    }
+
+    /// Changes a sheet through its kept-open copy and stores it (undo is the caller's): whether
+    /// it changed.
+    pub(crate) fn edit_kept(&mut self, nb: &str, sheet: &str, f: impl FnOnce(&Sheet) -> n0te_core::Result<()>) -> bool {
         if self.read_only_nb(nb) {
             self.say(crate::i18n::tr("Nur lesen: ändern kann, wer dich eingeladen hat"));
-            return;
+            return false;
         }
         let Some(s) = self.tablet_sheet(nb, sheet) else {
             self.say(crate::i18n::tr("Seite nicht lesbar"));
-            return;
+            return false;
         };
         if let Err(e) = f(s) {
             self.say(crate::i18n::trf("Nicht geändert: {}", &[&e]));
-            return;
+            return false;
         }
         self.store_kept(nb, sheet);
-        self.tablet.undo.push((nb.to_string(), sheet.to_string()));
-        self.tablet.redo.clear();
         self.tablet.index_due.insert((nb.to_string(), sheet.to_string()), std::time::Instant::now());
+        true
+    }
+
+    /// An edit to undo later (what was undone can't be redone any more).
+    pub(crate) fn remember(&mut self, e: Edit) {
+        self.tablet.undo.push(e);
+        self.tablet.redo.clear();
     }
 
     /// Every second: reads the handwriting of a sheet left alone for a moment (one at a time,
@@ -999,18 +1145,28 @@ impl App {
     /// Undo (or redo) this app's last edit, on whatever page it was.
     pub(crate) fn tablet_undo(&mut self, undo: bool) {
         let entry = if undo { self.tablet.undo.pop() } else { self.tablet.redo.pop() };
-        let Some((nb, sheet)) = entry else { return };
-        let Some(s) = self.tablet_sheet(&nb, &sheet) else { return };
-        let done = if undo { s.undo() } else { s.redo() };
-        match done {
-            Ok(true) => {
-                self.store_kept(&nb, &sheet);
-                if undo { self.tablet.redo.push((nb, sheet)) } else { self.tablet.undo.push((nb, sheet)) }
-            }
-            Ok(false) => {}
-            Err(e) => self.say(crate::i18n::trf("Rückgängig ging nicht: {}", &[&e])),
-        }
+        let Some(entry) = entry else { return };
         self.tablet.selection = None;
+        let (nb, sheet, moved) = match &entry {
+            Edit::Sheet(nb, sheet) => (nb.clone(), sheet.clone(), true),
+            Edit::Space(nb, sheet, moved, ..) => (nb.clone(), sheet.clone(), *moved),
+        };
+        if moved {
+            let Some(s) = self.tablet_sheet(&nb, &sheet) else { return };
+            match if undo { s.undo() } else { s.redo() } {
+                Ok(true) => self.store_kept(&nb, &sheet),
+                Ok(false) => return,
+                Err(e) => {
+                    self.say(crate::i18n::trf("Rückgängig ging nicht: {}", &[&e]));
+                    return;
+                }
+            }
+        }
+        // Space: the page takes its shape back (or again).
+        if let Edit::Space(_, _, _, node, before, after) = &entry {
+            if undo { self.shape_page(&nb, node, after, before) } else { self.shape_page(&nb, node, before, after) }
+        }
+        if undo { self.tablet.redo.push(entry) } else { self.tablet.undo.push(entry) }
     }
 }
 
@@ -1058,8 +1214,9 @@ impl App {
     /// Every frame while the pen draws: the hold timers (a shape after 0.5 s at rest, an arrow
     /// after 0.9 s), as on the tablet.
     pub(crate) fn tablet_frame(&mut self) {
+        self.loupe_timer();
         let Some(mut d) = self.tablet.drawing.take() else { return };
-        if !d.snapped && d.points.len() >= 5 {
+        if !d.snapped && d.edge == 0 && d.points.len() >= 5 {
             let held = (d.started.elapsed().as_millis() as u32).saturating_sub(d.rest.since());
             let o = self.tablet.snap_options();
             let due = if !d.fired.0 && held >= snap::SHAPE_HOLD_MS {
@@ -1098,7 +1255,7 @@ impl App {
 
     /// Whether the hold timers need frames now.
     pub fn tablet_wants_frames(&self) -> bool {
-        self.tablet.drawing.as_ref().is_some_and(|d| !d.snapped)
+        self.tablet.drawing.as_ref().is_some_and(|d| !d.snapped) || self.tablet.loupe.as_ref().is_some_and(|l| l.advance_at.is_some())
     }
 }
 
