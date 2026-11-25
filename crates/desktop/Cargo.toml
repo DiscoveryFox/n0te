@@ -29,8 +29,9 @@ rqrr = { version = "0.11", default-features = false }
 # n0te Tablet's pen on Windows: WM_POINTER through a window subclass (tablet/pen.rs).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Globalization", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Registry", "Win32_UI_Controls", "Win32_UI_HiDpi", "Win32_UI_Input_Pointer", "Win32_UI_Shell", "Win32_UI_TabletPC", "Win32_UI_WindowsAndMessaging"] }
-# Handwriting search: the system's ink recognizer (tablet/recognize.rs).
-windows = { version = "0.62", features = ["Foundation", "Foundation_Collections", "Foundation_Numerics", "UI_Input_Inking"] }
+# Handwriting search: the system's ink recognizer (tablet/recognize.rs). Camera pictures for
+# QR scanning: WinRT MediaCapture + MediaFrameReader (webcam/win.rs).
+windows = { version = "0.62", features = ["Devices_Enumeration", "Foundation", "Foundation_Collections", "Foundation_Numerics", "Graphics_Imaging", "Media_Capture", "Media_Capture_Frames", "Media_MediaProperties", "UI_Input_Inking", "Win32_System_WinRT"] }
 windows-collections = "0.3"
 windows-numerics = "0.3"
 # Updates from GitHub releases (updater.rs): the reqwest/rustls iroh already uses, ring as crypto.
@@ -42,6 +43,11 @@ sha2 = "0.10"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+# Camera pictures for QR scanning (webcam/linux.rs): V4L2 without a C library or bindgen;
+# MJPEG through the JPEG decoder iced's images already bring.
+linuxvideo = "0.3.5"
+libc = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [build-dependencies]
 # Windows resources of the exes (icon, version info, manifest): packaging/windows/resources.rs.
