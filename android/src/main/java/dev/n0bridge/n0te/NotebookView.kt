@@ -1994,17 +1994,50 @@ class NotebookView(context: Context) : View(context) {
         if (Settings.minimap && SystemClock.uptimeMillis() < miniUntil) m.sheets[b.sheetId]?.let { drawMinimap(c, it, vis) }
     }
 
+    /** The board's ink as the minimap shows it (recorded once while the minimap stays the same), its bounds. */
+    private val miniNode = RenderNode("minimap").apply { setClipToBounds(false) }
+    /** The minimap's scale when its rectangles were recorded (0: not yet). */
+    private var miniK = 0f
+    private val miniContent = RectF()
+    private var miniOf: SheetState? = null
+    private var miniVersion = -1
+
     private fun drawMinimap(c: Canvas, st: SheetState, vis: RectF) {
-        val content = RectF()
-        for (s in st.strokes) if (content.isEmpty) content.set(s.bounds) else content.union(s.bounds)
+        if (miniOf !== st || miniVersion != st.version) {
+            miniContent.setEmpty()
+            for (s in st.strokes) if (miniContent.isEmpty) miniContent.set(s.bounds) else miniContent.union(s.bounds)
+            miniOf = st; miniVersion = st.version; miniK = 0f
+        }
+        val content = miniContent
         val all = RectF(vis).apply { if (!content.isEmpty) union(content) }
         val mw = 200f * density; val mh = 140f * density
         val k = min(mw / all.width(), mh / all.height())
         val ox = width - mw - 16f * density; val oy = 16f * density + 64f * density
         c.drawRoundRect(ox - 8f, oy - 8f, ox + mw + 8f, oy + mh + 8f, 14f, 14f, miniBg)
-        fun mx(x: Float) = ox + (x - all.left) * k + (mw - all.width() * k) / 2
-        fun my(y: Float) = oy + (y - all.top) * k + (mh - all.height() * k) / 2
-        for (s in st.strokes) c.drawRect(mx(s.bounds.left), my(s.bounds.top), max(mx(s.bounds.right), mx(s.bounds.left) + 1.5f), max(my(s.bounds.bottom), my(s.bounds.top) + 1.5f), miniInk)
+        // Page points to minimap pixels: mx(x) = x · k + dx.
+        val dx = ox + (mw - all.width() * k) / 2 - all.left * k
+        val dy = oy + (mh - all.height() * k) / 2 - all.top * k
+        fun mx(x: Float) = x * k + dx
+        fun my(y: Float) = y * k + dy
+        // A rectangle per stroke, at least 1.5 px a side; recorded in page points once and then
+        // only moved and scaled (again when the scale changed by a tenth or the ink changed), not
+        // drawn stroke by stroke on every frame of a pan or zoom.
+        if (c.isHardwareAccelerated) {
+            if (!miniNode.hasDisplayList() || miniK == 0f || abs(k / miniK - 1f) > 0.1f) {
+                val rc = miniNode.beginRecording()
+                val m = 1.5f / k
+                for (s in st.strokes) rc.drawRect(s.bounds.left, s.bounds.top, max(s.bounds.right, s.bounds.left + m), max(s.bounds.bottom, s.bounds.top + m), miniInk)
+                miniNode.endRecording()
+                miniK = k
+            }
+            c.save()
+            c.translate(dx, dy)
+            c.scale(k, k)
+            c.drawRenderNode(miniNode)
+            c.restore()
+        } else {
+            for (s in st.strokes) c.drawRect(mx(s.bounds.left), my(s.bounds.top), max(mx(s.bounds.right), mx(s.bounds.left) + 1.5f), max(my(s.bounds.bottom), my(s.bounds.top) + 1.5f), miniInk)
+        }
         c.drawRect(mx(vis.left), my(vis.top), mx(vis.right), my(vis.bottom), miniView)
     }
 
