@@ -5,7 +5,7 @@
 
 use std::sync::Mutex;
 
-use loro::{Container, ExportMode, LoroDoc, LoroMap, LoroText, LoroValue, UndoManager, UpdateOptions, ValueOrContainer, VersionVector};
+use loro::{Container, ContainerTrait, ExportMode, LoroDoc, LoroMap, LoroText, LoroValue, UndoManager, UpdateOptions, ValueOrContainer, VersionVector};
 
 use crate::error::{Error, Result};
 use crate::ids;
@@ -82,6 +82,21 @@ impl Outside {
 
 /// Id of the text page body when it is handed out as a [`TextBox`].
 pub const BODY_ID: &str = "__body";
+
+/// A point in a sheet's history ([`Sheet::version_mark`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionMark(loro::Frontiers);
+
+/// What changed on a sheet since a [`VersionMark`] ([`Sheet::changes_since`]).
+#[derive(Debug, Default)]
+pub struct Changes {
+    /// Strokes added or changed, as they are now.
+    pub strokes: Vec<Stroke>,
+    /// Ids of objects removed (or no stroke any more).
+    pub gone: Vec<String>,
+    /// Something besides strokes changed.
+    pub other: bool,
+}
 
 pub struct Sheet {
     doc: LoroDoc,
@@ -552,6 +567,48 @@ impl Sheet {
     /// All strokes (undecodable entries from a newer app version are skipped).
     pub fn strokes(&self) -> Vec<Stroke> {
         self.strokes_in(None)
+    }
+
+    /// Where the sheet's history stands now: ask [`Sheet::changes_since`] later what changed.
+    pub fn version_mark(&self) -> VersionMark {
+        VersionMark(self.doc.state_frontiers())
+    }
+
+    /// What changed since `mark` (taken from this sheet or another copy of it): the strokes
+    /// added or changed (decoded), the objects gone, and whether anything else changed (text
+    /// boxes, pictures, coordinate systems, the page's text, what the handwriting says). None
+    /// when that can't be told (`mark` is from a history this copy doesn't have): read it all.
+    /// Costs what changed, not what the sheet holds: a view that keeps the strokes it read
+    /// follows an edit on a page with a million samples at once.
+    pub fn changes_since(&self, mark: &VersionMark) -> Option<Changes> {
+        let now = self.doc.state_frontiers();
+        let mut c = Changes::default();
+        if now == mark.0 {
+            return Some(c);
+        }
+        let diff = self.doc.diff(&mark.0, &now).ok()?;
+        let objects = self.objects.id();
+        for (cid, d) in diff.iter() {
+            if *cid != objects {
+                c.other = true;
+                continue;
+            }
+            let loro::event::Diff::Map(m) = d else { return None };
+            for (k, v) in &m.updated {
+                match v {
+                    Some(ValueOrContainer::Value(LoroValue::Binary(b))) if known(b) => match decode_stroke(k, b) {
+                        Ok(s) => c.strokes.push(s),
+                        Err(_) => c.gone.push(k.to_string()),
+                    },
+                    Some(ValueOrContainer::Container(_)) => {
+                        c.other = true;
+                        c.gone.push(k.to_string());
+                    }
+                    _ => c.gone.push(k.to_string()),
+                }
+            }
+        }
+        Some(c)
     }
 
     /// Strokes whose bounds intersect `area` (None = all). Only the header is read for the
@@ -1403,6 +1460,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn changes_since_a_mark_name_just_what_changed() {
+        let s = Sheet::create(1).unwrap();
+        let p = |x: f32, y: f32| InkPoint { x, y, pressure: 0.5, t_ms: 0 };
+        let brush = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: 0 };
+        let a = s.add_stroke(brush, &[p(100.0, 100.0), p(140.0, 110.0)]).unwrap();
+        let b = s.add_stroke(brush, &[p(150.0, 100.0), p(190.0, 110.0)]).unwrap();
+        let m0 = s.version_mark();
+        let none = s.changes_since(&m0).unwrap();
+        assert!(none.strokes.is_empty() && none.gone.is_empty() && !none.other);
+        s.transform(std::slice::from_ref(&a), 5.0, 0.0, 1.0, 0.0, 0.0).unwrap();
+        let c = s.add_stroke(brush, &[p(10.0, 10.0), p(20.0, 20.0)]).unwrap();
+        s.remove(std::slice::from_ref(&b)).unwrap();
+        let ch = s.changes_since(&m0).unwrap();
+        let mut ids: Vec<&str> = ch.strokes.iter().map(|s| s.id.as_str()).collect();
+        ids.sort();
+        let mut want = vec![a.as_str(), c.as_str()];
+        want.sort();
+        assert_eq!(ids, want, "moved and added");
+        assert!((ch.strokes.iter().find(|s| s.id == a).unwrap().points[0].x - 105.0).abs() < 0.01, "as it is now");
+        assert_eq!(ch.gone, vec![b.clone()]);
+        assert!(!ch.other);
+        // A text box is something else; a copy of the sheet tells the same.
+        let m1 = s.version_mark();
+        s.add_text_box(10.0, 10.0, 100.0, 12.0, "Hallo").unwrap();
+        let copy = Sheet::load(2, &s.snapshot().unwrap()).unwrap();
+        let ch = copy.changes_since(&m1).unwrap();
+        assert!(ch.other && ch.strokes.is_empty());
+        // A history the copy doesn't have: can't tell.
+        let other = Sheet::create(3).unwrap();
+        other.add_stroke(brush, &[p(1.0, 1.0), p(2.0, 2.0)]).unwrap();
+        assert!(Sheet::create(4).unwrap().changes_since(&other.version_mark()).is_none());
+    }
 
     #[test]
     fn what_the_handwriting_says_is_searchable_and_not_undone() {
