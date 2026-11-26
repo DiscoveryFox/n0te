@@ -41,4 +41,26 @@ class OutlineDropTest {
         assertEquals(null, t.parent)
         assertNull(OutlineDrop.subtree(rows, "G").firstOrNull { it == "S1" || it == "S2" })
     }
+
+    @Test fun aSearchHitInAFoldedGroupKnowsWhatToUnfold() {
+        // Tapping such a hit did nothing: the page isn't laid out while its groups are folded.
+        val side = uniffi.n0te_ffi.FfiSideSheet("R", "s-R", spec)
+        val all = listOf(group("U", 0), group("G", 1), sheet("P", 2).copy(right = listOf(side)), sheet("Q", 1), sheet("Z", 0))
+        assertEquals(listOf("U", "G"), OutlineDrop.groupsAround(all, "P"))
+        assertEquals("a side page: its page's groups", listOf("U", "G"), OutlineDrop.groupsAround(all, "R"))
+        assertEquals(listOf("U"), OutlineDrop.groupsAround(all, "Q"))
+        assertEquals(emptyList<String>(), OutlineDrop.groupsAround(all, "Z"))
+        assertEquals(emptyList<String>(), OutlineDrop.groupsAround(all, "gone"))
+    }
+
+    @Test fun thePicturesViewScrollsToThePageNotAboveIt() {
+        // The closing line after a group is an item too: scrolling by row index landed too early.
+        val all = listOf(group("G", 0), sheet("A", 1), sheet("B", 1), sheet("S", 0), group("H", 0), group("K", 0), sheet("C", 1))
+        assertEquals(0, OutlineDrop.gridIndex(all, 0))
+        assertEquals(2, OutlineDrop.gridIndex(all, 2))
+        assertEquals("a line before S", 4, OutlineDrop.gridIndex(all, 3))
+        assertEquals("H right after the group: no line of its own", 5, OutlineDrop.gridIndex(all, 4))
+        assertEquals(6, OutlineDrop.gridIndex(all, 5))
+        assertEquals(7, OutlineDrop.gridIndex(all, 6))
+    }
 }

@@ -95,12 +95,13 @@ private val SELECT_MODES = listOf("free", "rect", "snip", "space")
 /** A text box (or a text page's body) being edited. */
 internal class TextEdit(val sheetId: String, val boxId: String, val body: Boolean)
 
-/** Where a dragged outline row would land. */
+/** Where a dragged outline row would land (data classes: the same place is no new state, so a move
+ * by a pixel doesn't recompose every row of the outline). */
 internal sealed class Drop {
     /** Between rows: into [parent] (null = main column) at [index], indicator at [lineY]/[depth]. */
-    class Gap(val parent: String?, val index: Int, val depth: Int, val lineY: Float) : Drop()
+    data class Gap(val parent: String?, val index: Int, val depth: Int, val lineY: Float) : Drop()
     /** Onto a group: at its end. */
-    class Into(val group: String) : Drop()
+    data class Into(val group: String) : Drop()
 }
 
 /** Sends the lasso selection as an image to the laptop clipboard (through n0bridge). */
@@ -171,6 +172,8 @@ class NotebookActivity : ComponentActivity() {
     private var tick by mutableIntStateOf(0) // bumps when presets change, so swatches redraw
 
     private var settingsOpen = false
+    /** The default paper when the settings were opened (new pages follow it only when it changed). */
+    private var paperBeforeSettings = Settings.defaultPaper
 
     /** Following the laptop's view (its device id). */
     private var following by mutableStateOf<String?>(null)
@@ -210,7 +213,7 @@ class NotebookActivity : ComponentActivity() {
         pickFor = null
         if (uri == null) return@registerForActivityResult
         val m = p.model ?: return@registerForActivityResult
-        p.status = "Importiere PDF…"
+        p.status = "Importiere PDF …"
         N0te.background({ contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("nicht lesbar") }) { r ->
             r.onSuccess { bytes ->
                 m.importPdfAfter(bytes, p.view.currentSheet()?.node) { res ->
@@ -231,6 +234,9 @@ class NotebookActivity : ComponentActivity() {
 
     /** The selection tool's mode (Settings.selectMode), as state: the button follows the menu. */
     private var selectMode by mutableStateOf(Settings.selectMode)
+
+    /** The eraser's mode (Settings.eraserArea), as state: the button follows the menu. */
+    private var eraserArea by mutableStateOf(Settings.eraserArea)
 
 
     // --- the panes: one notebook, or two side by side ------------------------------------------
@@ -259,6 +265,8 @@ class NotebookActivity : ComponentActivity() {
     private val isSplit get() = panes.size > 1 && maxed == null
 
     private val syncListener: (uniffi.n0te_ffi.FfiSyncEvent) -> Unit = { e -> onSync(e) }
+    /** Remote changes per notebook when paused (see [SyncHub.remoteChangeCount]). */
+    private val remoteSeen = HashMap<String, Int>()
     private val handwritingListener: () -> Unit = {
         tick++
         if (Handwriting.ready) panes.mapNotNull { it.model }.distinct().forEach { it.indexAll() }
@@ -284,7 +292,8 @@ class NotebookActivity : ComponentActivity() {
             setBackgroundColor(android.graphics.Color.BLACK)
             onLaidOut = { r -> if (r != paneRects) paneRects = r }
         }
-        val chrome = ComposeView(this).apply { setContent { Chrome() } }
+        // The design's type for all of it (the sidebar, dialogs and the status line had the system font).
+        val chrome = ComposeView(this).apply { setContent { N0teType { Chrome() } } }
         setContentView(FrameLayout(this).apply {
             addView(splitLayout, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             // The keyboard: keep the cursor above it.
@@ -337,6 +346,8 @@ class NotebookActivity : ComponentActivity() {
         if (panes.isEmpty()) return super.onBackPressed()
         val a = act
         a.graph?.let { g -> if (g.keys.active != null) { g.keys.active = null; return } }
+        // A graph being edited: back finishes it (kept). It used to close the notebook and the edits were gone.
+        if (a.graph != null) { a.finishGraph(true); return }
         if (a.view.board != null) { a.view.exitBoard(); return }
         // Two notebooks: back first shows one alone again, then closes the second.
         if (maxed != null) { showAlone(null); return }
@@ -348,6 +359,11 @@ class NotebookActivity : ComponentActivity() {
         super.onResume()
         SyncHub.listen(syncListener)
         SyncHub.refreshGuests()
+        // Changed elsewhere while paused (nobody listened): read it now, not only at the next change.
+        for (m in panes.mapNotNull { it.model }.distinct()) {
+            val id = panes.first { it.model === m }.nbId
+            if (remoteSeen[id]?.let { it != SyncHub.remoteChangeCount(id) } == true) m.refreshFromDisk(true, emptyList()) { ids -> panes.filter { it.model === m }.forEach { it.reloaded(ids) } }
+        }
         publishOpen()
         SyncHub.openHere = { nb, device -> openFromOutside(nb, device) }
         if (Ui.theme.id != themeId) { recreate(); return }
@@ -360,7 +376,8 @@ class NotebookActivity : ComponentActivity() {
             if (!Settings.toolRuler) rulerOn = false
             if (!Settings.toolLaser && tool == NotebookView.Tool.LASER) tool = NotebookView.Tool.PEN
             Pencil.refresh()
-            panes.forEach { it.newPaper = Settings.defaultPaper }
+            // Only when the default changed there: else every visit reset a grid notebook's new pages to lines.
+            if (Settings.defaultPaper != paperBeforeSettings) panes.forEach { it.newPaper = Settings.defaultPaper }
             panes.mapNotNull { it.model }.distinct().forEach { it.relayout() }
             applyTools()
             tick++
@@ -374,11 +391,15 @@ class NotebookActivity : ComponentActivity() {
             laptopFollows = false
         }
         SyncHub.unlisten(syncListener)
+        remoteSeen.clear()
+        for (p in panes) remoteSeen[p.nbId] = SyncHub.remoteChangeCount(p.nbId)
         if (SyncHub.openNotebook == mainPane?.nbId) SyncHub.openNotebook = null
         if (SyncHub.openNotebooks == panes.map { it.nbId }.toSet()) SyncHub.openNotebooks = emptySet()
         SyncHub.openHere = null
         // The main pane last: when one notebook is open twice, its view is where it opens next time.
         panes.sortedBy { it === mainPane }.forEach { it.pause() }
+        // Closed: the laptop and guests no longer see a frame of where this tablet looked.
+        if (isFinishing) for (nb in panes.map { it.nbId }.distinct()) if (SyncHub.sharing(nb)) SyncHub.presence(nb, null, FloatArray(4), 0f, null)
         super.onPause()
     }
 
@@ -446,14 +467,16 @@ class NotebookActivity : ComponentActivity() {
         if (i < 0) return
         val wasMain = mainPane === old
         val wasActive = active === old
+        val wasMaxed = maxed === old
         old.close()
         panes.removeAt(i)
         splitLayout.removeView(old.container)
         val p = Pane(nb, sheet, null, live, null)
-        if (maxed === old) maxed = null
         addPane(p, i)
         if (wasActive) active = p
         if (wasMain) { mainPane = null; setMain(p) }
+        // Shown alone: the new one is (the layout and the other pane's visibility follow too).
+        if (wasMaxed) showAlone(p) else if (maxed != null) showAlone(maxed)
     }
 
     /** Opens [nb] (at [sheet]) beside [from]: in the other pane when there are two. */
@@ -483,6 +506,8 @@ class NotebookActivity : ComponentActivity() {
         splitLayout.addView(a.container)
         split = 1f - split
         splitLayout.fraction = split
+        // The one shown alone moved: the layout's index follows (else the hidden one got the room).
+        splitLayout.maxed = maxed?.let { panes.indexOf(it) } ?: -1
     }
 
     /** [p] alone on screen for a while (null: both again). */
@@ -535,6 +560,8 @@ class NotebookActivity : ComponentActivity() {
         if (panes.size < 2) return false
         val m = mainPane ?: return false
         replacePane(m, nb, live = device)
+        // It must be seen: not loaded into a pane hidden behind the other.
+        showAlone(null)
         return true
     }
 
@@ -606,6 +633,8 @@ class NotebookActivity : ComponentActivity() {
         val density = androidx.compose.ui.platform.LocalDensity.current
         val across = r0.top == r1.top // side by side
         val total = if (across) r1.right.toFloat() else r1.bottom.toFloat()
+        // The drag below keeps running across resizes of the window: it reads the size now.
+        val totalNow by androidx.compose.runtime.rememberUpdatedState(total)
         val mid = if (across) (r0.right + r1.left) / 2f else (r0.bottom + r1.top) / 2f
         val touch = with(density) { 32.dp.toPx() }
         val closing = closingPane
@@ -633,7 +662,7 @@ class NotebookActivity : ComponentActivity() {
             ) { change, d ->
                 change.consume()
                 at += if (across) d.x else d.y
-                split = (at / total).coerceIn(0.05f, 0.95f)
+                split = (at / totalNow).coerceIn(0.05f, 0.95f)
                 closingPane = SplitGeometry.closing(split)
                 splitLayout.fraction = split.coerceIn(0.1f, 0.9f)
             }
@@ -658,7 +687,7 @@ class NotebookActivity : ComponentActivity() {
         N0te.background({
             val opened = LibraryOrg.opened(Settings.str("lib_opened", ""))
             N0te.library.notebookIds().mapNotNull { id ->
-                runCatching { N0te.library.loadNotebook(id).let { nb -> Book(id, nb.title(), nb.cover(), nb.folder(), nb.sheetCount().toInt(), opened[id] ?: 0L) } }.getOrNull()
+                runCatching { N0te.library.loadNotebook(id).use { nb -> Book(id, nb.title(), nb.cover(), nb.folder(), nb.sheetCount().toInt(), opened[id] ?: 0L) } }.getOrNull()
             }.sortedByDescending { it.opened }
         }) { r -> then(r.getOrDefault(emptyList())) }
     }
@@ -738,6 +767,8 @@ class NotebookActivity : ComponentActivity() {
 
         /** Leaving (the app, or this pane): text done, picture and position kept, saved. */
         fun pause() {
+            // Leaving for good or rebuilt: a graph being edited is stored (its edits live only here).
+            if (graph != null && (isFinishing || isChangingConfigurations)) finishGraph(true)
             finishText()
             saveThumbnail()
             // Next time the notebook opens where it was left.
@@ -951,11 +982,14 @@ class NotebookActivity : ComponentActivity() {
         var status by mutableStateOf<String?>(null)
 
         var inBoard by mutableStateOf(false)
+        /** Counts the model's changes (the outline's page pictures follow it). */
+        var modelTick by mutableIntStateOf(0)
         var currentIsBoard by mutableStateOf(false)
 
         fun openSettings() {
             menu = null
             settingsOpen = true
+            paperBeforeSettings = Settings.defaultPaper
             startActivity(Intent(this@NotebookActivity, SettingsActivity::class.java))
         }
 
@@ -985,6 +1019,7 @@ class NotebookActivity : ComponentActivity() {
 
         fun onModelChanged() {
             val m = model ?: return
+            modelTick++
             // Opening: the page at the default size (page width is what fitWidth already did).
             if (!defaultSizeApplied && m.placed.isNotEmpty()) {
                 defaultSizeApplied = true
@@ -1128,7 +1163,7 @@ class NotebookActivity : ComponentActivity() {
         fun deleteText() {
             val on = inlineOn ?: return
             if (on.second == BODY_ID) { inline.setText(""); return }
-            model?.deleteTextBox(on.first, on.second)
+            // Emptied, detaching deletes it (deleting it here as well made two undo steps for one).
             inline.setText("")
             detachInline()
         }
@@ -1277,6 +1312,8 @@ class NotebookActivity : ComponentActivity() {
 
         @Composable
         fun LiveMenu() {
+            // Its switches are settings (not state): read the counter they bump, so a tap redraws.
+            @Suppress("UNUSED_VARIABLE") val ticked = tick
             val laptop = SyncHub.laptop
             val id = nbId
             if (laptop == null || !laptop.online) {
@@ -1326,6 +1363,15 @@ class NotebookActivity : ComponentActivity() {
         }
 
         override fun onMessage(text: String) = flash(text)
+
+        /**
+         * Whether the system clipboard holds a picture, from its description only: reading the clip
+         * itself (on every menu shown) made Android tell "n0te hat aus der Zwischenablage eingefügt".
+         */
+        fun clipHasImage(): Boolean = runCatching {
+            val desc = (getSystemService(CLIPBOARD_SERVICE) as android.content.ClipboardManager).primaryClipDescription ?: return false
+            (0 until desc.mimeTypeCount).any { desc.getMimeType(it).startsWith("image/") }
+        }.getOrDefault(false)
 
         /** A picture on the system clipboard (copied in Samsung Gallery, Smart Select, a browser …). */
         fun systemClipImage(): android.net.Uri? = runCatching {
@@ -1384,6 +1430,7 @@ class NotebookActivity : ComponentActivity() {
                     "img" -> if (f.size >= 4) view.insertImage(f[1], f[2].toIntOrNull() ?: 800, f[3].toIntOrNull() ?: 600)
                     "pdf" -> N0te.background({ java.io.File(f[1]).let { file -> file.readBytes().also { file.delete() } } }) { r ->
                         r.onSuccess { bytes -> m.importPdfAfter(bytes, view.currentSheet()?.node) { res -> flash(res.fold({ n -> "$n PDF-Seiten eingefügt" }, { e -> "PDF-Import fehlgeschlagen: ${e.message}" })) } }
+                            .onFailure { flash("Die geteilte PDF ist nicht lesbar") }
                     }
                 }
             }
@@ -1560,12 +1607,12 @@ class NotebookActivity : ComponentActivity() {
         @Composable
         fun HoldMenu() {
             val clip = N0te.clip
-            val sys = remember { systemClipImage() }
+            val sys = remember { clipHasImage() }
             val at = holdAt
             Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 when {
                     clip != null -> LabeledBtn(Glyph.PASTE, "Einfügen") { menu = null; view.pasteAt(at.x, at.y) }
-                    sys != null -> LabeledBtn(Glyph.PASTE, "Einfügen") { menu = null; insertPictures(listOf(sys), at) }
+                    sys -> LabeledBtn(Glyph.PASTE, "Einfügen") { menu = null; systemClipImage()?.let { insertPictures(listOf(it), at) } ?: flash("Kein Bild in der Zwischenablage") }
                 }
                 LabeledBtn(Glyph.PAGE, "Bild") { menu = null; pickAt = at; pickFor = this@Pane; pickImage.launch("image/*") }
                 view.pageAt(at.x, at.y)?.let { (p, pt) ->
@@ -1622,8 +1669,8 @@ class NotebookActivity : ComponentActivity() {
         fun exportPicked(rows: List<FfiOutlineRow.Sheet>, picked: Set<String>, toLaptop: Boolean) {
             pagePicker = null
             val ids = rows.flatMap { r -> r.left.reversed().map { it.sheetId } + r.sheetId + r.right.map { it.sheetId } }.filter { it in picked }
-            if (ids.isEmpty()) return
-            exportIds(ids, "-${ids.size}-Seiten", toLaptop)
+            if (ids.isEmpty()) return flash("Keine Seite ausgewählt")
+            exportIds(ids, if (ids.size == 1) "-1-Seite" else "-${ids.size}-Seiten", toLaptop)
         }
 
         fun exportIds(ids: List<String>?, suffix: String, toLaptop: Boolean) {
@@ -1632,7 +1679,7 @@ class NotebookActivity : ComponentActivity() {
             val dir = File(cacheDir, "share").apply { mkdirs() }
             val safe = title.ifBlank { "n0te" }.replace(Regex("[^\\p{L}\\p{N} _-]"), "_")
             val f = File(dir, "$safe$suffix.pdf")
-            status = "Exportiere…"
+            status = "Exportiere …"
             m.exportPdf(ids, f, Settings.exportSidesAtEnd) { r ->
                 r.onSuccess { pages ->
                     status = null
@@ -1650,13 +1697,14 @@ class NotebookActivity : ComponentActivity() {
         }
 
         /** An invite link to this notebook (guests connect straight to this tablet / the laptop). */
-        fun invite(rw: Boolean) {
+        fun invite(rw: Boolean, done: () -> Unit = {}) {
             menu = null
             val engine = SyncHub.engine ?: return flash("Sync startet noch …")
             val id = nbId
             val expires = (System.currentTimeMillis() / 1000 + 7 * 86_400).toULong()
             N0te.background({ engine.createInvite(id, if (rw) uniffi.n0te_ffi.FfiRole.READ_WRITE else uniffi.n0te_ffi.FfiRole.READ, expires) }) { r ->
                 r.onSuccess { link ->
+                    done()
                     (getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager).setPrimaryClip(android.content.ClipData.newPlainText("n0te", link))
                     startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, link), "Einladung teilen"))
                 }.onFailure { flash("Einladen fehlgeschlagen: ${it.message}") }
@@ -1669,7 +1717,7 @@ class NotebookActivity : ComponentActivity() {
             val id = nbId
             menu = null
             m.flush()
-            status = "Packe Notizbuch…"
+            status = "Packe Notizbuch …"
             N0te.background({
                 val dir = File(cacheDir, "share").apply { mkdirs() }
                 val safe = title.ifBlank { "Notizbuch" }.replace(Regex("[^\\p{L}\\p{N} _-]"), "_").trim().replace(' ', '_')
@@ -1688,7 +1736,10 @@ class NotebookActivity : ComponentActivity() {
             val sel = selection ?: return
             // The formula lands as a text box on one page: the lasso has to stay on it.
             if (sel.multi) { flash("LaTeX: bitte nur auf einer Seite auswählen"); return }
-            val png = view.selectionPng() ?: return
+            view.selectionPng { png -> if (png != null) askLatex(sel, png) }
+        }
+
+        private fun askLatex(sel: NotebookView.Selection, png: ByteArray) {
             val asked = SyncHub.requestLatex(png) { latex, engine, error ->
                 if (error != null) { flash("LaTeX: $error"); return@requestLatex }
                 latexText = latex
@@ -1722,6 +1773,8 @@ class NotebookActivity : ComponentActivity() {
                 Column(Modifier.width(600.dp).panel().padding(22.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Caption("Handschrift → LaTeX")
+                    // A tall formula or a long text scrolls; the buttons stay on screen.
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(androidx.compose.foundation.rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     // The formula as it will look (edits below update it).
                     androidx.compose.ui.viewinterop.AndroidView(
                         factory = { ctx -> android.widget.TextView(ctx).apply { setTextColor(android.graphics.Color.BLACK); textSize = 24f; gravity = android.view.Gravity.CENTER; setPadding(24, 28, 24, 28) } },
@@ -1733,6 +1786,7 @@ class NotebookActivity : ComponentActivity() {
                     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Ui.Black).border(1.dp, Ui.Border, RoundedCornerShape(12.dp)).padding(12.dp)) {
                         BasicTextField(latexText, { latexText = it }, textStyle = TextStyle(color = Ui.Chalk, fontSize = 15.sp, fontFamily = FontFamily.Monospace),
                             cursorBrush = SolidColor(Ui.Red), modifier = Modifier.fillMaxWidth())
+                    }
                     }
                     Text("Gelesen von: ${f.engine}", color = Ui.Muted, fontSize = 11.sp)
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), verticalAlignment = Alignment.CenterVertically) {
@@ -1752,10 +1806,16 @@ class NotebookActivity : ComponentActivity() {
         fun DialogPill(label: String, primary: Boolean = false, onClick: () -> Unit) = Btn(label, if (primary) BtnKind.PRIMARY else BtnKind.SECONDARY, onClick = onClick)
 
         fun sendSelectionToLaptop() {
-            val png = view.selectionPng() ?: return
             val dir = File(cacheDir, "share").apply { mkdirs() }
             val f = File(dir, "n0te-auswahl.png")
-            f.writeBytes(png)
+            view.selectionPng { png ->
+                png ?: return@selectionPng
+                // Written on the I/O thread too.
+                N0te.background({ f.writeBytes(png) }) { r -> if (r.isSuccess) offerToLaptop(f) else flash("Konnte das Bild nicht ablegen") }
+            }
+        }
+
+        private fun offerToLaptop(f: File) {
             val uri = FileProvider.getUriForFile(this@NotebookActivity, "$packageName.files", f)
             val i = Intent("dev.n0bridge.action.N0TE_CLIP")
                 .setPackage("dev.n0bridge.app")
@@ -1834,18 +1894,20 @@ class NotebookActivity : ComponentActivity() {
                 androidx.compose.runtime.LaunchedEffect(Unit) {
                     while (true) {
                         kotlinx.coroutines.delay(2000)
-                        if (SyncHub.sharing(nbId)) view.pushPresence()
+                        // Only while in front: stopped (Home, screen off) the laptop and guests kept seeing a frame.
+                        if (SyncHub.sharing(nbId) && lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) view.pushPresence()
                     }
                 }
                 // The writing magnifier's strip is drawn by the page view; its buttons sit on its top edge.
                 @Suppress("UNUSED_VARIABLE") val padMoved = padTick
                 val strip = if (loupe) view.loupeStrip() else null
                 val loupeTop = strip?.let { with(dens) { (view.height - it.top).toDp() } } ?: 0.dp
-                if (strip != null) LoupeControls(Modifier.align(Alignment.BottomStart).padding(start = 30.dp, bottom = loupeTop - 21.dp))
+                // Never below 0 (a pane dragged very short: Compose throws on negative padding).
+                if (strip != null) LoupeControls(Modifier.align(Alignment.BottomStart).padding(start = 30.dp, bottom = (loupeTop - 21.dp).coerceAtLeast(0.dp)))
                 // The chips step above the strip while it lies at the bottom.
                 val chipsLift = strip != null && strip.bottom > view.height - with(dens) { 90.dp.toPx() }
                 // While a graph is edited only its own controls show.
-                if (graph == null) Row(Modifier.align(Alignment.BottomEnd).padding(start = 18.dp, top = 18.dp, end = 18.dp, bottom = if (chipsLift) loupeTop + 14.dp else 18.dp),
+                if (graph == null) Row(Modifier.align(Alignment.BottomEnd).padding(start = 18.dp, top = 18.dp, end = 18.dp, bottom = if (chipsLift) (loupeTop + 14.dp).coerceAtLeast(0.dp) else 18.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     GuestChip()
                     LiveChip()
@@ -2011,7 +2073,7 @@ class NotebookActivity : ComponentActivity() {
                 TileRows(kinds)
                 Section("Einfügen")
                 val clipImage = N0te.clip?.image != null
-                val sysImage = systemClipImage() != null
+                val sysImage = remember { clipHasImage() }
                 TileRows(buildList {
                     add(Triple(Glyph.PAGE, "Bild") { menu = null; pickFor = this@Pane; pickImage.launch("image/*") })
                     add(Triple(Glyph.PDF, "PDF") { addPage("pdf") })
@@ -2318,7 +2380,8 @@ class NotebookActivity : ComponentActivity() {
         @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
         @Composable
         fun EraserBtn() {
-            var area by remember { mutableStateOf(Settings.eraserArea) }
+            // One state for the button and the eraser menu (each had its own: the icon kept the old mode).
+            var area by this@NotebookActivity::eraserArea
             val selected = tool == NotebookView.Tool.ERASER
             Box(
                 Modifier.anchor("eraser").size(width = 44.dp, height = 38.dp).clip(CircleShape).background(if (selected) Ui.Chalk else Color.Transparent)
@@ -2484,6 +2547,8 @@ class NotebookActivity : ComponentActivity() {
 
         @Composable
         fun ZoomMenu() {
+            // Its switches are settings (not state): read the counter they bump, so a tap redraws.
+            @Suppress("UNUSED_VARIABLE") val ticked = tick
             Section("Zoom")
             if (!inBoard) {
                 LockItem(NotebookView.Lock.ZOOM, "Zoom sperren", "Zoom bleibt; nur hoch/runter; seitlich ziehen wechselt das Blatt")
@@ -2890,6 +2955,8 @@ class NotebookActivity : ComponentActivity() {
         fun PageThumb(r: FfiOutlineRow.Sheet, w: androidx.compose.ui.unit.Dp, current: Boolean = false, box: Boolean = false, boxRatio: Float = 1.3f,
                       boxAlign: Alignment = Alignment.Center, overlay: @Composable androidx.compose.foundation.layout.BoxScope.() -> Unit = {}) {
             @Suppress("UNUSED_VARIABLE") val t = tick
+            // Read so a page that loaded (or changed) since gets its picture: its version is no state.
+            @Suppress("UNUSED_VARIABLE") val changes = modelTick
             val density = androidx.compose.ui.platform.LocalDensity.current
             val px = with(density) { w.roundToPx() }.coerceAtLeast(8)
             val board = r.spec.width <= 0f
@@ -2927,16 +2994,13 @@ class NotebookActivity : ComponentActivity() {
                 // Groups open as a heading and close with a line (pages after a group are not in it).
                 val open = ArrayList<Int>()
                 rows.forEachIndexed { i, r ->
-                    val d = depthOf(r)
-                    var closed = -1
-                    while (open.isNotEmpty() && d <= open.last()) closed = open.removeAt(open.size - 1)
                     // (A group right after one at its level: its heading is line enough.)
-                    if (closed >= 0 && !(r is FfiOutlineRow.Group && d == closed)) {
+                    val closed = OutlineDrop.closesBefore(rows, i, open)
+                    if (closed >= 0) {
                         item(key = "end-$i", span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
                             Box(Modifier.fillMaxWidth().padding(start = (closed * 12).dp, top = 2.dp, bottom = 2.dp).height(1.dp).background(Ui.Border))
                         }
                     }
-                    if (r is FfiOutlineRow.Group && !r.collapsed) open.add(d)
                     when (r) {
                         is FfiOutlineRow.Group -> item(key = r.node, span = { androidx.compose.foundation.lazy.grid.GridItemSpan(maxLineSpan) }) {
                             // A group: a heading across both columns that folds, a line under it.
@@ -3006,7 +3070,8 @@ class NotebookActivity : ComponentActivity() {
             }
             androidx.compose.runtime.LaunchedEffect(Unit) {
                 val i = rows.indexOfFirst { it is FfiOutlineRow.Sheet && model?.numberOf(it.node) == currentPage }
-                if (i > 0) grid.scrollToItem(i)
+                // The closing lines are items too: by row index alone it landed too early.
+                if (i > 0) grid.scrollToItem(OutlineDrop.gridIndex(rows, i))
             }
         }
 
@@ -3095,12 +3160,13 @@ class NotebookActivity : ComponentActivity() {
                             if (h.node != lastNode) {
                                 lastNode = h.node
                                 val main = rows.filterIsInstance<FfiOutlineRow.Sheet>().firstOrNull { r -> r.node == h.node || r.left.any { it.node == h.node } || r.right.any { it.node == h.node } }
-                                val n = main?.let { model?.numberOf(it.node) } ?: 0
+                                // In a folded group the row isn't among the visible ones: numbered from the whole outline.
+                                val n = main?.let { model?.numberOf(it.node) } ?: model?.numberOf(h.node) ?: 0
                                 val name = main?.title?.ifBlank { null } ?: heads.firstOrNull { it.node == main?.node }?.text ?: "Seite"
                                 Text("%02d  %s".format(n, name), color = Ui.Chalk, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 10.dp, bottom = 2.dp))
                             }
-                            Row(Modifier.fillMaxWidth().clickable { view.showSpot(h.sheetId, android.graphics.RectF(h.x0, h.y0, h.x1, h.y1)) }.padding(start = 26.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
+                            Row(Modifier.fillMaxWidth().clickable { showHit(h) }.padding(start = 26.dp, end = 14.dp, top = 6.dp, bottom = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically) {
                                 val g = when (h.kind) { uniffi.n0te_ffi.FfiHitKind.HEADING -> Glyph.HEADING; uniffi.n0te_ffi.FfiHitKind.PDF -> Glyph.PDF; uniffi.n0te_ffi.FfiHitKind.TEXT -> Glyph.TEXT; uniffi.n0te_ffi.FfiHitKind.PLOT -> Glyph.PLOT; else -> Glyph.PEN }
                                 GlyphIcon(g, Ui.Muted, 15.dp)
@@ -3111,6 +3177,18 @@ class NotebookActivity : ComponentActivity() {
                     }
                 }
                 Spacer(Modifier.height(48.dp))
+            }
+        }
+
+        /** Goes to a search hit; one in a folded group unfolds it first (it did nothing). */
+        fun showHit(h: uniffi.n0te_ffi.FfiSearchHit) {
+            val spot = android.graphics.RectF(h.x0, h.y0, h.x1, h.y1)
+            val m = model ?: return
+            if (m.placed.any { it.sheetId == h.sheetId }) return view.showSpot(h.sheetId, spot)
+            m.allRows { all ->
+                val groups = OutlineDrop.groupsAround(all, h.node)
+                if (groups.isEmpty()) view.showSpot(h.sheetId, spot)
+                else m.setCollapsedAll(groups, false) { view.post { view.showSpot(h.sheetId, spot) } }
             }
         }
 
@@ -3203,6 +3281,9 @@ class NotebookActivity : ComponentActivity() {
 
         /** Starts editing a coordinate system: its tools in the graph, the panel beside it. */
         fun startGraph(sheetId: String, plot: uniffi.n0te_ffi.FfiPlot, fresh: Boolean) {
+            if (closed) return
+            // Another graph open (a late reading from the laptop, the hold menu): it is kept first, not dropped.
+            if (graph != null) finishGraph(true)
             view.clearSelection()
             val s = GraphSession(sheetId, plot, fresh) { graphTick++; graph?.let { view.plotDraft = it.shown() } }
             s.big = graphBig
@@ -3287,12 +3368,15 @@ class NotebookActivity : ComponentActivity() {
                 }
             }
             // The laptop reads formulas best (LaTeX); without it, or when its reading doesn't fit, the tablet's.
-            val png = view.selectionPng()
-            val asked = png != null && SyncHub.requestLatex(png) { latex, _, error ->
-                val expr = if (error == null) runCatching { uniffi.n0te_ffi.plotFromLatex(latex) }.getOrNull() else null
-                if (expr == null || !place(expr)) readHere(error?.let { "Graph: $it" })
+            view.selectionPng { png ->
+                if (closed) return@selectionPng
+                val asked = png != null && SyncHub.requestLatex(png) { latex, _, error ->
+                    if (closed) return@requestLatex
+                    val expr = if (error == null) runCatching { uniffi.n0te_ffi.plotFromLatex(latex) }.getOrNull() else null
+                    if (expr == null || !place(expr)) readHere(error?.let { "Graph: $it" })
+                }
+                if (asked) flash("Lese die Funktion … (auf dem Laptop)") else readHere(null)
             }
-            if (asked) flash("Lese die Funktion … (auf dem Laptop)") else readHere(null)
         }
 
         /** The coordinate system on [sheetId] nearest to [r] (page points), if one is close (beside it or around it). */
@@ -3497,7 +3581,7 @@ class NotebookActivity : ComponentActivity() {
                     QuickBtn(Glyph.SPLIT, "Daneben") { held = null; openBeside(this@Pane, nbId, r.sheetId) }
                 }
                 val sure = confirmDelete == node
-                QuickBtn(Glyph.TRASH, if (sure) (if (group != null) "${group.count} S. löschen?" else "Sicher?") else "Löschen", danger = sure) {
+                QuickBtn(Glyph.TRASH, if (sure) (if (group != null) (if (group.count.toInt() == 1) "1 Seite löschen?" else "${group.count} Seiten löschen?") else "Sicher?") else "Löschen", danger = sure) {
                     if (sure) { confirmDelete = null; held = null; deleteWithUndo(node, "Seite") } else confirmDelete = node
                 }
                 QuickBtn(Glyph.MENU, "Mehr") { held = null; renaming = node to title }
@@ -3618,7 +3702,7 @@ class NotebookActivity : ComponentActivity() {
         /** Eraser: whole strokes or only what it touches; its own size, or automatic. */
         @Composable
         fun EraserMenu() {
-            var area by remember { mutableStateOf(Settings.eraserArea) }
+            var area by this@NotebookActivity::eraserArea
             var auto by remember { mutableStateOf(Settings.eraserAuto) }
             var size by remember { mutableStateOf(Settings.eraserSize) }
             Section("Radierer")
@@ -3876,6 +3960,8 @@ class NotebookActivity : ComponentActivity() {
          */
         @Composable
         fun GuestsMenu() {
+            // Its switches are settings (not state): read the counter they bump, so a tap redraws.
+            @Suppress("UNUSED_VARIABLE") val ticked = tick
             val id = nbId
             val host = SyncHub.joinedRole(id)
             if (host != null) {
@@ -3931,6 +4017,8 @@ class NotebookActivity : ComponentActivity() {
          */
         @Composable
         fun GuestsDialog() {
+            // Its switches are settings (not state): read the counter they bump, so a tap redraws.
+            @Suppress("UNUSED_VARIABLE") val ticked = tick
             val id = nbId
             val engine = SyncHub.engine
             var invites by remember { mutableStateOf<List<uniffi.n0te_ffi.FfiInvite>>(emptyList()) }
@@ -4041,8 +4129,8 @@ class NotebookActivity : ComponentActivity() {
                         if (!inviting) Btn("+ Einladen") { inviting = true }
                         else Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             Text("Gäste dürfen", color = Ui.Muted, fontSize = 13.sp)
-                            Btn("Nur lesen") { inviting = false; invite(rw = false) }
-                            Btn("Lesen & schreiben") { inviting = false; invite(rw = true) }
+                            Btn("Nur lesen") { inviting = false; invite(rw = false) { tickLocal++ } }
+                            Btn("Lesen & schreiben") { inviting = false; invite(rw = true) { tickLocal++ } }
                         }
                         Box(Modifier.fillMaxWidth().height(1.dp).background(Ui.Border))
                         @Composable fun ViewSwitch(title: String, on: Boolean, flip: () -> Unit) {
@@ -4076,6 +4164,15 @@ class NotebookActivity : ComponentActivity() {
 
         fun deleteWithUndo(node: String, what: String) {
             val m = model ?: return
+            // The whole outline first (folded groups too): the last page stays, from every menu
+            // (only the page menu checked it), and a group says "Gruppe gelöscht".
+            m.allRows { rows ->
+                if (!canDelete(rows, node)) return@allRows flash("Die letzte Seite eines Notizbuchs bleibt.")
+                deleteNow(m, node, if (rows.any { it is FfiOutlineRow.Group && it.node == node }) "Gruppe" else what)
+            }
+        }
+
+        private fun deleteNow(m: NotebookModel, node: String, what: String) {
             // Afterwards: a side page's main page, else the page before (or after) — not the empty spot.
             val gone = m.placed.firstOrNull { it.node == node }
             val mains = m.placed.filter { it.side == 0 }
@@ -4094,7 +4191,7 @@ class NotebookActivity : ComponentActivity() {
         fun flash(text: String) {
             status = text
             N0te.main.removeCallbacks(clearStatus)
-            N0te.main.postDelayed(clearStatus, 2000)
+            N0te.main.postDelayed(clearStatus, flashMs(text))
         }
 
         @Composable
@@ -4113,16 +4210,20 @@ class NotebookActivity : ComponentActivity() {
                             keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = { if (text.text.trim() != old) model?.rename(node, text.text.trim()); renaming = null }),
                             modifier = Modifier.fillMaxWidth().focusRequester(focus))
                     }
-                    rows.filterIsInstance<FfiOutlineRow.Sheet>().firstOrNull { it.node == node }?.let { sheet ->
+                    // The middle scrolls: with the keyboard up (it opens for the title) OK and Löschen
+                    // were below the screen's edge on a tablet held sideways.
+                    Column(Modifier.weight(1f, fill = false).verticalScroll(androidx.compose.foundation.rememberScrollState())) {
+                        rows.filterIsInstance<FfiOutlineRow.Sheet>().firstOrNull { it.node == node }?.let { sheet ->
+                            MenuDivider()
+                            PaperEditor(node, sheet.spec)
+                        }
                         MenuDivider()
-                        PaperEditor(node, sheet.spec)
+                        Section("Verschieben")
+                        Item(Glyph.UP_ARROW, "Nach oben") { model?.move(node, "up"); renaming = null }
+                        Item(Glyph.DOWN_ARROW, "Nach unten") { model?.move(node, "down"); renaming = null }
+                        Item(Glyph.GROUP, "In die Gruppe darüber", "Ans Ende der Gruppe direkt über diesem Eintrag") { model?.move(node, "into"); renaming = null }
+                        Item(Glyph.LEFT, "Aus der Gruppe heraus", "Hinter die Gruppe") { model?.move(node, "out"); renaming = null }
                     }
-                    MenuDivider()
-                    Section("Verschieben")
-                    Item(Glyph.UP_ARROW, "Nach oben") { model?.move(node, "up"); renaming = null }
-                    Item(Glyph.DOWN_ARROW, "Nach unten") { model?.move(node, "down"); renaming = null }
-                    Item(Glyph.GROUP, "In die Gruppe darüber", "Ans Ende der Gruppe direkt über diesem Eintrag") { model?.move(node, "into"); renaming = null }
-                    Item(Glyph.LEFT, "Aus der Gruppe heraus", "Hinter die Gruppe") { model?.move(node, "out"); renaming = null }
                     MenuDivider()
                     Row(Modifier.padding(horizontal = 16.dp).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Pill(if (sure) "Wirklich löschen" else "Löschen", primary = sure) { if (sure) { deleteWithUndo(node, "Seite"); renaming = null } else sure = true }

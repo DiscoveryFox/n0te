@@ -137,12 +137,20 @@ object SyncHub : SyncListener {
         }
     }
 
+    /**
+     * Changes from elsewhere per notebook, counted also while no screen listens (main thread):
+     * a notebook screen that was paused (the settings, a picker, the screen off) sees it missed some.
+     */
+    private val remoteChanges = HashMap<String, Int>()
+    fun remoteChangeCount(notebook: String) = remoteChanges[notebook] ?: 0
+
     fun listen(l: (FfiSyncEvent) -> Unit) = listeners.add(l)
     fun unlisten(l: (FfiSyncEvent) -> Unit) = listeners.remove(l)
 
     override fun onEvent(event: FfiSyncEvent) {
         N0te.main.post {
             when (event) {
+                is FfiSyncEvent.RemoteChanged -> remoteChanges[event.notebook] = remoteChangeCount(event.notebook) + 1
                 is FfiSyncEvent.DeviceOnline -> {
                     // Shown at once; the refresh below fills in the rest.
                     devices = devices.filter { it.id != event.device.id } + event.device
@@ -165,8 +173,11 @@ object SyncHub : SyncListener {
                     // Someone at the door of a notebook that isn't open: say so (letting in
                     // happens in that notebook's guests overview).
                     if (event.on && openNotebook != event.notebook && event.notebook !in openNotebooks) {
-                        val title = runCatching { N0te.library.loadNotebook(event.notebook).title() }.getOrNull() ?: "ein Notizbuch"
-                        android.widget.Toast.makeText(app, "${event.name} möchte in „$title“ — öffne es, um hereinzulassen", android.widget.Toast.LENGTH_LONG).show()
+                        // Its title from disk: on the I/O thread (a big notebook takes a moment to load).
+                        N0te.background({ N0te.library.loadNotebook(event.notebook).use { it.title() } }) { r ->
+                            val title = r.getOrNull() ?: "ein Notizbuch"
+                            android.widget.Toast.makeText(app, "${event.name} möchte in „$title“ — öffne es, um hereinzulassen", android.widget.Toast.LENGTH_LONG).show()
+                        }
                     }
                 }
                 // The laptop asks for a picture of n0te's screen (own devices only; testing).
