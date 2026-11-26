@@ -105,6 +105,9 @@ pub struct Sheet {
     undo: Mutex<UndoManager>,
     /// Opened from a library with its own peer id: held until dropped (see `store::PeerLease`).
     pub(crate) lease: Option<crate::store::PeerLease>,
+    /// The hash of the file contents this copy last read or wrote: a file still holding exactly
+    /// that has nothing new to merge (see `Library::save_sheet`).
+    seen: Mutex<Option<blake3::Hash>>,
 }
 
 const STROKE_V1: u8 = 1;
@@ -128,7 +131,7 @@ impl Sheet {
         undo.set_max_undo_steps(500);
         // What the handwriting recogniser writes is no edit of the user's: undo skips it.
         undo.add_exclude_origin_prefix(INDEX_ORIGIN);
-        Ok(Sheet { doc, objects, undo: Mutex::new(undo), lease: None })
+        Ok(Sheet { doc, objects, undo: Mutex::new(undo), lease: None, seen: Mutex::new(None) })
     }
 
     fn um(&self) -> std::sync::MutexGuard<'_, UndoManager> {
@@ -970,6 +973,18 @@ impl Sheet {
     pub fn import(&self, bytes: &[u8]) -> Result<()> {
         self.doc.import(bytes)?;
         Ok(())
+    }
+
+    /// Remembers that this copy holds everything in the file contents `bytes` (it read or wrote
+    /// them).
+    pub(crate) fn mark_seen(&self, bytes: &[u8]) {
+        *self.seen.lock().unwrap_or_else(|p| p.into_inner()) = Some(blake3::hash(bytes));
+    }
+
+    /// Whether `bytes` are the file contents this copy last read or wrote (then they hold
+    /// nothing it doesn't have).
+    pub(crate) fn has_seen(&self, bytes: &[u8]) -> bool {
+        *self.seen.lock().unwrap_or_else(|p| p.into_inner()) == Some(blake3::hash(bytes))
     }
 }
 

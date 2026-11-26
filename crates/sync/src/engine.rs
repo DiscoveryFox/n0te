@@ -1552,7 +1552,9 @@ impl Inner {
         if self.lib.is_trashed(nb) || !index_path.is_file() {
             return NbState { id: nb.to_string(), index: Vec::new(), sheets: Vec::new() };
         }
-        let index = self.cached_vv(&index_path, || self.lib.load_notebook(nb).ok().map(|n| n.version()));
+        // Versions from the files' metadata: a whole library's worth of documents is announced
+        // when a device connects, and loading each one only for its version cost seconds.
+        let index = self.cached_vv(&index_path, || self.lib.notebook_version(nb).or_else(|| self.lib.load_notebook(nb).ok().map(|n| n.version())));
         let sheets = self
             .lib
             .sheet_ids_on_disk(nb)
@@ -1560,7 +1562,7 @@ impl Inner {
             .into_iter()
             .map(|sid| {
                 let p = dir.join("sheets").join(format!("{sid}.loro"));
-                let vv = self.cached_vv(&p, || self.lib.load_sheet(nb, &sid).ok().map(|s| s.version()));
+                let vv = self.cached_vv(&p, || self.lib.sheet_version(nb, &sid).or_else(|| self.lib.load_sheet(nb, &sid).ok().map(|s| s.version())));
                 (sid, vv)
             })
             .collect();

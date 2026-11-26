@@ -141,7 +141,11 @@ impl Library {
         };
         let (peer, lease) = self.peer_for(&path);
         let mut s = match bytes {
-            Some(b) => Sheet::load(peer, &b)?,
+            Some(b) => {
+                let s = Sheet::load(peer, &b)?;
+                s.mark_seen(&b);
+                s
+            }
             None => Sheet::create(peer)?,
         };
         s.lease = lease;
@@ -153,12 +157,17 @@ impl Library {
         let path = self.sheet_path(notebook, sheet_id)?;
         fs::create_dir_all(path.parent().expect("has parent"))?;
         let _lock = self.lock(notebook)?;
+        // A file that still holds what this copy last read or wrote has nothing new: merging it
+        // (a full decode, a quarter of a save) is skipped.
         if let Ok(disk) = fs::read(&path)
+            && !sheet.has_seen(&disk)
             && sheet.import(&disk).is_err()
         {
             keep_aside(&path);
         }
-        write_atomic(&path, &sheet.snapshot()?)?;
+        let snapshot = sheet.snapshot()?;
+        write_atomic(&path, &snapshot)?;
+        sheet.mark_seen(&snapshot);
         self.touch(notebook);
         Ok(())
     }
@@ -274,9 +283,25 @@ impl Library {
     /// Brings an open sheet up to date with its file. Returns whether anything changed.
     pub fn refresh_sheet(&self, notebook: &str, sheet_id: &str, sheet: &Sheet) -> Result<bool> {
         let Ok(disk) = fs::read(self.sheet_path(notebook, sheet_id)?) else { return Ok(false) };
+        if sheet.has_seen(&disk) {
+            return Ok(false);
+        }
         let before = sheet.version();
         sheet.import(&disk)?;
+        sheet.mark_seen(&disk);
         Ok(sheet.version() != before)
+    }
+
+    /// The version ([`Notebook::version`]) of a stored notebook, read from the file's metadata
+    /// without loading the document; None if it has no file or the file is damaged.
+    pub fn notebook_version(&self, id: &str) -> Option<Vec<u8>> {
+        stored_version(&self.nb_dir(id).ok()?.join("index.loro"))
+    }
+
+    /// The version ([`Sheet::version`]) of a stored sheet (see [`Library::notebook_version`]):
+    /// what the sync engine announces for every page, at a fraction of loading it.
+    pub fn sheet_version(&self, notebook: &str, sheet: &str) -> Option<Vec<u8>> {
+        stored_version(&self.sheet_path(notebook, sheet).ok()?)
     }
 
     /// The sheets of a notebook that have a file (drawn on at least once).
@@ -552,6 +577,15 @@ fn keep_aside(path: &Path) {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let _ = fs::rename(path, path.with_file_name(format!("{name}.damaged-{secs}")));
+}
+
+/// The version of the document stored at `path`: the end of its history, from the snapshot's
+/// metadata (its change store), not its state. Only for a full snapshot, which is all the
+/// library writes; anything else (or a damaged file) reads as None.
+fn stored_version(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    let meta = loro::LoroDoc::decode_import_blob_meta(&bytes, true).ok()?;
+    (meta.mode == loro::EncodedBlobMode::Snapshot && meta.partial_start_vv.values().all(|&c| c == 0)).then(|| meta.partial_end_vv.encode())
 }
 
 /// Whether a stored document is whole (Loro's checksum over it holds), without decoding it.
