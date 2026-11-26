@@ -150,10 +150,44 @@ pub fn attach(w: &dyn iced::window::Window) -> bool {
     }
 }
 
+/// A pen sample's screen position (physical px) from its digitizer position: `h` (HIMETRIC)
+/// mapped from the device's rectangle `d` onto the display's `s` (left, top, right, bottom) —
+/// finer than a pixel. None when that lands more than a couple of pixels away from the whole
+/// pixel the system reports for it (`px`): the mapping is stale (the screen was turned, a
+/// monitor added, the resolution changed) or doesn't fit this pen.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn map_pen(h: (i32, i32), d: [i32; 4], s: [i32; 4], px: (i32, i32)) -> Option<(f32, f32)> {
+    let (dw, dh) = ((d[2] - d[0]) as f32, (d[3] - d[1]) as f32);
+    if dw <= 0.0 || dh <= 0.0 || s[2] <= s[0] || s[3] <= s[1] {
+        return None;
+    }
+    let x = s[0] as f32 + (h.0 - d[0]) as f32 * (s[2] - s[0]) as f32 / dw;
+    let y = s[1] as f32 + (h.1 - d[1]) as f32 * (s[3] - s[1]) as f32 / dh;
+    ((x - px.0 as f32).abs() <= 2.5 && (y - px.1 as f32).abs() <= 2.5).then_some((x, y))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_pen;
+
+    #[test]
+    fn the_digitizer_maps_finer_than_a_pixel_unless_the_mapping_is_stale() {
+        // A 1920 × 1080 screen whose digitizer reports 0..29_000 × 0..16_310 HIMETRIC.
+        let (d, s) = ([0, 0, 29_000, 16_310], [0, 0, 1920, 1080]);
+        let (x, y) = map_pen((14_500, 8_155), d, s, (960, 540)).expect("fits");
+        assert!((x - 960.0).abs() < 0.01 && (y - 540.0).abs() < 0.01);
+        let (x, _) = map_pen((14_510, 8_155), d, s, (960, 540)).expect("fits");
+        assert!(x > 960.0 && x < 961.0, "between pixels: {x}");
+        // The screen turned to portrait: the old mapping puts the pen elsewhere.
+        assert_eq!(map_pen((14_500, 8_155), d, s, (540, 960)), None);
+        assert_eq!(map_pen((1, 1), [0, 0, 0, 10], s, (0, 0)), None, "empty device rect");
+    }
+}
+
 #[cfg(windows)]
 mod win {
     //! The Win32 side: a window subclass that reads pen pointers.
-    use super::{IN_RANGE, Ordering, PenEvent, Phase, Sample, in_areas, send};
+    use super::{IN_RANGE, Ordering, PenEvent, Phase, Sample, in_areas, map_pen, send};
     use std::collections::HashMap;
     use std::sync::{LazyLock, Mutex};
     use windows_sys::Win32::Foundation::{HANDLE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
@@ -170,7 +204,9 @@ mod win {
         TABLET_DISABLE_FLICKFALLBACKKEYS, TABLET_DISABLE_FLICKS, TABLET_DISABLE_PENBARRELFEEDBACK, TABLET_DISABLE_PENTAPFEEDBACK, TABLET_DISABLE_PRESSANDHOLD,
         WM_TABLET_QUERYSYSTEMGESTURESTATUS,
     };
-    use windows_sys::Win32::UI::WindowsAndMessaging::{PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, POINTER_INPUT_TYPE, PT_PEN, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        PEN_FLAG_BARREL, PEN_FLAG_ERASER, PEN_FLAG_INVERTED, POINTER_INPUT_TYPE, PT_PEN, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_POINTERCAPTURECHANGED, WM_POINTERDOWN, WM_POINTERLEAVE, WM_POINTERUP,
+    };
 
     /// WM_POINTERUPDATE (not exported under this name by every windows-sys version).
     const WM_POINTERUPDATE: u32 = 0x0245;
@@ -201,26 +237,37 @@ mod win {
     }
 
     /// Screen pixels (fractional) of a pen sample: HIMETRIC through the device's mapping when
-    /// known, else the integer pixel location.
+    /// it fits the pixel location the system reports, else that integer pixel location. A
+    /// mapping that stopped fitting (the screen turned, monitors changed) is asked for again
+    /// once; one that still doesn't fit isn't used for that pen any more (until the displays
+    /// change: [`proc_`] forgets the mappings then).
     fn screen_xy(info: &POINTER_PEN_INFO, rects: &mut HashMap<usize, Option<(RECT, RECT)>>) -> (f32, f32) {
         let p = &info.pointerInfo;
         let dev = p.sourceDevice as usize;
-        let map = *rects.entry(dev).or_insert_with(|| {
+        let px = (p.ptPixelLocationRaw.x, p.ptPixelLocationRaw.y);
+        let h = (p.ptHimetricLocationRaw.x, p.ptHimetricLocationRaw.y);
+        let query = || {
             let mut d: RECT = unsafe { std::mem::zeroed() };
             let mut s: RECT = unsafe { std::mem::zeroed() };
             // SAFETY: out-pointers to locals.
             let ok = unsafe { GetPointerDeviceRects(p.sourceDevice as HANDLE, &mut d, &mut s) } != 0;
             (ok && d.right > d.left && d.bottom > d.top && s.right > s.left && s.bottom > s.top).then_some((d, s))
-        });
-        match map {
-            Some((d, s)) => {
-                let h = p.ptHimetricLocationRaw;
-                let x = s.left as f32 + (h.x - d.left) as f32 * (s.right - s.left) as f32 / (d.right - d.left) as f32;
-                let y = s.top as f32 + (h.y - d.top) as f32 * (s.bottom - s.top) as f32 / (d.bottom - d.top) as f32;
-                (x, y)
+        };
+        let r = |r: RECT| [r.left, r.top, r.right, r.bottom];
+        let fits = |m: Option<(RECT, RECT)>| m.and_then(|(d, s)| map_pen(h, r(d), r(s), px));
+        let cached = *rects.entry(dev).or_insert_with(query);
+        if cached.is_some() {
+            if let Some(xy) = fits(cached) {
+                return xy;
             }
-            None => (p.ptPixelLocationRaw.x as f32, p.ptPixelLocationRaw.y as f32),
+            let fresh = query();
+            let xy = fits(fresh);
+            rects.insert(dev, if xy.is_some() { fresh } else { None });
+            if let Some(xy) = xy {
+                return xy;
+            }
         }
+        (px.0 as f32, px.1 as f32)
     }
 
     /// A pen sample in window logical px.
@@ -250,6 +297,14 @@ mod win {
         // SAFETY: forwarding to the next window procedure with the same arguments.
         let pass = || unsafe { DefSubclassProc(hwnd, msg, w, l) };
         match msg {
+            // Displays changed (turned, resolution, monitors, scaling): the pens' mappings onto
+            // the screen are asked for again.
+            WM_DISPLAYCHANGE | WM_DPICHANGED => {
+                if let Ok(mut pen) = PEN.try_lock() {
+                    pen.rects.clear();
+                }
+                pass()
+            }
             WM_TABLET_QUERYSYSTEMGESTURESTATUS => {
                 (TABLET_DISABLE_PRESSANDHOLD | TABLET_DISABLE_PENTAPFEEDBACK | TABLET_DISABLE_PENBARRELFEEDBACK | TABLET_DISABLE_FLICKS | TABLET_DISABLE_FLICKFALLBACKKEYS) as LRESULT
             }

@@ -116,6 +116,8 @@ pub enum Message {
     /// The pair code typed or pasted (from another device's "koppeln"), and using it.
     PairEnter(String),
     PairAccept,
+    /// The service's answer to a pair code (it pairs over the network: off the UI thread).
+    PairAccepted(Result<String, String>),
     /// "Mit der Kamera scannen" (pair code or invite): the camera panel.
     Scan(crate::webcam::Msg),
     PairToTablet,
@@ -1438,16 +1440,19 @@ impl App {
                 if code.is_empty() {
                     return Task::none();
                 }
-                match live::request(&["accept", &code]) {
-                    Ok(name) => {
-                        self.pair_enter.clear();
-                        // The service says "Gekoppelt mit <name> (<id>)".
-                        self.say(if name.trim().is_empty() { tr("Gekoppelt").to_string() } else { name.trim().to_string() });
-                        self.devices = live::devices();
-                    }
-                    Err(e) => self.say(trf("Koppeln: {}", &[&e])),
-                }
+                self.say(tr("Kopple …"));
+                // Pairing talks to the other device: the window doesn't wait for it.
+                return Task::perform(async move { live::request(&["accept", &code]) }, Message::PairAccepted);
             }
+            Message::PairAccepted(r) => match r {
+                Ok(name) => {
+                    self.pair_enter.clear();
+                    // The service says "Gekoppelt mit <name> (<id>)".
+                    self.say(if name.trim().is_empty() { tr("Gekoppelt").to_string() } else { name.trim().to_string() });
+                    self.devices = live::devices();
+                }
+                Err(e) => self.say(trf("Koppeln: {}", &[&e])),
+            },
             // A code the camera read closes the panel: a pair code pairs like a pasted one, an
             // invite goes into the join dialog (in the library).
             Message::Scan(m) => match crate::webcam::update(&mut self.scan, m) {
@@ -3173,7 +3178,7 @@ impl App {
     /// A PDF: in the library a new notebook named after the file, in a notebook new pages
     /// right after the current one.
     fn import_pdf(&mut self, path: &Path) {
-        let Some(pdf) = self.pdf.clone() else { return self.say(tr("PDF geht nicht: libpdfium.so fehlt")) };
+        let Some(pdf) = self.pdf.clone() else { return self.say(trf("PDF geht nicht: {} fehlt", &[&pdf::PDFIUM])) };
         let bytes = match std::fs::read(path) {
             Ok(b) => b,
             Err(e) => return self.say(trf("Nicht lesbar: {}", &[&e])),
@@ -3477,7 +3482,7 @@ impl App {
         } else if self.show_settings {
             Some(self.settings_view())
         } else if let (Screen::Notebook(o), Some(picked)) = (&self.screen, &self.export) {
-            Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera), self.settings.export_sides_at_end))
+            Some(library::export_dialog(o, picked, self.export_mode, o.pages.current_number(&o.camera), self.settings.export_sides_at_end, shown_path(&self.export_dir)))
         } else if let (Screen::Notebook(_), Some(e)) = (&self.screen, &self.plot_edit) {
             // Esc in a field cancels too (the field would only let go of the focus). Its
             // messages go to the pane it was opened in.
@@ -3555,7 +3560,7 @@ impl App {
         ]
         .spacing(10);
         if self.sync.is_none() {
-            col = col.push(text(tr("Der Sync-Dienst läuft nicht (systemctl --user enable --now n0te-sync).")).size(13).color(theme::p().accent));
+            col = col.push(text(live::service_hint()).size(13).color(theme::p().accent));
         }
         // At the door, then who is here.
         for g in self.waiting.iter().filter(|g| g.notebook == nb) {
@@ -3904,8 +3909,8 @@ impl App {
         };
         let col = column![
             row![theme::heading(tr("Einstellungen"), 24.0), Space::new().width(Length::Fill), button(theme::btn_small(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowSettings(false)).style(theme::ghost)].align_y(Alignment::Center),
-            iced::widget::scrollable(body).style(theme::scroll_dark).height(Length::Shrink),
-            text(tr("Gespeichert in ~/.config/n0te/laptop.conf")).font(theme::meta_font()).size(11.5).color(theme::p().muted),
+            iced::widget::scrollable(body).spacing(10).style(theme::scroll_dark).height(Length::Shrink),
+            text(format!("{} {} · {}", crate::app_name(), crate::updater::VERSION, trf("Gespeichert in {}", &[&crate::settings::path().display()]))).font(theme::meta_font()).size(11.5).color(theme::p().muted),
         ]
         .spacing(20);
         container(container(col).padding(26).width(Length::Fixed(860.0)).max_height(820.0).style(theme::panel)).padding(Padding { top: 40.0, ..Padding::ZERO }).center_x(Length::Fill).into()
@@ -4327,14 +4332,37 @@ fn default_spacing(b: Background) -> f32 {
     }
 }
 
+/// A folder as people read it: under the home folder with "~" on Linux, else as it is.
+pub fn shown_path(p: &Path) -> String {
+    if !cfg!(windows)
+        && let Some(home) = n0te_platform::paths::home()
+        && let Ok(rest) = p.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    p.display().to_string()
+}
+
 fn downloads() -> PathBuf {
     n0te_platform::paths::downloads().unwrap_or_else(std::env::temp_dir)
 }
 
-/// `dir/title.ext`, or `title (2).ext` … if taken; unsafe characters replaced.
+/// `dir/title.ext`, or `title (2).ext` … if taken; unsafe characters replaced. The name works
+/// on Windows too: no dot or space at its end, no device name (CON, NUL, COM1 …) of its own,
+/// not too long.
 pub fn free_path(dir: &Path, title: &str, ext: &str) -> PathBuf {
-    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || " -_.,()".contains(c) { c } else { '_' }).collect();
-    let base = if safe.trim().is_empty() { "n0te".to_string() } else { safe.trim().to_string() };
+    let safe: String = title.chars().map(|c| if c.is_alphanumeric() || " -_.,()".contains(c) { c } else { '_' }).take(120).collect();
+    let mut base = safe.trim().trim_end_matches(['.', ' ']).to_string();
+    if base.is_empty() {
+        base = "n0te".to_string();
+    }
+    let stem = base.split('.').next().unwrap_or_default().trim().to_uppercase();
+    let device = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL") || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT")) && stem.as_bytes()[3].is_ascii_digit());
+    if device {
+        // Windows goes by the part before the first dot ("CON.txt" is the device too).
+        let at = base.find('.').unwrap_or(base.len());
+        base.insert(at, '_');
+    }
     let _ = std::fs::create_dir_all(dir);
     (1..)
         .map(|i| dir.join(if i == 1 { format!("{base}.{ext}") } else { format!("{base} ({i}).{ext}") }))
@@ -4452,6 +4480,23 @@ async fn send_with_n0bridge(path: PathBuf) -> Result<String, String> {
         .map_err(|e| trf("n0bridge nicht gefunden ({})", &[&e]))?;
     let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
     if out.status.success() { Ok(text.trim().to_string()) } else { Err(text.trim().lines().last().unwrap_or(tr("Fehler")).to_string()) }
+}
+
+#[cfg(test)]
+mod name_tests {
+    #[test]
+    fn export_names_work_on_windows_too() {
+        let dir = std::env::temp_dir().join(format!("n0te-names-{}", std::process::id()));
+        let name = |t: &str| super::free_path(&dir, t, "pdf").file_name().unwrap().to_string_lossy().into_owned();
+        assert_eq!(name("Analysis I"), "Analysis I.pdf");
+        assert_eq!(name("Übung: 3/4"), "Übung_ 3_4.pdf");
+        assert_eq!(name("con"), "con_.pdf");
+        assert_eq!(name("COM3.notes"), "COM3_.notes.pdf");
+        assert_eq!(name("Kapitel 2..."), "Kapitel 2.pdf");
+        assert_eq!(name("   "), "n0te.pdf");
+        assert!(name(&"x".repeat(400)).len() < 130);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]

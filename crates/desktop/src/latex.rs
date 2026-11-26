@@ -154,7 +154,7 @@ fn render(latex: &str, display: bool) -> Formula {
     }
     let result = (|| {
         run(Command::new("latex").args(["-interaction=nonstopmode", "-halt-on-error", "-no-shell-escape", &format!("{name}.tex")]), &dir)
-            .map_err(|e| if e.contains("not found") || e.contains("No such file") { tr("LaTeX ist nicht installiert (texlive)").to_string() } else { first_error(&dir.join(format!("{name}.log"))).unwrap_or(e) })?;
+            .map_err(|e| if e == not_installed() { e } else { first_error(&dir.join(format!("{name}.log"))).unwrap_or(e) })?;
         run(Command::new("dvisvgm").args(["--no-fonts", "--exact-bbox", "-o", &format!("{name}.svg"), &format!("{name}.dvi")]), &dir)?;
         // A hairline outline on every glyph: TeX's thin rules (minus, fraction bars, the bar of
         // ϵ) are ~0.4 pt and would vanish below a pixel on screen.
@@ -180,7 +180,7 @@ fn run(cmd: &mut Command, dir: &Path) -> Result<(), String> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { not_installed() } else { e.to_string() })?;
     let start = Instant::now();
     loop {
         match child.try_wait() {
@@ -195,6 +195,12 @@ fn run(cmd: &mut Command, dir: &Path) -> Result<(), String> {
             Err(e) => return Err(e.to_string()),
         }
     }
+}
+
+/// What to say when there is no TeX to run (the program isn't found, whatever the system's
+/// words for that are).
+fn not_installed() -> String {
+    if cfg!(windows) { tr("LaTeX ist nicht installiert (MiKTeX oder TeX Live)").to_string() } else { tr("LaTeX ist nicht installiert (texlive)").to_string() }
 }
 
 /// The first "! …" error line of a TeX log.

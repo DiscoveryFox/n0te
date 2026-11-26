@@ -2,30 +2,47 @@
 //! it can see through UI Automation, which iced doesn't provide yet; so when typing starts on a
 //! device without a hardware keyboard (text tool, search, invites), n0te Tablet opens it: the
 //! keyboard host's `ITipInvocation::Toggle` (the interface Windows' own shell uses), starting
-//! TabTip.exe first if it isn't running. Elsewhere this does nothing.
+//! TabTip.exe first if it isn't running. That is a call into another process (and a short wait
+//! for TabTip to start): it runs on a thread of its own, in the order asked, so the window never
+//! waits for it. Elsewhere this does nothing.
 
 /// Shows the touch keyboard (Windows; true if it was asked to show).
 pub fn show() -> bool {
-    #[cfg(windows)]
-    {
-        win::toggle_visible(true)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    request(true)
 }
 
 /// Hides it again (when typing ends).
 pub fn hide() -> bool {
-    #[cfg(windows)]
-    {
-        win::toggle_visible(false)
-    }
-    #[cfg(not(windows))]
-    {
-        false
-    }
+    request(false)
+}
+
+#[cfg(windows)]
+fn request(want: bool) -> bool {
+    use std::sync::OnceLock;
+    use std::sync::mpsc::{Sender, channel};
+    static TX: OnceLock<Option<Sender<bool>>> = OnceLock::new();
+    let tx = TX.get_or_init(|| {
+        let (tx, rx) = channel::<bool>();
+        std::thread::Builder::new()
+            .name("n0te-touch-keyboard".into())
+            .spawn(move || {
+                while let Ok(mut want) = rx.recv() {
+                    // Only the last of several quick requests counts.
+                    while let Ok(w) = rx.try_recv() {
+                        want = w;
+                    }
+                    win::toggle_visible(want);
+                }
+            })
+            .ok()
+            .map(|_| tx)
+    });
+    tx.as_ref().is_some_and(|tx| tx.send(want).is_ok())
+}
+
+#[cfg(not(windows))]
+fn request(_want: bool) -> bool {
+    false
 }
 
 #[cfg(windows)]

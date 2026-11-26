@@ -64,7 +64,7 @@ pub struct Pdf {
 static READY: OnceLock<Mutex<Option<mpsc::UnboundedReceiver<()>>>> = OnceLock::new();
 
 /// pdfium's file name on this system.
-const PDFIUM: &str = if cfg!(windows) { "pdfium.dll" } else { "libpdfium.so" };
+pub const PDFIUM: &str = if cfg!(windows) { "pdfium.dll" } else { "libpdfium.so" };
 
 /// Where pdfium is: `N0TE_PDFIUM_LIB`, next to the installed app, or the repo's copy.
 /// Windows: `pdfium.dll` next to the program (the installer puts it there), else

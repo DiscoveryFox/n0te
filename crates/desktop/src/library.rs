@@ -98,7 +98,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         );
     }
     if app.show_imports {
-        content = content.push(row![imports_panel(&app.bundles), pdf_panel(&app.pdfs, tr("PDF importieren: wird ein neues Notizbuch"))].spacing(16));
+        content = content.push(row![imports_panel(&app.bundles, crate::app::shown_path(&app.export_dir)), pdf_panel(&app.pdfs, tr("PDF importieren: wird ein neues Notizbuch"))].spacing(16));
     } else if app.show_pdf_import {
         content = content.push(pdf_panel(&app.pdfs, tr("PDF importieren: wird ein neues Notizbuch")));
     }
@@ -365,8 +365,8 @@ pub fn cover_preview<'a>(kind: &str, title: &str, w: f32, h: f32) -> Element<'a,
     canvas_widget(Cover { kind: kind.to_string(), title: title.to_string() }).width(w).height(h).into()
 }
 
-fn imports_panel(bundles: &[Bundle]) -> Element<'_, Message> {
-    let mut list = column![theme::caption(tr("Vom Tablet (~/Downloads/n0bridge)"))].spacing(8);
+fn imports_panel(bundles: &[Bundle], downloads: String) -> Element<'_, Message> {
+    let mut list = column![theme::caption(&trf("Vom Tablet ({})", &[&downloads]))].spacing(8);
     if bundles.is_empty() {
         list = list.push(text(tr("Keine .n0te-Dateien gefunden. Auf dem Tablet: Notizbuch halten → An den Laptop.")).size(13).color(theme::p().muted));
     }
@@ -409,7 +409,7 @@ pub fn pdf_panel<'a>(pdfs: &'a [(PathBuf, SystemTime)], title: &'a str) -> Eleme
 
 /// Export as a dialog: pick the scope (whole notebook, this page, a selection), where the side
 /// pages go (`sides_at_end`), then one primary action. Selected pages take their side pages along.
-pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportWhat, current: u32, sides_at_end: bool) -> Element<'a, Message> {
+pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportWhat, current: u32, sides_at_end: bool, dest: String) -> Element<'a, Message> {
     let tile = |what: ExportWhat, title: &str, sub: String| {
         button(column![text(title.to_string()).font(theme::title_font()).size(15).color(theme::p().text), text(sub).size(12).color(theme::p().muted)].spacing(4))
             .padding([14, 16])
@@ -460,7 +460,7 @@ pub fn export_dialog<'a>(o: &'a Open, picked: &'a HashSet<String>, mode: ExportW
     col = col.push(container(Space::new()).height(1).width(Length::Fill).style(theme::hairline));
     col = col.push(
         row![
-            text(tr("Nach ~/Downloads · Seiten bleiben weiß, auch in dunklen Designs")).font(theme::meta_font()).size(12).color(theme::p().muted),
+            text(trf("Nach {} · Seiten bleiben weiß, auch in dunklen Designs", &[&dest])).font(theme::meta_font()).size(12).color(theme::p().muted),
             Space::new().width(Length::Fill),
             button(theme::btn(tr("Abbrechen"))).padding(theme::pad()).on_press(Message::ShowExport(false)).style(theme::ghost),
             Space::new().width(8),

@@ -1433,7 +1433,7 @@ impl App {
         }) {
             Ok(()) => {
                 if let Some(t) = before {
-                    let _ = std::fs::File::open(&dir).and_then(|d| d.set_modified(t));
+                    let _ = set_dir_modified(&dir, t);
                 }
                 true
             }
@@ -1475,6 +1475,21 @@ impl App {
 /// Focuses the dialog's field with its text selected (typing replaces it).
 fn focus_all() -> Task<Message> {
     iced::widget::operation::focus(field_id()).chain(iced::widget::operation::select_all(field_id()))
+}
+
+/// Puts a folder's modification time back to `t` (organising a notebook isn't writing in it).
+/// Windows opens a folder only with backup semantics, and setting its time needs the right to
+/// write its attributes (a plain read-only open is refused there).
+fn set_dir_modified(dir: &std::path::Path, t: std::time::SystemTime) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let f = {
+        use std::os::windows::fs::OpenOptionsExt;
+        // FILE_WRITE_ATTRIBUTES, FILE_FLAG_BACKUP_SEMANTICS.
+        std::fs::OpenOptions::new().access_mode(0x0100).custom_flags(0x0200_0000).open(dir)?
+    };
+    #[cfg(not(windows))]
+    let f = std::fs::File::open(dir)?;
+    f.set_modified(t)
 }
 
 #[cfg(test)]
