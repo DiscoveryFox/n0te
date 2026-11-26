@@ -72,19 +72,20 @@ class CoreContractTest {
         assertEquals(listOf(saved.id), mine.allStrokes().map { it.id })
     }
 
-    @Test fun twoHandlesOfOnePageCollideSoTheModelKeepsOne() {
-        // Every page this device loads writes with the device's peer id. Two handles of one page
-        // (the page view and the handwriting reader) both writing: their saves collide, and the
-        // page's later saves failed. NotebookModel.openSheet keeps one handle per page.
+    @Test fun twoHandlesOfOnePageBothKeepTheirStrokes() {
+        // Two handles of one page (the page view and the handwriting reader) both writing: the
+        // core gives the second its own peer id, so neither save collides and nothing is lost
+        // (before 0.35 they collided and the page's later saves failed). NotebookModel still
+        // keeps one handle per page, which saves the second load.
         val (nb, sid) = notebook()
         val reader = nb.openSheet(sid)
         val view = nb.openSheet(sid)
         reader.addStroke(pen, line(10f, 10f, 90f, 10f)); reader.saveQuiet()
         view.addStroke(pen, line(10f, 50f, 90f, 50f))
-        val failed = runCatching { view.save() }.isFailure
-        val kept = runCatching { nb.openSheet(sid).allStrokes().size }.getOrDefault(0)
-        assertTrue("two handles of one page: refused ($failed) or a stroke lost ($kept of 2)", failed || kept < 2)
-        // One handle for both: everything is kept.
+        view.save()
+        reader.addStroke(pen, line(10f, 90f, 90f, 90f)); reader.save()
+        assertEquals(3, nb.openSheet(sid).allStrokes().size)
+        // One handle for both: everything is kept too.
         val (nb2, sid2) = notebook()
         val one = nb2.openSheet(sid2)
         one.addStroke(pen, line(10f, 10f, 90f, 10f)); one.saveQuiet()

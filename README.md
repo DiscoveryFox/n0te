@@ -310,6 +310,7 @@ its changes (from [CHANGELOG.md](CHANGELOG.md)) and has these files:
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.35.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.35.0) | 2026-11-26 | Your own designs written with an AI; eight new designs incl. Christmas with snowfall; crash reports; a big bug hunt (data safety, crashes, Windows) with a real test suite; much faster library and long notebooks |
 | [0.34.1](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.1) | 2026-11-26 | Guests of several notebooks stay connected; dialogs with long notes scroll |
 | [0.34.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.0) | 2026-11-25 | Export single pages and side pages; huge pages stay smooth; n0te Tablet gets the ruler, insert space, writing magnifier, scribble to delete, "+" and boards; pairing with the webcam |
 | [0.33.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.33.0) | 2026-11-25 | Graphs with domains, axes stretched separately, implicit/parametric/polar curves, fractions; open PDFs with n0te; fast big selections |

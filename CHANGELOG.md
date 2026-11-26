@@ -6,7 +6,7 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
-## [Unreleased]
+## [0.35.0] - 2026-11-26
 
 ### Added
 
@@ -23,14 +23,75 @@ Neuigkeiten).
 - Crash reports: after a crash, n0te (tablet, laptop, n0te Tablet) offers to copy or share a
   report of what went wrong, or to open a GitHub issue for it. Reports contain no notes. On
   Windows a crash used to vanish without a trace.
-- `scripts/test.sh`: the whole test suite (Rust and the Android JVM tests) in one fast run.
+
+### Fixed
+
+Your notes are safer:
+
+- Strokes drawn right before leaving the Android app, and text typed right before closing the
+  laptop window or an update restart, are always saved.
+- Edits are no longer lost when the same notebook or page is open twice at once (e.g. in the
+  library and in the editor, or while its handwriting is being read), and devices no longer
+  drift apart afterwards. n0te Laptop and n0te Tablet can run at the same time.
+- A damaged notebook or page file no longer blocks the library: it is repaired from a paired
+  device and the damaged file is kept beside it. Importing a broken `.n0te` file no longer
+  leaves half a notebook; a PDF or picture that arrived incomplete is stored again in full.
+- "Undo" after deleting a page undoes only the delete; failed saves on the laptop are reported
+  instead of silently lost.
+- Version history no longer copies every PDF and picture into each checkpoint (much less disk).
+
+Crashes and freezes:
+
+- Graphs: formulas like `f(x) = f(x) + 1`, very long or deeply nested input, huge derivatives
+  and extreme values from another device no longer crash or freeze the app.
+- Android: crashes while writing with "Mitwandern" at a page edge, with the magnifier in a short
+  split pane, in the new-notebook dialog with a folder named "+", and when a file app refuses
+  to tell a PDF's name.
+- Broken pen samples, a held line far off the page, absurd page sizes, deeply nested groups and
+  impossible PDF tiles from another device no longer crash or hang anything.
+- Laptop: a hanging sync service no longer freezes the window; a PDF page that can't be
+  rendered no longer keeps the CPU busy; pairing with a code no longer blocks the window.
+- A misbehaving paired device can no longer make the app reserve gigabytes of memory.
+
+Android:
+
+- Updates reach beta testers (from a beta to the release or the next beta).
+- PDF pages no longer stay white after zooming in while they load.
+- Picking several notebooks picks the right ones; invite links pasted from chats work; graph
+  edits are kept on Back; changes from the laptop made while n0te was paused show at once.
+- Cut no longer deletes a newer selection; boards shown alone show their pictures and graphs;
+  pages with several photos no longer flicker; graph numbers, angles and decimal commas are
+  read correctly and a slider drag is one undo step.
+- Turning the tablet keeps open dialogs and typed text; search hits in folded groups unfold
+  them; the last page can't be deleted from any menu.
+
+n0te Laptop and n0te Tablet:
+
+- n0te Tablet: undo and Delete no longer change a notebook that isn't on screen; a stroke right
+  after a cancelled move is no longer lost; graphs can be undone; strokes no longer blink when a
+  sync change arrives; the tool bar fits small pen laptops.
+- Windows: the pen writes in the right place after the screen is rotated or monitors change;
+  the touch keyboard no longer stalls the window; export file names are always valid; paths and
+  hints are Windows ones.
+- Panels of one notebook close when another takes its place; deleting a page closes its notes;
+  the import panel lists the PDFs in Downloads; text pages open with the cursor at the end.
+- README pictures and UI tests no longer show every button as disabled.
 
 ### Changed
 
-- The designs now come from one shared set of files, so tablet and laptop look exactly alike;
-  the design picker groups them into Classic, Special and Your own.
-- Text on the accent colour follows the design (Forest's green buttons now carry dark text and
-  read better).
+- The designs come from one shared set of files, so tablet and laptop look exactly alike; the
+  design picker groups them into Classic, Special and Your own. Text on the accent colour
+  follows the design (Forest's green buttons now carry dark text).
+- Faster: the laptop library with 300 notebooks refreshes in 16 ms instead of 1 s, 400-page
+  notebooks scroll 3–8× lighter, pages refresh faster after another device saved, and the tablet
+  decodes pictures at most at the size it shows them.
+- Laptop: PDF export runs in the background and includes what was just typed; Ctrl+Z brings back
+  a deleted page; narrow windows get shorter labels; icon buttons have tooltips; empty notebooks
+  offer a first page; the settings show the version.
+- Android: long dialogs scroll with their buttons always visible; the library's top bar wraps
+  when upright.
+- A real test suite: more than 120 new tests (fuzzing of every parser, hostile files and peers,
+  user flows on every platform); `scripts/test.sh` runs all of it in one go.
 
 ## [0.34.1] - 2026-11-26
 
