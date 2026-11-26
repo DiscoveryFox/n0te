@@ -131,7 +131,7 @@ fn run() {
         };
         let lib = match libs.get(&job.root) {
             Some(l) => Ok(l),
-            None => Library::open(&job.root).map(|l| &*libs.entry(job.root.clone()).or_insert(l)),
+            None => Library::open_as(&job.root, crate::library_role()).map(|l| &*libs.entry(job.root.clone()).or_insert(l)),
         };
         let error = match lib {
             Ok(lib) => match lib.save_sheet(&job.notebook, &job.sheet_id, &job.sheet) {

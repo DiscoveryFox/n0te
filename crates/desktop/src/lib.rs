@@ -68,6 +68,16 @@ pub fn set_mode(mode: Mode) -> bool {
     MODE.set(mode).is_ok() || self::mode() == mode
 }
 
+/// Which writer of the library this program is (see `Library::open_as`): n0te Laptop and n0te
+/// Tablet may run at once on one machine, and two writers with one Loro peer id make clashing
+/// edits; so n0te Tablet writes as "tablet", n0te Laptop as the app ("").
+pub fn library_role() -> &'static str {
+    match mode() {
+        Mode::Laptop => "",
+        Mode::Tablet => "tablet",
+    }
+}
+
 /// The program's name as people see it: window title, menus.
 pub fn app_name() -> &'static str {
     match mode() {

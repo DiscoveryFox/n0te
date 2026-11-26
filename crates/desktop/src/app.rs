@@ -530,7 +530,7 @@ impl App {
         theme::set_theme(&settings.theme);
         crate::settings::FORMULA_CENTER.store(settings.formula_center, std::sync::atomic::Ordering::Relaxed);
         let root = root.as_ref().to_path_buf();
-        let lib = Rc::new(Library::open(&root).expect("library folder"));
+        let lib = Rc::new(Library::open_as(&root, crate::library_role()).expect("library folder"));
         let pdf = match Pdf::start(&root) {
             Ok(p) => Some(p),
             Err(e) => {

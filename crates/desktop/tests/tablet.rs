@@ -315,6 +315,16 @@ fn the_tool_bar_fits_a_small_pen_laptop() {
 }
 
 #[test]
+fn n0te_tablet_writes_with_a_peer_id_of_its_own() {
+    // n0te Laptop and n0te Tablet may run at once on one machine: one Loro peer id for both
+    // would make clashing edits.
+    let h = opened("peer");
+    let laptop = Library::open(&h.app.root).unwrap().peer();
+    assert_ne!(h.app.lib.peer(), laptop);
+    assert_eq!(h.app.lib.peer(), Library::open_as(&h.app.root, "tablet").unwrap().peer());
+}
+
+#[test]
 fn the_text_tool_makes_a_text_box_where_tapped() {
     let mut h = opened("text");
     let (_, _, a) = first_page(&h, 0.5, 0.5);
