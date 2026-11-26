@@ -1753,7 +1753,9 @@ impl Inner {
         }
         let done = {
             let mut map = s.blobs_in.lock().expect("blobs");
-            let buf = map.entry(id.clone()).or_insert_with(|| Vec::with_capacity(total as usize));
+            // Grown as chunks come, not reserved from what the peer claims: a `total` of 2 GB
+            // would be an allocation the tablet can't make (an abort, not an error).
+            let buf = map.entry(id.clone()).or_insert_with(|| Vec::with_capacity((total as usize).min(4 * CHUNK)));
             if offset as usize != buf.len() {
                 map.remove(&id);
                 s.wanted.lock().expect("wanted").remove(&id);

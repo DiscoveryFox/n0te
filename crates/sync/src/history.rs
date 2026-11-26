@@ -105,12 +105,14 @@ pub fn checkpoint_changed(lib: &Library, now: u64) -> Pass {
 }
 
 fn write_checkpoint(lib: &Library, id: &str, now: u64) -> Result<()> {
-    let bytes = lib.export_bundle(id)?;
+    // Without the PDFs and pictures: the library keeps every blob for good, so each checkpoint
+    // copying them (every few minutes of work, dozens kept) only filled the disk.
+    let bytes = lib.export_bundle_without_blobs(id)?;
     let d = dir(lib.root(), id);
     fs::create_dir_all(&d)?;
     let path = d.join(format!("{now}.n0te"));
     n0te_core::store::write_atomic(&path, &bytes)?;
-    if let Err(e) = verify(&bytes, id) {
+    if let Err(e) = verify_in(&bytes, id, &lib.root().join("sync")) {
         let _ = fs::rename(&path, d.join(format!("{now}.n0te.bad")));
         let _ = fs::OpenOptions::new().create(true).append(true).open(d.join("problems.log")).and_then(|mut f| {
             use std::io::Write;
@@ -123,7 +125,13 @@ fn write_checkpoint(lib: &Library, id: &str, now: u64) -> Result<()> {
 
 /// Backup check: the bundle imports into an empty library and yields the same notebook.
 pub fn verify(bytes: &[u8], id: &str) -> Result<()> {
-    let scratch = std::env::temp_dir().join(format!("n0te-verify-{}-{}", std::process::id(), n0te_core::ids::new_id(11)));
+    verify_in(bytes, id, &std::env::temp_dir())
+}
+
+/// [`verify`] with its scratch library in `parent`. The engine uses the library's own folder:
+/// the system's temp folder may not be writable (Android without `TMPDIR`).
+fn verify_in(bytes: &[u8], id: &str, parent: &Path) -> Result<()> {
+    let scratch = parent.join(format!("n0te-verify-{}-{}", std::process::id(), n0te_core::ids::new_id(11)));
     let result = (|| {
         let lib = Library::open(&scratch)?;
         let got = lib.import_bundle(bytes)?;
@@ -145,15 +153,7 @@ pub fn verify(bytes: &[u8], id: &str) -> Result<()> {
 pub fn restore_as_copy(lib: &Library, notebook: &str, at: u64) -> Result<String> {
     let path = dir(lib.root(), notebook).join(format!("{at}.n0te"));
     let bytes = fs::read(&path).map_err(|_| Error::Invalid(format!("kein Stand {at} für {notebook}")))?;
-    let title = {
-        let scratch = std::env::temp_dir().join(format!("n0te-restore-{}-{}", std::process::id(), n0te_core::ids::new_id(12)));
-        let t = Library::open(&scratch).and_then(|l| {
-            let id = l.import_bundle(&bytes)?;
-            Ok(l.load_notebook(&id)?.title())
-        });
-        let _ = fs::remove_dir_all(&scratch);
-        t?
-    };
+    let title = lib.bundle_title(&bytes)?;
     Ok(lib.import_bundle_as_copy(&bytes, &format!("{title} (Stand {})", local_time(at)))?)
 }
 
@@ -187,6 +187,48 @@ mod tests {
         assert!(del.contains(&(now - 3 * D + 5)));
         assert!(!del.contains(&(now - 60)) && !del.contains(&(now - 50 * 60)));
         assert!(thin(&[now - 400 * D], now).is_empty(), "the newest is always kept");
+    }
+
+    #[test]
+    fn thinning_keeps_the_newest_and_one_per_bucket_for_any_times() {
+        // Random sets of checkpoint times: the newest always stays, everything of the last
+        // hour stays, and nothing is deleted that isn't there.
+        let mut seed = 7u64;
+        let mut next = || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed >> 20
+        };
+        let now = 2_000 * D;
+        for _ in 0..300 {
+            let times: Vec<u64> = (0..next() % 80).map(|_| now.saturating_sub(next() % (400 * D))).collect();
+            let del = thin(&times, now);
+            assert!(del.iter().all(|t| times.contains(t)));
+            if let Some(newest) = times.iter().max() {
+                assert!(!del.contains(newest), "the newest stays");
+            }
+            assert!(times.iter().filter(|&&t| now - t < H).all(|t| !del.contains(t)), "the last hour stays");
+            assert!(thin(&times.iter().filter(|t| !del.contains(t)).copied().collect::<Vec<_>>(), now).is_empty(), "thinning again changes nothing");
+        }
+    }
+
+    #[test]
+    fn checkpoints_leave_the_pdfs_in_the_library() {
+        let root = std::env::temp_dir().join(format!("n0te-hist-blob-{}", n0te_core::ids::new_id(14)));
+        let lib = Library::open(&root).unwrap();
+        let pdf = vec![9u8; 300_000];
+        let blob = lib.put_blob(&pdf).unwrap();
+        let nb = lib.create_notebook("Folien").unwrap();
+        nb.add_sheet(None, 0, &n0te_core::notebook::SheetSpec { pdf: Some((blob.clone(), 0)), ..n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Blank) }).unwrap();
+        lib.save_notebook(&nb).unwrap();
+        let pass = checkpoint_changed(&lib, 1_800_000_000);
+        assert_eq!(pass.written.len(), 1, "{pass:?}");
+        let cp = &list(&root, &nb.id())[0];
+        assert!(cp.size < 50_000, "a checkpoint of {} bytes copied the PDF", cp.size);
+        let copy = restore_as_copy(&lib, &nb.id(), cp.at).unwrap();
+        assert_eq!(lib.load_notebook(&copy).unwrap().pdf_blobs(), vec![blob.clone()], "the copy still has its PDF");
+        assert_eq!(lib.blob(&blob).unwrap(), pdf);
+        assert!(!root.join("sync").read_dir().map(|mut d| d.any(|e| e.is_ok_and(|e| e.file_name().to_string_lossy().starts_with("n0te-verify")))).unwrap_or(false), "no scratch library left behind");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
