@@ -110,6 +110,9 @@ pub enum Live {
     /// device's clock), `down` false once it lifts. `who` is the pointing device (kept when an
     /// owner passes the pointer on), `guest` whether it points as a guest.
     Laser { notebook: String, sheet: String, who: String, samples: Vec<[f32; 3]>, down: bool, guest: bool },
+    /// A stroke sent live won't be kept (it scribbled something out), added after 0.35: drop
+    /// it now. Older peers can't decode it and ignore it (theirs time out).
+    Cancel { notebook: String, sheet: String, stroke: u64 },
 }
 
 pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {

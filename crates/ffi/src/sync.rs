@@ -60,6 +60,8 @@ pub enum FfiSyncEvent {
     /// A laser pointer moving: samples as x, y, t (ms) triples since the last one, `down` false
     /// when it lifts. `who` points (an own device, the owner or a guest), `guest` as a guest.
     Laser { device: String, notebook: String, sheet: String, who: String, samples: Vec<f32>, down: bool, guest: bool },
+    /// A stroke another device sent live won't be kept (it scribbled something out): drop it.
+    LiveCancel { device: String, notebook: String, sheet: String, stroke: u64 },
     OpenRequest { device: String, notebook: String },
     FollowRequest { device: String, on: bool },
     GuestJoined { invite: String, notebook: String, name: String, device: String },
@@ -186,6 +188,7 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::LatexResult { device, id, latex, engine, error } => FfiSyncEvent::LatexResult { device, id, latex, engine, error },
         Event::Screenshot { device, image } => FfiSyncEvent::Screenshot { device, image },
         Event::LiveErase { device, notebook, sheet, ids, dabs } => FfiSyncEvent::LiveErase { device, notebook, sheet, ids, dabs: dabs.iter().flatten().copied().collect() },
+        Event::LiveCancel { device, notebook, sheet, stroke } => FfiSyncEvent::LiveCancel { device, notebook, sheet, stroke },
         Event::Laser { device, notebook, sheet, who, samples, down, guest } => FfiSyncEvent::Laser { device, notebook, sheet, who, samples: samples.iter().flatten().copied().collect(), down, guest },
         Event::LiveStroke { device, notebook, sheet, stroke, seq, brush, samples, done } => FfiSyncEvent::LiveStroke {
             device,
@@ -299,6 +302,13 @@ impl SyncEngine {
         self.with(|e| {
             let d: Vec<[f32; 3]> = dabs.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             e.send_live_erase(&notebook, &sheet, &ids, &d);
+            Ok(())
+        })
+    }
+    /// A stroke sent live won't be kept (it scribbled something out): the others drop it.
+    pub fn send_live_cancel(&self, notebook: String, sheet: String, stroke: u64) -> R<()> {
+        self.with(|e| {
+            e.send_live_cancel(&notebook, &sheet, stroke);
             Ok(())
         })
     }

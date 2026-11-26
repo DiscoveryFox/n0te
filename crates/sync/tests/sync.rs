@@ -472,6 +472,50 @@ fn wait_event(rx: &Receiver<Event>, what: &str, f: impl Fn(&Event) -> bool) -> E
     panic!("timed out waiting for event: {what}");
 }
 
+/// Scribbles out (deletes) `n` strokes of the sheet, as the app does (one edit, saved).
+fn scribble_out(root: &Path, nb: &str, sheet: &str, n: usize) {
+    let lib = Library::open(root).unwrap();
+    let s = lib.load_sheet(nb, sheet).unwrap();
+    let ids: Vec<String> = s.strokes().into_iter().take(n).map(|st| st.id).collect();
+    s.scribble_out(&n0te_core::scribble::Verdict { delete: ids, cut: vec![], path: vec![] }).unwrap();
+    lib.save_sheet(nb, sheet, &s).unwrap();
+}
+
+#[test]
+fn what_a_guest_scribbles_out_goes_at_the_owner_and_the_other_way_round() {
+    // Reported on 0.35.0: something a guest scribbled out was sometimes still there at the
+    // owner (and the other way round).
+    let (ro, rg) = (root("scr-o"), root("scr-g"));
+    let owner = engine(&ro, "Laptop");
+    let (nb, sheet) = notebook_with_strokes(&ro, "Gemeinsam", 4);
+    let owner_events = owner.events().unwrap();
+    let guest = engine(&rg, "Mia");
+    let guest_events = guest.events().unwrap();
+    guest.join(&owner.create_invite(&nb, Role::ReadWrite, 0).unwrap()).unwrap();
+    wait("the guest has the notebook", || strokes(&rg, &nb, &sheet) == 4);
+    // The guest scribbles one out: the live stroke goes at once, the stroke with the save.
+    guest.send_live_cancel(&nb, &sheet, 77);
+    wait_event(&owner_events, "the guest's scribble dropped", |e| matches!(e, Event::LiveCancel { stroke: 77, .. }));
+    scribble_out(&rg, &nb, &sheet, 1);
+    guest.notify_local_change(&nb);
+    wait("gone at the owner", || strokes(&ro, &nb, &sheet) == 3);
+    // The owner scribbles two out: gone at the guest.
+    owner.send_live_cancel(&nb, &sheet, 78);
+    wait_event(&guest_events, "the owner's scribble dropped", |e| matches!(e, Event::LiveCancel { stroke: 78, .. }));
+    scribble_out(&ro, &nb, &sheet, 2);
+    owner.notify_local_change(&nb);
+    wait("gone at the guest", || strokes(&rg, &nb, &sheet) == 1);
+    // Both at once, offline from each other's view: both deletions stay.
+    add_strokes(&ro, &nb, &sheet, 3);
+    owner.notify_local_change(&nb);
+    wait("the guest has the new ones", || strokes(&rg, &nb, &sheet) == 4);
+    scribble_out(&rg, &nb, &sheet, 1);
+    scribble_out(&ro, &nb, &sheet, 1);
+    guest.notify_local_change(&nb);
+    owner.notify_local_change(&nb);
+    wait("the same on both", || strokes(&ro, &nb, &sheet) == strokes(&rg, &nb, &sheet) && strokes(&ro, &nb, &sheet) <= 3);
+}
+
 #[test]
 fn the_laser_reaches_guests_through_the_owner_and_guests_point_back() {
     // The tablet points, the guest is connected to the laptop: before 0.36 the laptop showed

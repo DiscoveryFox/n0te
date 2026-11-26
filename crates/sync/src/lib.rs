@@ -87,6 +87,8 @@ pub enum Event {
     /// lifts). `device` sent it here, `who` points (an own device, the owner or a guest, passed
     /// on by the owner), `guest` whether it points as a guest.
     Laser { device: String, notebook: String, sheet: String, who: String, samples: Vec<[f32; 3]>, down: bool, guest: bool },
+    /// A stroke `device` sent live won't be kept (it scribbled something out): drop it.
+    LiveCancel { device: String, notebook: String, sheet: String, stroke: u64 },
     /// An own device asks to open a notebook (live session button).
     OpenRequest { device: String, notebook: String },
     /// An own device asks this one to follow (or stop following) its view.

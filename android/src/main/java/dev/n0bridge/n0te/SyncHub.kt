@@ -259,6 +259,13 @@ object SyncHub : SyncListener {
         runCatching { e.sendPresence(notebook, sheet, rect.toList(), zoom, laser?.toList()) }
     }
 
+    /** A stroke sent live won't be kept (it scribbled something out): the others drop it. */
+    fun liveCancel(notebook: String, sheet: String, stroke: Long) {
+        val e = engine ?: return
+        if (!sharing(notebook)) return
+        N0te.io.execute { runCatching { e.sendLiveCancel(notebook, sheet, stroke.toULong()) } }
+    }
+
     /** The laser pointer: samples (x, y, t triples, sheet points) since the last call; guests see it too. */
     fun laser(notebook: String, sheet: String, samples: FloatArray, down: Boolean) {
         val e = engine ?: return

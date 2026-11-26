@@ -67,6 +67,8 @@ pub enum LiveEvent {
     /// A laser pointer: samples (x, y in `sheet` points, t ms on its clock) since the last one;
     /// `who` points (an own device, the owner or a guest), `guest` as a guest.
     Laser { notebook: String, sheet: String, who: String, samples: Vec<[f32; 3]>, down: bool, guest: bool },
+    /// A stroke `device` sent live won't be kept (it scribbled something out).
+    Cancel { device: String, notebook: String, stroke: u64 },
     Open { device: String, notebook: String },
     Follow { device: String, on: bool },
     Guest { name: String, notebook: String, device: String, on: bool },
@@ -133,6 +135,7 @@ fn parse(line: &str) -> Option<LiveEvent> {
             samples: v["samples"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64().map(|b| b as u8)).collect()).unwrap_or_default(),
             done: v["done"].as_bool().unwrap_or(false),
         },
+        "cancel" => LiveEvent::Cancel { device: s("device"), notebook: s("notebook"), stroke: v["stroke"].as_u64().unwrap_or(0) },
         "laser" => LiveEvent::Laser {
             notebook: s("notebook"),
             sheet: s("sheet"),

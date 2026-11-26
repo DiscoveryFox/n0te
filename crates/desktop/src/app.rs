@@ -1415,6 +1415,13 @@ impl App {
             }
             Message::DoneText => self.finish_text(),
             Message::Tick => {
+                // Finished strokes from elsewhere whose stored stroke never came (scribbled away,
+                // or a message lost): gone after a few seconds, also when nobody draws on.
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in &s.panes {
+                        o.pages.live.borrow_mut().retain(|_, l| l.done.is_none_or(|t| t.elapsed().as_secs_f32() < crate::pages::LIVE_DONE_SECS));
+                    }
+                }
                 let due = self.update_at.map_or(self.persist_settings, |t| t.elapsed().as_secs() > 6 * 3600);
                 if crate::updater::supported() && self.settings.auto_update && due && self.update != crate::updater::Status::Checking {
                     let first = self.update_at.is_none();
@@ -2502,6 +2509,13 @@ impl App {
                 if let Screen::Notebook(s) = &self.screen {
                     for o in s.panes.iter().filter(|o| o.id == notebook) {
                         o.pages.live_samples(&device, stroke, &sheet, brush, &samples, done);
+                    }
+                }
+            }
+            LiveEvent::Cancel { device, notebook, stroke } => {
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in s.panes.iter().filter(|o| o.id == notebook) {
+                        o.pages.live_cancel(&device, stroke);
                     }
                 }
             }

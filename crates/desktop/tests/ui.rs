@@ -793,6 +793,29 @@ fn laser_pointers_of_others_show_and_fade_and_l_makes_the_mouse_one() {
 }
 
 #[test]
+fn a_scribble_from_elsewhere_goes_and_finished_strokes_dont_stay_for_good() {
+    use n0te_desktop::live::LiveEvent;
+    let (mut h, _root, nb) = blank_notebook("cancel");
+    let sheet = open(&h).pages.pages[0].placed.sheet_id.clone();
+    let samples: Vec<u8> = [100.0f32, 600.0, 0.5, 0.0, 140.0, 610.0, 0.5, 8.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+    let stroke = |id: u64, done: bool| LiveEvent::Stroke { device: "mia".into(), notebook: nb.clone(), sheet: sheet.clone(), stroke: id, brush: (2.0, 0.5, 0xFF111111, 0), samples: samples.clone(), done };
+    // A guest's scribble: drawn live, then dropped; a late piece of it doesn't bring it back.
+    h.message(Message::Live(stroke(5, false)));
+    assert_eq!(open(&h).pages.live.borrow().len(), 1);
+    h.message(Message::Live(LiveEvent::Cancel { device: "mia".into(), notebook: nb.clone(), stroke: 5 }));
+    assert!(open(&h).pages.live.borrow().is_empty());
+    h.message(Message::Live(stroke(5, true)));
+    assert!(open(&h).pages.live.borrow().is_empty(), "late piece ignored");
+    // A finished stroke whose stored stroke never comes (an older guest's scribble) goes after a
+    // few seconds, also when nobody draws on.
+    h.message(Message::Live(stroke(6, true)));
+    assert_eq!(open(&h).pages.live.borrow().len(), 1);
+    std::thread::sleep(std::time::Duration::from_secs_f32(n0te_desktop::pages::LIVE_DONE_SECS + 0.2));
+    h.message(Message::Tick);
+    assert!(open(&h).pages.live.borrow().is_empty());
+}
+
+#[test]
 fn live_events_show_the_tablet_and_changes_from_it() {
     use n0te_desktop::live::LiveEvent;
     let (mut h, root, nb) = blank_notebook("live");

@@ -78,6 +78,7 @@ fn event_json(e: &Event) -> Option<String> {
         Event::LatexRequest { device, id, png } => json!({ "t": "latex_request", "device": device, "id": id, "bytes": png.len() }),
         Event::LatexResult { device, id, latex, engine, error } => json!({ "t": "latex_result", "device": device, "id": id, "latex": latex, "engine": engine, "error": error }),
         Event::LiveErase { device, notebook, sheet, ids, dabs } => json!({ "t": "erase", "device": device, "notebook": notebook, "sheet": sheet, "ids": ids, "dabs": dabs }),
+        Event::LiveCancel { device, notebook, sheet, stroke } => json!({ "t": "cancel", "device": device, "notebook": notebook, "sheet": sheet, "stroke": stroke }),
         Event::Laser { device, notebook, sheet, who, samples, down, guest } => json!({ "t": "laser", "device": device, "notebook": notebook, "sheet": sheet, "who": who, "samples": samples, "down": down, "guest": guest }),
         Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
         Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
@@ -616,6 +617,11 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
+        }
+        // cancel <notebook> <sheet> <stroke>: a stroke sent live won't be kept
+        "cancel" => {
+            engine.send_live_cancel(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, args.get(3).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0));
+            String::new()
         }
         // laser <notebook> <sheet> <samples json array of [x, y, t_ms]> <down 1/0>
         "laser" => {

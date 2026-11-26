@@ -521,6 +521,12 @@ impl Engine {
         }
     }
 
+    /// A stroke sent live with [`Engine::send_live_stroke`] won't be kept (it scribbled
+    /// something out): the others drop it at once instead of showing it until it times out.
+    pub fn send_live_cancel(&self, notebook: &str, sheet: &str, stroke: u64) {
+        self.inner.send_live(notebook, None, Live::Cancel { notebook: notebook.into(), sheet: sheet.into(), stroke });
+    }
+
     /// This device's laser pointer on `sheet`: its samples (x, y in sheet points, t in ms)
     /// since the last call, `down` false once the pen lifts. To own devices and guests with the
     /// notebook; the owner passes it on to its guests and own devices (guests point too).
@@ -1819,6 +1825,9 @@ impl Inner {
             }
             Live::Stroke { notebook, sheet, stroke, seq, brush, samples, done } if s.kind.covers(&notebook) => {
                 (self.emit)(Event::LiveStroke { device: s.id(), notebook, sheet, stroke, seq, brush, samples, done });
+            }
+            Live::Cancel { notebook, sheet, stroke } if s.kind.covers(&notebook) => {
+                (self.emit)(Event::LiveCancel { device: s.id(), notebook, sheet, stroke });
             }
             // Erasing changes the notebook: only from those who may write it.
             Live::Erase { notebook, sheet, ids, dabs } if s.kind.covers(&notebook) && Self::may_receive(&s.kind) => {

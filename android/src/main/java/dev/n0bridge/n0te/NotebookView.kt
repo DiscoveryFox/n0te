@@ -84,6 +84,8 @@ class NotebookView(context: Context) : View(context) {
         fun presence(sheetId: String?, rect: FloatArray, zoom: Float, laser: FloatArray?)
         /** The laser pointer's samples since the last call (x, y in sheet points, t ms); [down] false once it lifts. */
         fun laser(sheetId: String, samples: FloatArray, down: Boolean)
+        /** A stroke sent live won't be kept (it scribbled something out): the others drop it. */
+        fun cancel(sheetId: String, stroke: Long)
     }
 
     /** Another device's view (sheet points) and laser pointer. */
@@ -1006,6 +1008,7 @@ class NotebookView(context: Context) : View(context) {
     /** Samples of a stroke another device is drawing. */
     fun remoteSamples(device: String, stroke: Long, sheetId: String, brush: FfiBrush, bytes: ByteArray, done: Boolean) {
         val key = "$device/$stroke"
+        if (key in remoteCancelled) return
         val ri = remoteInk.getOrPut(key) { RemoteInk(sheetId, brush) }
         ri.samples += floatsOf(bytes)
         ri.path = InkStroke.pathOf(floatsOf(strokeOutline(brush, bytesOf(ri.samples))))
@@ -1014,7 +1017,7 @@ class NotebookView(context: Context) : View(context) {
         if (done) ri.doneAt = now
         // Unfinished ones too once nothing came for a while (the other device dropped off, its
         // last packet got lost): they stayed on screen for good.
-        remoteInk.entries.removeAll { (it.value.doneAt > 0 && now - it.value.doneAt > 8000) || (it.value.doneAt == 0L && now - it.value.lastAt > 15_000) }
+        remoteInk.entries.removeAll { (it.value.doneAt > 0 && now - it.value.doneAt > REMOTE_DONE_MS) || (it.value.doneAt == 0L && now - it.value.lastAt > 15_000) }
         invalidate()
     }
 
@@ -1040,7 +1043,23 @@ class NotebookView(context: Context) : View(context) {
         invalidate()
     }
 
+    /** Strokes from elsewhere that were dropped, so a late piece doesn't bring one back (live messages may arrive out of order). */
+    private val remoteCancelled = HashMap<String, Long>()
+
+    /** A stroke another device sent live won't be kept (it scribbled something out). */
+    fun remoteCancel(device: String, stroke: Long) {
+        val now = SystemClock.uptimeMillis()
+        remoteCancelled.entries.removeAll { now - it.value > 10_000 }
+        remoteCancelled["$device/$stroke"] = now
+        if (remoteInk.remove("$device/$stroke") != null) invalidate()
+    }
+
     private fun drawRemote(c: Canvas, m: NotebookModel) {
+        // Finished ones whose stored stroke never came (scribbled away, a message lost) go after
+        // a few seconds, also when nobody draws on.
+        val now = SystemClock.uptimeMillis()
+        if (remoteInk.entries.removeAll { it.value.doneAt > 0 && now - it.value.doneAt > REMOTE_DONE_MS }) invalidate()
+        if (remoteInk.values.any { it.doneAt > 0 }) postInvalidateDelayed(REMOTE_DONE_MS + 100)
         for (ri in remoteInk.values) {
             val p = m.placed.firstOrNull { it.sheetId == ri.sheetId } ?: continue
             c.save(); c.translate(p.rect.left, p.rect.top)
@@ -4433,6 +4452,9 @@ class NotebookView(context: Context) : View(context) {
                 val v = scribbleJudge(bytes, brush.width, scribbleTargets(m, p, samples, n))
                 if (v.delete.isNotEmpty() || v.cut.isNotEmpty()) {
                     m.scribbleOut(p.sheetId, v)
+                    // The others saw it drawn: it goes there now, and what it scribbled out hides at once.
+                    live?.cancel(p.sheetId, liveStrokeId)
+                    if (v.delete.isNotEmpty()) live?.erase(p.sheetId, v.delete, FloatArray(0))
                     val k = v.delete.size + v.cut.size
                     listener?.onMessage(if (k == 1) "1 Strich weggekritzelt" else "$k Striche weggekritzelt")
                     cancelInk()
@@ -5062,6 +5084,8 @@ class NotebookView(context: Context) : View(context) {
         /** Where the line one writes on sits in the frame (share of its height from the top). */
         const val LOUPE_BASELINE = 0.72f
         const val LASER_RED = 0xFFFF3B30.toInt()
+        /** How long a finished stroke from elsewhere shows when its stored stroke doesn't come. */
+        const val REMOTE_DONE_MS = 3000L
         /** The laser dot's radius (dp; core laser Style). */
         const val LASER_DOT = 4.5f
         /** Width of a group title's fold button (points). */

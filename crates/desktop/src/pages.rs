@@ -1049,6 +1049,9 @@ impl SpacePreview {
     }
 }
 
+/// How long a finished stroke from elsewhere shows when its stored stroke doesn't come.
+pub const LIVE_DONE_SECS: f32 = 3.0;
+
 /// The laid-out notebook.
 pub struct Pages {
     /// Other devices' views (live session).
@@ -1063,6 +1066,9 @@ pub struct Pages {
     pub lasers: RefCell<HashMap<String, LaserMark>>,
     /// This app's own pointer.
     pub own_laser: RefCell<OwnLaser>,
+    /// Strokes from elsewhere that were dropped (scribbled away), so a late piece of one doesn't
+    /// bring it back (live messages may arrive out of order).
+    cancelled: RefCell<HashMap<(String, u64), std::time::Instant>>,
     /// The links of PDF pages (by blob and page), read once each.
     links: RefCell<HashMap<(String, u32), std::rc::Rc<Vec<n0te_pdf::PdfLink>>>>,
     /// The spot just jumped to, lighting up.
@@ -1095,6 +1101,7 @@ impl Pages {
             lasers: RefCell::new(HashMap::new()),
             own_laser: RefCell::new(OwnLaser::default()),
             links: RefCell::new(HashMap::new()),
+            cancelled: RefCell::new(HashMap::new()),
             flash: None,
             board: None,
             space: RefCell::new(None),
@@ -1168,7 +1175,19 @@ impl Pages {
     }
 
     /// New samples (packed LE f32 x, y, pressure, t) of a stroke another device is drawing.
+    /// A stroke from elsewhere won't be kept (it scribbled something out): it goes now, and
+    /// pieces of it that arrive late are ignored.
+    pub fn live_cancel(&self, device: &str, stroke: u64) {
+        self.live.borrow_mut().remove(&(device.to_string(), stroke));
+        let mut c = self.cancelled.borrow_mut();
+        c.retain(|_, t| t.elapsed().as_secs() < 10);
+        c.insert((device.to_string(), stroke), std::time::Instant::now());
+    }
+
     pub fn live_samples(&self, device: &str, stroke: u64, sheet_id: &str, brush: (f32, f32, u32, u8), samples: &[u8], done: bool) {
+        if self.cancelled.borrow().contains_key(&(device.to_string(), stroke)) {
+            return;
+        }
         let mut live = self.live.borrow_mut();
         let l = live.entry((device.to_string(), stroke)).or_insert_with(|| LiveInk {
             sheet_id: sheet_id.to_string(),
@@ -1185,7 +1204,7 @@ impl Pages {
             l.done = Some(std::time::Instant::now());
         }
         // Done strokes whose stored version never came: drop after a while.
-        live.retain(|_, l| l.done.is_none_or(|t| t.elapsed().as_secs() < 8));
+        live.retain(|_, l| l.done.is_none_or(|t| t.elapsed().as_secs_f32() < LIVE_DONE_SECS));
     }
 
     /// Text boxes on the pages in view: (sheet id, the sheet's rect, box).

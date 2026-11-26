@@ -366,6 +366,14 @@ impl App {
         if let Some(o) = self.pane_mut_of(d.pane) {
             o.pages.live.borrow_mut().remove(&(LOCAL.to_string(), d.live_id));
         }
+        // The others saw the scribble being drawn: it goes there now, and what it scribbled out
+        // hides at once (the stored result follows with the save).
+        if let Some(sync) = &self.sync {
+            sync.send(&["cancel".to_string(), d.notebook.clone(), d.sheet.clone(), d.live_id.to_string()]);
+            if !v.delete.is_empty() {
+                sync.send(&["erase".to_string(), d.notebook.clone(), d.sheet.clone(), serde_json::to_string(&v.delete).unwrap_or_default(), "[]".to_string()]);
+            }
+        }
         let n = v.delete.len() + v.cut.len();
         self.edit_tracked(&d.notebook, &d.sheet, |s| s.scribble_out(&v).map(|_| ()));
         self.say(if n == 1 { tr("1 Strich weggekritzelt").to_string() } else { trf("{} Striche weggekritzelt", &[&n]) });

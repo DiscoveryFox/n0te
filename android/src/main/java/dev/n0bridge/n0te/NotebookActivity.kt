@@ -733,6 +733,7 @@ class NotebookActivity : ComponentActivity() {
                 }
                 override fun erase(sheetId: String, ids: List<String>, dabs: FloatArray) = SyncHub.liveErase(nbId, sheetId, ids, dabs)
                 override fun laser(sheetId: String, samples: FloatArray, down: Boolean) = SyncHub.laser(nbId, sheetId, samples, down)
+                override fun cancel(sheetId: String, stroke: Long) = SyncHub.liveCancel(nbId, sheetId, stroke)
             }
             container = FrameLayout(this@NotebookActivity).apply {
                 addView(view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -1515,6 +1516,7 @@ class NotebookActivity : ComponentActivity() {
                 is uniffi.n0te_ffi.FfiSyncEvent.GuestLeft -> if (e.notebook == id) { guestPages = guestPages - e.device; view.hideRemote(e.device) }
                 is uniffi.n0te_ffi.FfiSyncEvent.LiveErase -> if (e.notebook == id) view.remoteErase(e.sheet, e.ids)
                 // Pointers: own devices', the owner's and guests' (each in its colour).
+                is uniffi.n0te_ffi.FfiSyncEvent.LiveCancel -> if (e.notebook == id) view.remoteCancel(e.device, e.stroke.toLong())
                 is uniffi.n0te_ffi.FfiSyncEvent.Laser -> if (e.notebook == id) view.remoteLaser(e.who, e.sheet, e.samples.toFloatArray(), e.down, e.guest)
                 is uniffi.n0te_ffi.FfiSyncEvent.FollowRequest -> {
                     following = if (e.on) e.device else null
