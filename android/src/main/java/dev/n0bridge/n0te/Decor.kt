@@ -96,10 +96,10 @@ private fun DrawScope.snow(d: Decor, t: Float) {
 
 private fun DrawScope.falling(d: Decor, t: Float, leaf: Boolean, path: Path) {
     val w = size.width; val h = size.height
-    val n = Decorations.count(if (leaf) 8f + 22f * d.amount else 10f + 28f * d.amount, w / density, h / density)
+    val n = Decorations.count(if (leaf) 10f + 24f * d.amount else 14f + 34f * d.amount, w / density, h / density)
     val cols = if (leaf) colors(d, 0xFFC2410C, 0xFFD97706, 0xFFA16207) else colors(d, 0xFFF9A8C2, 0xFFFBCFE0)
     for (i in 0 until n) {
-        val s = (if (leaf) 9f + 6f * Decorations.h(i, 3) else 6f + 4f * Decorations.h(i, 3)).dp.toPx()
+        val s = (if (leaf) 11f + 7f * Decorations.h(i, 3) else 9f + 5f * Decorations.h(i, 3)).dp.toPx()
         val pad = 2 * s
         val speed = (10f + 18f * Decorations.h(i, 2)).dp.toPx()
         val y = (Decorations.h(i, 4) * (h + 2 * pad) + t * speed) % (h + 2 * pad) - pad
@@ -145,7 +145,7 @@ private fun DrawScope.lights(d: Decor, t: Float, theme: Theme, path: Path) {
     val w = size.width
     val cols = colors(d, 0xFFF5C542, 0xFFD7263D, 0xFF3FA34D, 0xFF4A90E2)
     val span = 160.dp.toPx()
-    val sag = 22.dp.toPx() * (0.6f + 0.6f * d.amount)
+    val sag = 13.dp.toPx() * (0.6f + 0.6f * d.amount)
     val top = 2.dp.toPx()
     val segments = (w / span).toInt() + 1
     path.reset()
@@ -160,7 +160,7 @@ private fun DrawScope.lights(d: Decor, t: Float, theme: Theme, path: Path) {
         val y = top + 2 * u * (1 - u) * 2 * sag + drop
         val glow = 0.55f + 0.45f * sin(t * 1.3f + i * 1.7f)
         val c = Color(cols[i % cols.size])
-        drawCircle(c.copy(alpha = 0.2f * glow), 11.dp.toPx(), Offset(x, y))
+        drawCircle(c.copy(alpha = 0.2f * glow), 9.dp.toPx(), Offset(x, y))
         drawCircle(c.copy(alpha = 0.6f + 0.4f * glow), 4.dp.toPx(), Offset(x, y))
         drawRect(Color(theme.muted), Offset(x - 1.5.dp.toPx(), y - drop + 1.dp.toPx()), Size(3.dp.toPx(), 3.dp.toPx()))
         i++

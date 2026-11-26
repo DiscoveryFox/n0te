@@ -20,7 +20,7 @@
   "corners": { "buttons": 14, "cards": 18, "panels": 22 },
   "labels": "sans",
   "headings": "serif",
-  "fill": "tonal",
+  "fill": "outline",
   "shadows": true,
   "decorations": [
     { "kind": "snow", "colors": ["#ffffff"], "amount": 0.55 },

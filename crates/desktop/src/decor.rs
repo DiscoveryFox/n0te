@@ -131,10 +131,10 @@ fn snow(frame: &mut Frame, d: &Decor, t: f32) {
 
 fn falling(frame: &mut Frame, d: &Decor, t: f32, leaf: bool) {
     let Size { width: w, height: hh } = frame.size();
-    let n = count(if leaf { 8.0 + 22.0 * d.amount } else { 10.0 + 28.0 * d.amount }, w, hh);
+    let n = count(if leaf { 10.0 + 24.0 * d.amount } else { 14.0 + 34.0 * d.amount }, w, hh);
     let cols = if leaf { colors(d, &[0xC2410C, 0xD97706, 0xA16207]) } else { colors(d, &[0xF9A8C2, 0xFBCFE0]) };
     for i in 0..n {
-        let s = if leaf { 9.0 + 6.0 * h(i, 3) } else { 6.0 + 4.0 * h(i, 3) };
+        let s = if leaf { 11.0 + 7.0 * h(i, 3) } else { 9.0 + 5.0 * h(i, 3) };
         let pad = 2.0 * s;
         let speed = 10.0 + 18.0 * h(i, 2);
         let y = (h(i, 4) * (hh + 2.0 * pad) + t * speed).rem_euclid(hh + 2.0 * pad) - pad;
@@ -191,7 +191,7 @@ fn lights(frame: &mut Frame, d: &Decor, t: f32, pal: &Palette) {
     let w = frame.width();
     let cols = colors(d, &[0xF5C542, 0xD7263D, 0x3FA34D, 0x4A90E2]);
     let span = 160.0;
-    let sag = 22.0 * (0.6 + 0.6 * d.amount);
+    let sag = 13.0 * (0.6 + 0.6 * d.amount);
     let top = 2.0;
     let segments = (w / span) as i32 + 1;
     let wire = Path::new(|b| {
@@ -211,7 +211,7 @@ fn lights(frame: &mut Frame, d: &Decor, t: f32, pal: &Palette) {
             let y = top + 2.0 * u * (1.0 - u) * 2.0 * sag + drop;
             let glow = 0.55 + 0.45 * (t * 1.3 + i as f32 * 1.7).sin();
             let c = cols[i as usize % cols.len()];
-            frame.fill(&Path::circle(Point::new(x, y), 11.0), rgb(c, 0.2 * glow));
+            frame.fill(&Path::circle(Point::new(x, y), 9.0), rgb(c, 0.2 * glow));
             frame.fill(&Path::circle(Point::new(x, y), 4.0), rgb(c, 0.6 + 0.4 * glow));
             frame.fill_rectangle(Point::new(x - 1.5, y - drop + 1.0), Size::new(3.0, 3.0), pal.muted);
             i += 1;
