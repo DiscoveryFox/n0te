@@ -191,6 +191,9 @@ pub enum Message {
     /// Touchpad gestures (Wayland): the window to listen on, its display, a gesture, the frame
     /// clock (while the page glides or a found spot fades), gliding on/off.
     WindowOpened(iced::window::Id),
+    /// The window's close button (or Windows asking the app to end, e.g. the updater): what is
+    /// typed and not stored yet goes to disk first, then the app ends.
+    CloseRequested(iced::window::Id),
     /// n0te Tablet: a pen event (window coordinates), a tool bar action, the pen backend started.
     Pen(crate::tablet::pen::PenEvent),
     Tablet(crate::tablet::Msg),
@@ -624,6 +627,7 @@ impl App {
                 _ => None,
             }),
             iced::window::open_events().map(Message::WindowOpened),
+            iced::window::close_requests().map(Message::CloseRequested),
             crate::gestures::subscription().map(Message::Gesture),
             if crate::mode() == crate::Mode::Tablet { crate::tablet::pen::subscription().map(Message::Pen) } else { Subscription::none() },
             // n0te Tablet: frames while a stroke is drawn (shapes snap when the pen rests).
@@ -1127,10 +1131,18 @@ impl App {
                 }
                 return gestures;
             }
+            Message::CloseRequested(_) => {
+                self.save_all();
+                return iced::exit();
+            }
             Message::CheckUpdate => return self.check_update(),
             Message::UpdateStatus(st) => self.update = st,
             Message::UpdateNow => {
                 let mode = if crate::mode() == crate::Mode::Tablet { "tablet" } else { "laptop" };
+                // Stored before the installer starts: it ends running n0te programs after a
+                // moment, also this one if it were still writing then.
+                self.save_all();
+                crate::saver::flush();
                 if crate::updater::install_now(mode) {
                     return iced::exit();
                 }
@@ -2963,6 +2975,19 @@ impl App {
         let (nb, sheet_id, sheet) = (e.notebook.clone(), e.sheet_id.clone(), Sheet::load(0, &e.sheet.snapshot().unwrap_or_default()));
         if let Ok(sheet) = sheet {
             self.store_sheet(&nb, &sheet_id, &sheet);
+        }
+    }
+
+    /// Everything typed and not stored yet is stored now (the text box being edited, text
+    /// pages typed in, in every pane), before the app ends.
+    pub fn save_all(&mut self) {
+        self.finish_text();
+        for key in self.pane_keys() {
+            self.in_pane(key, |app| {
+                if app.pane().and_then(|o| o.text_page.as_ref()).is_some_and(|t| t.dirty) {
+                    app.save_text_page();
+                }
+            });
         }
     }
 

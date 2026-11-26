@@ -89,7 +89,8 @@ pub fn run_as(mode: Mode, import: Option<std::path::PathBuf>) -> iced::Result {
         .title(App::title)
         .theme(App::theme)
         .subscription(App::subscription)
-        .window(iced::window::Settings { icon: window_icon(mode), ..Default::default() })
+        // Narrower than this the bars can't fit their buttons any more.
+        .window(iced::window::Settings { icon: window_icon(mode), exit_on_close_request: false, min_size: Some(iced::Size::new(960.0, 600.0)), ..Default::default() })
         .window_size((1440.0, 900.0))
         .antialiasing(true)
         .default_font(theme::SANS);
