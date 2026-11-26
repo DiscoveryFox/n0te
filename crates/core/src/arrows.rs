@@ -508,7 +508,8 @@ fn fit_line(xs: &[f32], ys: &[f32], a: usize, b: usize) -> ((f32, f32), (f32, f3
 fn shaft_leg(xs: &[f32], ys: &[f32], a: usize, b: usize, from: (f32, f32), to: (f32, f32), p: &dyn Fn(usize) -> f32) -> Vec<[f32; 3]> {
     let ((ax, ay), (bx, by)) = (from, to);
     let l = hypot(bx - ax, by - ay);
-    if l < 1e-3 || b - a < 3 {
+    // Also when it is NaN (samples that aren't numbers): clamp(0.0, l) below would panic.
+    if !(l >= 1e-3) || b - a < 3 {
         return vec![[ax, ay, p(a)], [bx, by, p(b)]];
     }
     let (ux, uy) = ((bx - ax) / l, (by - ay) / l);

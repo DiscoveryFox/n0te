@@ -189,7 +189,7 @@ impl Sheet {
 
     /// Adds a finished stroke; returns its id.
     pub fn add_stroke(&self, brush: Brush, points: &[InkPoint]) -> Result<String> {
-        if points.is_empty() {
+        if !points.iter().any(sample_ok) {
             return Err(Error::Invalid("empty stroke".into()));
         }
         let id = ids::new_id(self.doc.peer_id());
@@ -202,7 +202,7 @@ impl Sheet {
     pub fn add_strokes(&self, items: &[(Brush, Vec<InkPoint>)]) -> Result<Vec<String>> {
         let mut out = Vec::with_capacity(items.len());
         for (brush, points) in items {
-            if points.is_empty() {
+            if !points.iter().any(sample_ok) {
                 continue;
             }
             let id = ids::new_id(self.doc.peer_id());
@@ -1352,7 +1352,33 @@ fn point_in_polygon(x: f32, y: f32, poly: &[f32]) -> bool {
 const HEADER: usize = 1 + 4 + 4 + 4 + 16;
 const STROKE_V2: u8 = 2;
 
+/// A sample that can be stored: a position that is a number (a confused digitizer or a broken
+/// transform can send NaN or ±∞).
+fn sample_ok(p: &InkPoint) -> bool {
+    p.x.is_finite() && p.y.is_finite()
+}
+
+/// What a stroke is stored as: only samples that are numbers, within reach (the ink encoding's
+/// range), pressure 0..1, and a brush whose width and thinning are numbers. So its bounds are
+/// numbers too, and a bad sample can't put a stroke in every viewport or at 10^38.
+fn clean_stroke(brush: &Brush, points: &[InkPoint]) -> (Brush, Option<Vec<InkPoint>>) {
+    let m = ink::MAX_COORD;
+    let fine = |p: &InkPoint| sample_ok(p) && p.x.abs() <= m && p.y.abs() <= m && (0.0..=1.0).contains(&p.pressure);
+    let pts = (!points.iter().all(fine)).then(|| {
+        points
+            .iter()
+            .filter(|p| sample_ok(p))
+            .map(|p| InkPoint { x: p.x.clamp(-m, m), y: p.y.clamp(-m, m), pressure: if p.pressure.is_finite() { p.pressure.clamp(0.0, 1.0) } else { 0.5 }, t_ms: p.t_ms })
+            .collect()
+    });
+    let width = if brush.width.is_finite() && brush.width >= 0.0 { brush.width.min(m) } else { Brush::default().width };
+    let thinning = if brush.thinning.is_finite() { brush.thinning.clamp(0.0, 1.0) } else { 0.0 };
+    (Brush { width, thinning, ..*brush }, pts)
+}
+
 fn encode_stroke(brush: &Brush, points: &[InkPoint]) -> Vec<u8> {
+    let (brush, cleaned) = clean_stroke(brush, points);
+    let (brush, points) = (&brush, cleaned.as_deref().unwrap_or(points));
     let bb = ink::bounds(points, brush);
     let pts = ink::encode_points(points);
     let mut out = Vec::with_capacity(HEADER + 1 + pts.len());
