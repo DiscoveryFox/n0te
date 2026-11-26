@@ -25,10 +25,11 @@ object PagePictures {
         val name = "${nb.id()}_${sheetId}_$changed.png"
         val f = File(dir, name)
         if (f.isFile) return f
-        dir.listFiles()?.forEach { if (it.name.startsWith("${nb.id()}_${sheetId}_")) it.delete() }
-        // An empty page isn't worth showing (remembered, so it isn't opened again and again).
+        // An empty page isn't worth showing (remembered, so it isn't opened again and again). Looked
+        // at before older pictures go: the marker has their prefix and was deleted with them.
         val empty = File(dir, "$name.empty")
         if (empty.isFile) return null
+        dir.listFiles()?.forEach { if (it.name.startsWith("${nb.id()}_${sheetId}_")) it.delete() }
         val bmp = render(nb, sheetId, spec, w) ?: run { runCatching { empty.createNewFile() }; return null }
         runCatching { f.outputStream().use { bmp.compress(Bitmap.CompressFormat.PNG, 90, it) } }
         bmp.recycle()
@@ -41,10 +42,16 @@ object PagePictures {
     }
 
     private fun render(nb: NotebookHandle, sheetId: String, spec: FfiSheetSpec, w: Int): Bitmap? {
+        // The page's document only for reading its content: let go of it right after.
         val h = runCatching { nb.openSheet(sheetId) }.getOrNull() ?: return null
-        val strokes = runCatching { h.allStrokes() }.getOrDefault(emptyList())
-        val texts = runCatching { h.textBoxesWithBody(spec.width) }.getOrDefault(emptyList())
-        val images = runCatching { h.images() }.getOrDefault(emptyList())
+        val strokes: List<uniffi.n0te_ffi.FfiStroke>
+        val texts: List<uniffi.n0te_ffi.FfiTextBox>
+        val images: List<uniffi.n0te_ffi.FfiImage>
+        h.use {
+            strokes = runCatching { it.allStrokes() }.getOrDefault(emptyList())
+            texts = runCatching { it.textBoxesWithBody(spec.width) }.getOrDefault(emptyList())
+            images = runCatching { it.images() }.getOrDefault(emptyList())
+        }
         if (strokes.isEmpty() && texts.isEmpty() && images.isEmpty()) return null
         val k = w / spec.width
         val bmp = Bitmap.createBitmap(w, (spec.height * k).toInt().coerceIn(1, w * 4), Bitmap.Config.ARGB_8888)

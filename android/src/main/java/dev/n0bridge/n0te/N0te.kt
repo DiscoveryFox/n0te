@@ -44,6 +44,7 @@ object N0te {
 
     fun init(app: Application) {
         Settings.load(app)
+        Images.init(app)
         Ui.theme = Themes.byId(Settings.theme)
         Tools.load(app)
         Pencil.refresh()
@@ -65,6 +66,15 @@ object N0te {
             r.exceptionOrNull()?.let { Log.e(TAG, "background work failed", it) }
             main.post { done(r) }
         }
+    }
+
+    /** Like [background] on a thread of its own: for long waits that must not hold up [io]. */
+    fun <T> aside(name: String, work: () -> T, done: (Result<T>) -> Unit) {
+        Thread({
+            val r = runCatching(work)
+            r.exceptionOrNull()?.let { Log.e(TAG, "$name failed", it) }
+            main.post { done(r) }
+        }, name).start()
     }
 }
 

@@ -13,6 +13,14 @@ import androidx.compose.ui.unit.dp
 fun coverThumb(id: String) = java.io.File(java.io.File(N0te.root.parentFile, "thumbs"), "$id.png")
 
 /**
+ * Covers decoded lately (by notebook and file time), 16 MB: a card scrolled back into view shows
+ * its cover at once instead of decoding it again (they popped in, one after the other).
+ */
+private val covers = object : android.util.LruCache<String, androidx.compose.ui.graphics.ImageBitmap>(16 shl 20) {
+    override fun sizeOf(key: String, value: androidx.compose.ui.graphics.ImageBitmap) = value.width * value.height * 4
+}
+
+/**
  * A cover: the first page (saved when the notebook was last closed) or a preset — dot grid,
  * the title's initial in dots, stripes, or a colour.
  */
@@ -20,10 +28,12 @@ fun coverThumb(id: String) = java.io.File(java.io.File(N0te.root.parentFile, "th
 fun CoverArt(cover: String, title: String, id: String, modifier: Modifier) {
     val file = coverThumb(id)
     val stamp = file.lastModified()
-    val thumb by androidx.compose.runtime.produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, id, stamp, cover) {
-        value = if (cover.isBlank() || cover == "page") kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val key = "$id@$stamp"
+    val page = cover.isBlank() || cover == "page"
+    val thumb by androidx.compose.runtime.produceState(if (page) covers.get(key) else null, id, stamp, cover) {
+        value = if (page) covers.get(key) ?: kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
             runCatching { android.graphics.BitmapFactory.decodeFile(file.path)?.asImageBitmap() }.getOrNull()
-        } else null
+        }?.also { covers.put(key, it) } else null
     }
     androidx.compose.foundation.Canvas(modifier.clip(RoundedCornerShape(maxOf(0f, minOf(Ui.theme.style.card - 8f, 10f)).dp))) {
         val initial = title.trim().firstOrNull { it.isLetterOrDigit() }?.toString() ?: "N"
