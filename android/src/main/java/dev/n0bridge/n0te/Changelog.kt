@@ -11,6 +11,16 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.36.0", "26. Nov. 2026", "Wegkritzeln, das mitdenkt, ein neuer Laserpointer und klickbare PDFs", listOf(
+            "Wegkritzeln schaut, was darunter liegt: Ausmalen und Schraffieren löschen den Umriss nicht mehr (sie bleiben Tinte), ein schnelles Gekritzel über einen einzelnen Buchstaben löscht ihn jetzt. Es geht nur, was wirklich bedeckt ist; einmal Rückgängig holt alles zurück",
+            "Neuer Laserpointer: weicher, leuchtender Punkt und eine glatte Spur, die schmaler wird und verblasst – auf allen Geräten gleich",
+            "Gäste sehen deinen Laserpointer, auch wenn sie am Laptop hängen, und dürfen selbst zeigen, jeder in seiner Farbe",
+            "Links in PDFs: antippen (wenn der Finger nicht schreibt) springt zur Seite, auf die er zeigt, oder öffnet die Webseite; die Zurück-Geste bringt dich zurück",
+            "PDFs bringen ihr Inhaltsverzeichnis mit: Kapitel werden beim Import zu Gruppen, einseitige Kapitel zu Seitentiteln (Einstellungen › Seiten)",
+            "Favoriten-Stifte: bis zu sechs Stifte mit Farbe, Breite und Linie in der Werkzeugleiste; „+“ merkt den aktuellen, halten entfernt ihn",
+            "Gestrichelte, gepunktete und Strich-Punkt-Linien im Stiftmenü; „Linie“ in der Auswahl ändert vorhandene Striche",
+            "Was ein Gast wegkritzelt, bleibt beim Gastgeber nicht mehr stehen (und umgekehrt)",
+        )),
         Entry("0.35.0", "26. Nov. 2026", "Eigene Designs, Weihnachten und viele Fehler weniger", listOf(
             "Eigene Designs mit KI: Einstellungen › Design › „Mit KI gestalten“ kopiert eine Anleitung für ChatGPT, Claude oder Gemini; die Antwort einfach wieder einfügen. n0te prüft sie, zeigt eine Vorschau und sagt sonst genau, was die KI ändern soll",
             "Acht neue Designs: Weihnachten (Schneefall und Lichterkette), Blaupause, Kreidetafel, Sternennacht, Kirschblüte, Herbst, Terminal und Hoher Kontrast – mit Dekorationen hinter der Bibliothek, nie beim Schreiben, abschaltbar",

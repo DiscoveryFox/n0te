@@ -78,8 +78,10 @@ The pictures below are n0te Laptop on Linux, taken headless from demo notebooks
 Fountain pen, ballpoint, pencil (with grain), brush and marker, in your colours and widths; ink
 appears under the pen with low latency, and the hand can rest on the screen while writing.
 *Example:* hold the width button and a slider appears; hold a colour for a picker with
-pipette and palettes; the pen's side button erases; scribbling over a word deletes it. The laser
-pointer leaves a short trail for presenting. The ruler moves with one finger and turns with
+pipette and palettes; the pen's side button erases; scribbling over a word deletes it (colouring
+in and hatching stay ink). Up to six favourite pens sit in the tool bar, and lines can be solid,
+dashed, dotted or dash-dot. The laser pointer leaves a short glowing trail for presenting
+(on n0te Laptop hold L and the mouse points). The ruler moves with one finger and turns with
 two, and the pen follows its edge; the writing magnifier (Schreiblupe) lets you write large in a
 strip at the bottom while its frame moves along the page. *(Picture: n0te Laptop showing what the tablet wrote.)*
 
@@ -113,7 +115,8 @@ Page Down pages through and Ctrl+R turns a page to landscape.
 ![Lecture slides imported as PDF: ink from the tablet on the slide, a text box and the notes column typed on the laptop](docs/screenshots/pdf.png)
 
 Import lecture slides, write on them on the tablet, add blank pages between or beside slides and
-export everything, the current page or picked pages (any page or side page on its own). The ink is exported as vectors in its own
+export everything, the current page or picked pages (any page or side page on its own). Links in
+a PDF work (to its other pages or the web), and its table of contents becomes groups. The ink is exported as vectors in its own
 PDF layer ("n0te ink"), so it can be hidden in a PDF viewer. *Example:* drop a PDF into the laptop
 window (or Ctrl+O); circle a term on the tablet; type a note next to the slide with Ctrl+M (the
 notes column); Ctrl+E exports.
@@ -215,7 +218,8 @@ laptop's webcam). See [Pairing quickstart](#pairing-quickstart).
 
 *Example:* press LIVE on the laptop and the tablet opens the same notebook; the laptop shows where
 the tablet looks, its laser pointer and every stroke while it is being written. Either side can
-follow the other, so the laptop on a projector shows what you write on the tablet.
+follow the other, so the laptop on a projector shows what you write on the tablet. Guests see the
+laser pointer too and can point themselves, each in their own colour.
 
 ### Guests
 
@@ -314,6 +318,7 @@ its changes (from [CHANGELOG.md](CHANGELOG.md)) and has these files:
 
 | Version | Date | Highlights |
 |---|---|---|
+| [0.36.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.36.0) | 2026-11-26 | Scribbling out that looks at what is underneath (colouring in stays ink); a new laser pointer guests see and use too; links in PDFs work and their table of contents becomes groups; favourite pens; dashed and dotted lines |
 | [0.35.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.35.0) | 2026-11-26 | Your own designs written with an AI; eight new designs incl. Christmas with snowfall; crash reports; a big bug hunt (data safety, crashes, Windows) with a real test suite; much faster library and long notebooks |
 | [0.34.1](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.1) | 2026-11-26 | Guests of several notebooks stay connected; dialogs with long notes scroll |
 | [0.34.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.0) | 2026-11-25 | Export single pages and side pages; huge pages stay smooth; n0te Tablet gets the ruler, insert space, writing magnifier, scribble to delete, "+" and boards; pairing with the webcam |

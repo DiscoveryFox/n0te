@@ -6,7 +6,7 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
-## [0.36.0] - unreleased
+## [0.36.0] - 2026-11-26
 
 ### Added
 
