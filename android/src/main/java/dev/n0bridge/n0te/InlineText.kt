@@ -223,7 +223,8 @@ class InlineTextEditor(ctx: Context, private val page: NotebookView) : EditText(
     fun toggleInline(m: String) {
         val s = text ?: return
         if (!hasFocus()) focusAndShowKeyboard(atEnd = selectionStart < 0)
-        val a = selectionStart.coerceAtLeast(0); val b = selectionEnd.coerceAtLeast(0)
+        // Ordered: a selection made backwards (Shift+Left) has its start after its end.
+        val a = minOf(selectionStart, selectionEnd).coerceAtLeast(0); val b = maxOf(selectionStart, selectionEnd).coerceAtLeast(0)
         if (a == b) {
             // An empty pair just opened here: close it again.
             if (a >= m.length && a + m.length <= s.length && s.substring(a - m.length, a) == m && s.substring(a, a + m.length) == m) {
@@ -253,7 +254,8 @@ class InlineTextEditor(ctx: Context, private val page: NotebookView) : EditText(
     fun setBlock(kind: String) {
         val s = text ?: return
         if (!hasFocus()) focusAndShowKeyboard(atEnd = selectionStart < 0)
-        val a = selectionStart.coerceAtLeast(0); val b = selectionEnd.coerceAtLeast(0)
+        // Ordered: a selection made backwards (Shift+Left) has its start after its end.
+        val a = minOf(selectionStart, selectionEnd).coerceAtLeast(0); val b = maxOf(selectionStart, selectionEnd).coerceAtLeast(0)
         val starts = ArrayList<Int>()
         var ls = lineStart(s, a)
         while (true) {
