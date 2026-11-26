@@ -3595,6 +3595,8 @@ impl App {
                 (true, _, Key::Character("v")) if !self.tablet.clip_is_empty() => Some(T::Paste),
                 (false, _, Key::Named(Named::Delete | Named::Backspace)) if self.tablet.selection.is_some() => Some(T::DeleteSelection),
                 (false, _, Key::Named(Named::Escape)) if self.tablet.selection.is_some() => Some(T::ClearSelection),
+                // 1–6: the favourite pens.
+                (false, false, Key::Character(c @ ("1" | "2" | "3" | "4" | "5" | "6"))) if c.parse::<usize>().is_ok_and(|n| n <= self.tablet.favourites.len()) => c.parse::<usize>().ok().map(|n| T::Favourite(n - 1)),
                 _ => None,
             };
             if let Some(t) = t {

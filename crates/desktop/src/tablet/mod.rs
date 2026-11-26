@@ -66,6 +66,12 @@ pub enum Msg {
     Color(usize),
     Width(usize),
     Palette(usize),
+    /// Picks a favourite pen (its index); keys 1–6 do too.
+    Favourite(usize),
+    /// Keeps the pen as it is now as a favourite.
+    AddFavourite,
+    /// Lets go of a favourite (right click or the pen's side button on it).
+    RemoveFavourite(usize),
     EraserMode(EraserMode),
     Undo,
     Redo,
@@ -206,7 +212,33 @@ pub struct Selection {
 }
 
 /// n0te Tablet's state (in [`App`]; unused in n0te Laptop).
+/// A favourite pen: marker or pen, its type, palette, colour and width slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Favourite {
+    pub marker: bool,
+    pub pen: PenType,
+    pub palette: usize,
+    pub color: usize,
+    pub width: usize,
+}
+
+/// At most this many favourites.
+pub const MAX_FAVOURITES: usize = 6;
+
+impl Favourite {
+    fn key(&self) -> String {
+        format!("{}|{}|{}|{}|{}", if self.marker { "M" } else { "P" }, self.pen.key(), self.palette, self.color, self.width)
+    }
+    fn from_key(s: &str) -> Option<Favourite> {
+        let f: Vec<&str> = s.split('|').collect();
+        let [m, pen, palette, color, width] = f.as_slice() else { return None };
+        Some(Favourite { marker: *m == "M", pen: PenType::from_key(pen)?, palette: palette.parse::<usize>().ok()? % pens::PALETTES.len(), color: color.parse::<usize>().ok()? % 6, width: width.parse::<usize>().ok()? % 4 })
+    }
+}
+
 pub struct Tablet {
+    /// Favourite pens, picked with one tap (or keys 1–6).
+    pub favourites: Vec<Favourite>,
     pub tool: Tool,
     pub pen: PenType,
     pub palette: usize,
@@ -276,6 +308,7 @@ impl Default for Tablet {
             pen_menu: false,
             finger_draws: false,
             write_flow: false,
+            favourites: Vec::new(),
             flow: None,
             hover: None,
             selection: None,
@@ -314,6 +347,11 @@ impl Tablet {
         if let Some(k) = self.sheets.get_mut(&(nb.to_string(), sheet.to_string())) {
             k.1 = stamp;
         }
+    }
+
+    /// The pen as it is now as a favourite (None for the other tools).
+    pub fn current_favourite(&self) -> Option<Favourite> {
+        matches!(self.tool, Tool::Pen | Tool::Marker).then_some(Favourite { marker: self.tool == Tool::Marker, pen: self.pen, palette: self.palette, color: self.color, width: self.width })
     }
 
     /// Where the tool choice is kept: tablet.conf next to the app's settings.
@@ -358,6 +396,7 @@ impl Tablet {
                 "pencil_opacity" => t.pencil_opacity = num(t.pencil_opacity).clamp(0.15, 1.0),
                 "finger_draws" => t.finger_draws = v == "1",
                 "write_flow" => t.write_flow = v == "1",
+                "favourites" => t.favourites = v.split(';').filter_map(Favourite::from_key).take(MAX_FAVOURITES).collect(),
                 _ => {}
             }
         }
@@ -377,7 +416,7 @@ impl Tablet {
         let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
         let f = &self.fountain;
         let text = format!(
-            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\nwrite_flow={}\n",
+            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\nwrite_flow={}\nfavourites={}\n",
             self.pen.key(),
             self.palette,
             self.color,
@@ -391,6 +430,7 @@ impl Tablet {
             self.pencil_opacity,
             u8::from(self.finger_draws),
             u8::from(self.write_flow),
+            self.favourites.iter().map(Favourite::key).collect::<Vec<_>>().join(";"),
         );
         let path = Self::conf_path();
         if let Some(dir) = path.parent() {
@@ -454,7 +494,7 @@ impl App {
 
     /// Toolbar actions.
     pub(crate) fn on_tablet(&mut self, m: Msg) -> Task<Message> {
-        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_) | Msg::WriteFlow(_));
+        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_) | Msg::WriteFlow(_) | Msg::Favourite(_) | Msg::AddFavourite | Msg::RemoveFavourite(_));
         if let Msg::Tool(t) = m
             && t != Tool::Space
             && let Some(sp) = self.tablet.space.take()
@@ -490,6 +530,30 @@ impl App {
                 if let Some(sel) = t.selection.clone() {
                     let color = t.ink();
                     self.edit_tracked(&sel.notebook, &sel.sheet, |s| s.recolor(&sel.ids, color));
+                }
+            }
+            Msg::Favourite(i) => {
+                if let Some(f) = t.favourites.get(i).copied() {
+                    t.tool = if f.marker { Tool::Marker } else { Tool::Pen };
+                    t.pen = f.pen;
+                    t.palette = f.palette;
+                    t.color = f.color;
+                    t.width = f.width;
+                    t.selection = None;
+                }
+            }
+            Msg::AddFavourite => {
+                if let Some(f) = t.current_favourite()
+                    && !t.favourites.contains(&f)
+                    && t.favourites.len() < MAX_FAVOURITES
+                {
+                    t.favourites.push(f);
+                    self.say(crate::i18n::tr("Als Favorit gemerkt · Rechtsklick entfernt").to_string());
+                }
+            }
+            Msg::RemoveFavourite(i) => {
+                if i < t.favourites.len() {
+                    t.favourites.remove(i);
                 }
             }
             Msg::Width(i) => {

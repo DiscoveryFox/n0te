@@ -214,6 +214,9 @@ class NotebookView(context: Context) : View(context) {
     var penOnly = true
     var colorIdx = 0
     var widthIdx = 1
+    /** A favourite's colour or width that no palette / width slot holds (else null: the slots count). */
+    var freeInk: Int? = null
+    var freeWidth: Float? = null
 
     var scale = 1f; private set
     var tx = 0f; private set
@@ -471,13 +474,14 @@ class NotebookView(context: Context) : View(context) {
 
     val brush: FfiBrush
         get() {
-            val base = Tools.inks[colorIdx]
+            val base = freeInk ?: Tools.inks[colorIdx]
+            val w = freeWidth ?: Tools.widths[widthIdx]
             return if (tool == Tool.MARKER) {
-                FfiBrush(Tools.widths[widthIdx] * 5f, 0f, ((base and 0x00FFFFFF) or (Ui.HIGHLIGHT_ALPHA shl 24)).toUInt(), 2u)
+                FfiBrush(w * 5f, 0f, ((base and 0x00FFFFFF) or (Ui.HIGHLIGHT_ALPHA shl 24)).toUInt(), 2u)
             } else {
                 val pen = Tools.pen
                 val thin = if (pen == PenType.FOUNTAIN) Fountain.thinning() else pen.thinning
-                FfiBrush(Tools.widths[widthIdx] * pen.widthMul, thin, ((base and 0x00FFFFFF) or (pen.inkAlpha() shl 24)).toUInt(), pen.kind)
+                FfiBrush(w * pen.widthMul, thin, ((base and 0x00FFFFFF) or (pen.inkAlpha() shl 24)).toUInt(), pen.kind)
             }
         }
 
@@ -2668,7 +2672,7 @@ class NotebookView(context: Context) : View(context) {
             laserFill.alpha = 40; c.drawCircle(hoverX, hoverY, LASER_DOT * density * 1.8f, laserFill)
             laserFill.alpha = 200; c.drawCircle(hoverX, hoverY, LASER_DOT * density, laserFill)
         } else if (tool == Tool.PEN || tool == Tool.MARKER) {
-            cursorPaint.color = Tools.inks[colorIdx]
+            cursorPaint.color = freeInk ?: Tools.inks[colorIdx]
             val k = if (loupeOpen && loupeStrip().contains(hoverX, hoverY)) loupeScale() else scale
             c.drawCircle(hoverX, hoverY, max(2f, brush.width * k / 2f), cursorPaint)
         }

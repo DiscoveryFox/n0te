@@ -192,6 +192,7 @@ class SettingsActivity : ComponentActivity() {
                             Toggle("tool_ruler", "Lineal", null, Settings.toolRuler)
                             Toggle("tool_loupe", "Schreiblupe", "Groß schreiben, klein auf der Seite: ein Schreibfeld zeigt einen Rahmen der Seite vergrößert", Settings.toolLoupe)
                             Toggle("tool_laser", "Laserpointer", "Leuchtende Spur, verschwindet von selbst (wird nicht gespeichert)", Settings.toolLaser)
+                            Toggle("tool_favourites", "Favoriten-Stifte", "Bis zu sechs Stifte mit Farbe und Breite, mit einem Tipp gewählt (+ merkt den aktuellen)", Settings.toolFavourites)
                             if (Settings.toolLaser) Column(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text("Laserspur", color = Ui.Chalk, fontSize = 15.sp)
                                 androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

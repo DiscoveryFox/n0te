@@ -101,6 +101,8 @@ object Settings {
     /** Last lock mode used: "zoom" (zoom fixed, vertical only) or "page" (zoom free, stays on the page). */
     val lockMode get() = p?.getString("lock_mode", "zoom") ?: "zoom"
     val toolLaser get() = b("tool_laser", true)
+    /** Favourite pens in the tool bar. */
+    val toolFavourites get() = b("tool_favourites", true)
     // Pencil look (see Pencil): grain 0 = smooth … 1 = rough; softness 0 = even … 1 = soft edge,
     // dark core under pressure; opacity of new pencil strokes.
     val pencilGrain get() = f("pencil_grain", 0.7f)

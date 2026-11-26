@@ -738,6 +738,7 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("Textseiten und Textfelder.", "Text pages and text boxes."),
     ("Formeln zentrieren ($$…$$ und Formelblöcke)", "Center formulas ($$…$$ and formula blocks)"),
     ("PDF", "PDF"),
+    ("Als Favorit gemerkt · Rechtsklick entfernt", "Kept as a favourite · right click removes it"),
     ("Beim Importieren von Folien und Skripten.", "When importing slides and lecture notes."),
     ("Alt+← springt zurück", "Alt+← goes back"),
     ("Öffne {}", "Opening {}"),

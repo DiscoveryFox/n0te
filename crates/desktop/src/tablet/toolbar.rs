@@ -3,11 +3,11 @@
 //! magnifier, a board on its own, undo / redo; with a selection, its actions. Big enough for a
 //! finger or the pen.
 
-use iced::widget::{Space, button, column, container, row, text};
+use iced::widget::{Space, button, column, container, mouse_area, row, text};
 use iced::{Alignment, Border, Color, Element, Length, Theme};
 use n0te_core::pens::{self, PenType};
 
-use super::{EraserMode, Msg, Tablet, Tool};
+use super::{EraserMode, MAX_FAVOURITES, Msg, Tablet, Tool};
 use crate::app::Message;
 use crate::pages::argb;
 use crate::i18n::{tr, trf};
@@ -88,6 +88,23 @@ fn msg(m: Msg) -> Message {
 }
 
 /// A round colour swatch; ringed when chosen.
+/// A favourite pen: its colour, about its width (a marker as a bar), ringed when it is the pen.
+fn favourite_button<'a>(c: u32, width: f32, marker: bool, on: bool, i: usize) -> Element<'a, Message> {
+    let fill = if marker { Color { a: 0.55, ..argb(c | 0xFF00_0000) } } else { argb(c | 0xFF00_0000) };
+    let d = (3.0 + width * 2.2).clamp(5.0, 20.0);
+    let (w, h, r) = if marker { (18.0, d.min(10.0), 2.0) } else { (d, d, d / 2.0) };
+    let mark = container(Space::new().width(w).height(h)).style(move |_: &Theme| container::Style { background: Some(fill.into()), border: Border { radius: r.into(), ..Default::default() }, ..Default::default() });
+    let ring = theme::p().accent;
+    button(container(mark).width(28).height(28).center_x(28).center_y(28).style(move |_: &Theme| container::Style {
+        border: Border { radius: 14.0.into(), width: if on { 2.0 } else { 1.0 }, color: if on { ring } else { theme::alpha(Color::WHITE, 0.25) } },
+        ..Default::default()
+    }))
+    .padding(3)
+    .on_press(msg(Msg::Favourite(i)))
+    .style(theme::ghost)
+    .into()
+}
+
 fn swatch<'a>(c: u32, on: bool, i: usize) -> Element<'a, Message> {
     let fill = argb(c | 0xFF00_0000);
     let dot = container(Space::new().width(22).height(22)).style(move |_: &Theme| container::Style {
@@ -158,7 +175,20 @@ pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
         }
     }
     let widths_w = (t.widths.len() as f32 * 38.0).max(label_w(tr("Ganze Striche"), big, 24.0) + label_w(tr("Fläche"), big, 24.0));
-    let paint_w = 14.0 + pal.len() as f32 * 36.0 + 10.0 + widths_w;
+    // Favourite pens: a click picks one, a right click (or the pen's side button) lets it go, "+"
+    // keeps the pen as it is now.
+    let mut favs = row![].spacing(2).align_y(Alignment::Center);
+    let now = t.current_favourite();
+    for (i, f) in t.favourites.iter().enumerate() {
+        let c = pens::PALETTES[f.palette % pens::PALETTES.len()][f.color % 6];
+        let w = t.widths[f.width % 4];
+        favs = favs.push(mouse_area(favourite_button(c, w, f.marker, now == Some(*f), i)).on_right_press(msg(Msg::RemoveFavourite(i))));
+    }
+    if now.is_some_and(|f| !t.favourites.contains(&f)) && t.favourites.len() < MAX_FAVOURITES {
+        favs = favs.push(button(text("+").size(big)).padding([2, 8]).on_press(msg(Msg::AddFavourite)).style(theme::ghost));
+    }
+    let favs_w = (t.favourites.len() + 1) as f32 * 36.0 + 10.0;
+    let paint_w = 14.0 + pal.len() as f32 * 36.0 + 10.0 + widths_w + favs_w;
     // Pasting what was copied (a selection's own actions float over the page).
     let small = theme::label_size() - 1.5;
     let pad = theme::pad().left + theme::pad().right;
@@ -182,11 +212,11 @@ pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
     // The widest the bar gets: the eraser's buttons, "Einfügen", the board's.
     let one_row = tools_w + paint_w + actions_w + extras_w + 8.0 + 2.0 * 40.0 + 20.0;
     let bar: Element<'_, Message> = if extra.width <= 0.0 || one_row <= extra.width {
-        row![tools, Space::new().width(14), colors, Space::new().width(10), widths, Space::new().width(Length::Fill), actions, end].align_y(Alignment::Center).into()
+        row![tools, Space::new().width(14), colors, Space::new().width(10), widths, Space::new().width(10), favs, Space::new().width(Length::Fill), actions, end].align_y(Alignment::Center).into()
     } else {
         column![
             row![tools, Space::new().width(Length::Fill), end].align_y(Alignment::Center),
-            row![colors, Space::new().width(10), widths, Space::new().width(Length::Fill), actions].align_y(Alignment::Center),
+            row![colors, Space::new().width(10), widths, Space::new().width(10), favs, Space::new().width(Length::Fill), actions].align_y(Alignment::Center),
         ]
         .spacing(2)
         .into()

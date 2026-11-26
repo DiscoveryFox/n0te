@@ -110,6 +110,7 @@ object Tools {
         palette = p.getInt("palette", 0).coerceIn(0, palettes.size - 1)
         recent.clear()
         p.getString("recent", "")!!.split(',').mapNotNullTo(recent) { it.toLongOrNull()?.toInt() }
+        loadFavourites()
     }
 
     fun setInk(i: Int, color: Int) {
@@ -149,6 +150,45 @@ object Tools {
     }
     fun choosePalette(i: Int) { palette = ((i % palettes.size) + palettes.size) % palettes.size; prefs?.edit()?.putInt("palette", palette)?.apply() }
     fun resetPalette() { Palettes.defaults[palette].copyInto(palettes[palette]); prefs?.edit()?.apply { for (i in 0 until 6) remove("p${palette}ink$i") }?.apply() }
+
+    /**
+     * A favourite pen: the tool (pen or marker), pen type, colour and width, picked with one tap.
+     * Kept per device ("fav": entries "P|FOUNTAIN|ARGB|width" separated by ';').
+     */
+    data class Favourite(val marker: Boolean, val pen: PenType, val color: Int, val width: Float) {
+        fun encode() = "${if (marker) "M" else "P"}|${pen.name}|${color.toLong() and 0xFFFFFFFFL}|$width"
+        companion object {
+            fun decode(s: String): Favourite? {
+                val f = s.split('|')
+                if (f.size != 4) return null
+                val pen = runCatching { PenType.valueOf(f[1]) }.getOrNull() ?: return null
+                val color = f[2].toLongOrNull()?.toInt() ?: return null
+                val width = f[3].toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(MIN_W, MAX_W) ?: return null
+                return Favourite(f[0] == "M", pen, color or 0xFF000000.toInt(), width)
+            }
+        }
+    }
+
+    const val MAX_FAVOURITES = 6
+    val favourites = ArrayList<Favourite>()
+    private fun loadFavourites() {
+        favourites.clear()
+        prefs?.getString("fav", "")?.split(';')?.mapNotNullTo(favourites) { Favourite.decode(it) }
+        while (favourites.size > MAX_FAVOURITES) favourites.removeAt(favourites.size - 1)
+    }
+    private fun saveFavourites() { prefs?.edit()?.putString("fav", favourites.joinToString(";") { it.encode() })?.apply() }
+    /** Adds [f] (unless it is there already); false when it is there or the row is full. */
+    fun addFavourite(f: Favourite): Boolean {
+        if (favourites.contains(f) || favourites.size >= MAX_FAVOURITES) return false
+        favourites += f; saveFavourites(); return true
+    }
+    fun removeFavourite(f: Favourite) { favourites.remove(f); saveFavourites() }
+    /** The palette and slot that hold [color], if any (a favourite picks it there). */
+    fun findInk(color: Int): Pair<Int, Int>? {
+        val c = color or 0xFF000000.toInt()
+        for ((pi, pal) in palettes.withIndex()) { val i = pal.indexOf(c); if (i >= 0) return pi to i }
+        return null
+    }
 
     const val MIN_W = 0.4f
     const val MAX_W = 14f

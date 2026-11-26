@@ -136,6 +136,9 @@ class NotebookActivity : ComponentActivity() {
     private var colorIdx by mutableIntStateOf(Tools.savedColor)
 
     private var widthIdx by mutableIntStateOf(Tools.savedWidth)
+    /** A favourite's colour / width that no slot holds (cleared by picking a slot). */
+    private var freeInk by mutableStateOf<Int?>(null)
+    private var freeWidth by mutableStateOf<Float?>(null)
 
 
     private var nbToolsSaved = ""
@@ -435,6 +438,8 @@ class NotebookActivity : ComponentActivity() {
             p.view.tool = tool
             p.view.colorIdx = colorIdx
             p.view.widthIdx = widthIdx
+            p.view.freeInk = freeInk
+            p.view.freeWidth = freeWidth
             p.view.penOnly = penOnly
             p.view.rulerOn = rulerOn
         }
@@ -2782,11 +2787,12 @@ class NotebookActivity : ComponentActivity() {
             Row(Modifier.paletteSwipe().height(38.dp), verticalAlignment = Alignment.CenterVertically) {
                 Tools.inks.forEachIndexed { i, c ->
                     Box(Modifier.anchor("color$i").size(30.dp).clip(CircleShape)
-                        .toolTap(onLongClick = { colorIdx = i; applyTools(); menu = "color:$i" }) {
-                            colorIdx = i; if (tool == NotebookView.Tool.ERASER || tool == NotebookView.Tool.LASSO) tool = NotebookView.Tool.PEN; applyTools()
+                        .toolTap(onLongClick = { colorIdx = i; freeInk = null; applyTools(); menu = "color:$i" }) {
+                            colorIdx = i; freeInk = null; if (tool == NotebookView.Tool.ERASER || tool == NotebookView.Tool.LASSO) tool = NotebookView.Tool.PEN; applyTools()
                         }, contentAlignment = Alignment.Center) {
-                        Box(Modifier.size(if (colorIdx == i) 24.dp else 18.dp).clip(CircleShape).background(Color(c))
-                            .border(2.dp, if (colorIdx == i) Ui.Chalk else Color.Transparent, CircleShape))
+                        val on = colorIdx == i && freeInk == null
+                        Box(Modifier.size(if (on) 24.dp else 18.dp).clip(CircleShape).background(Color(c))
+                            .border(2.dp, if (on) Ui.Chalk else Color.Transparent, CircleShape))
                     }
                 }
             }
@@ -2795,13 +2801,50 @@ class NotebookActivity : ComponentActivity() {
             // Widths: tap picks, hold opens the slider.
             Tools.widths.forEachIndexed { i, w ->
                 // Selected size: white disc with a black dot (clear at a glance); others: grey dots.
-                val on = widthIdx == i
+                val on = widthIdx == i && freeWidth == null
                 Box(Modifier.anchor("width$i").size(32.dp).clip(CircleShape).background(if (on) Ui.Chalk else Color.Transparent)
                     .border(1.dp, if (on) Ui.Chalk else Color.Transparent, CircleShape)
-                    .toolTap(onLongClick = { widthIdx = i; applyTools(); menu = "width:$i" }) { widthIdx = i; applyTools() },
+                    .toolTap(onLongClick = { widthIdx = i; freeWidth = null; applyTools(); menu = "width:$i" }) { widthIdx = i; freeWidth = null; applyTools() },
                     contentAlignment = Alignment.Center) {
                     Box(Modifier.size((2.5f + w * 1.9f).coerceAtMost(22f).dp).clip(CircleShape).background(if (on) Ui.Black else Ui.Muted))
                 }
+            }
+            if (Settings.toolFavourites) { Divider(); Favourites() }
+        }
+
+        /** The pen as it is now, as a favourite. */
+        fun currentFavourite() = Tools.Favourite(tool == NotebookView.Tool.MARKER, Tools.pen, freeInk ?: Tools.inks[colorIdx], freeWidth ?: Tools.widths[widthIdx])
+
+        /** Picks a favourite: its tool, pen type, colour (its palette slot when one holds it) and width. */
+        fun useFavourite(f: Tools.Favourite) {
+            tool = if (f.marker) NotebookView.Tool.MARKER else NotebookView.Tool.PEN
+            Tools.choosePen(f.pen)
+            val slot = Tools.findInk(f.color)
+            if (slot != null) { if (slot.first != Tools.palette) Tools.choosePalette(slot.first); colorIdx = slot.second; freeInk = null } else freeInk = f.color
+            val wi = Tools.widths.indexOfFirst { kotlin.math.abs(it - f.width) < 0.01f }
+            if (wi >= 0) { widthIdx = wi; freeWidth = null } else freeWidth = f.width
+            applyTools(); tick++
+        }
+
+        /** Favourite pens: tap picks one, hold removes it, "+" keeps the pen as it is now. */
+        @Composable
+        fun Favourites() {
+            @Suppress("UNUSED_VARIABLE") val t = tick
+            val now = if (tool == NotebookView.Tool.PEN || tool == NotebookView.Tool.MARKER) currentFavourite() else null
+            Tools.favourites.toList().forEach { f ->
+                val on = f == now
+                Box(Modifier.size(32.dp).clip(CircleShape).background(if (on) Ui.Chalk.copy(alpha = 0.18f) else Color.Transparent)
+                    .border(1.dp, if (on) Ui.Chalk else Ui.Muted.copy(alpha = 0.5f), CircleShape)
+                    .toolTap(onLongClick = { Tools.removeFavourite(f); tick++; flash("Favorit entfernt") }) { useFavourite(f) },
+                    contentAlignment = Alignment.Center) {
+                    // The stroke as it writes: its colour, about its width; a marker as a bar.
+                    val d = (3f + f.width * 2.2f).coerceIn(5f, 20f).dp
+                    if (f.marker) Box(Modifier.size(width = 18.dp, height = d.coerceAtMost(10.dp)).clip(androidx.compose.foundation.shape.RoundedCornerShape(2.dp)).background(Color(f.color).copy(alpha = 0.55f)))
+                    else Box(Modifier.size(d).clip(CircleShape).background(Color(f.color)))
+                }
+            }
+            if (now != null && Tools.favourites.size < Tools.MAX_FAVOURITES && now !in Tools.favourites) {
+                IconBtn(Glyph.PLUS) { if (Tools.addFavourite(now)) { tick++; flash("Als Favorit gemerkt · halten entfernt") } }
             }
         }
 

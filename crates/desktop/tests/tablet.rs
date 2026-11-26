@@ -656,3 +656,28 @@ fn mitwandern_moves_the_page_on_after_a_lift_in_the_band() {
     assert!(next.y > at_edge.y && next.x < at_edge.x, "next line: {:?} → {:?}", (at_edge.x, at_edge.y), (next.x, next.y));
     assert!((next.x - (grid.rect.x0 - 12.0 / next.zoom)).abs() < 1.0, "back to the left edge");
 }
+
+#[test]
+fn favourite_pens_are_kept_picked_and_let_go() {
+    use n0te_desktop::tablet::{Msg, Tool};
+    let mut h = opened("favs");
+    h.message(Message::Tablet(Msg::Color(3)));
+    h.message(Message::Tablet(Msg::Width(2)));
+    h.message(Message::Tablet(Msg::AddFavourite));
+    h.message(Message::Tablet(Msg::Tool(Tool::Marker)));
+    h.message(Message::Tablet(Msg::Color(1)));
+    h.message(Message::Tablet(Msg::AddFavourite));
+    h.message(Message::Tablet(Msg::AddFavourite)); // the same again: still two
+    assert_eq!(h.app.tablet.favourites.len(), 2);
+    // Picking the first gives the pen back as it was kept.
+    h.message(Message::Tablet(Msg::Tool(Tool::Eraser)));
+    h.message(Message::Tablet(Msg::Favourite(0)));
+    assert_eq!((h.app.tablet.tool, h.app.tablet.color, h.app.tablet.width), (Tool::Pen, 3, 2));
+    // Key 2: the marker.
+    let [press, _] = h.key_event(iced::keyboard::Key::Character("2".into()), Some("2"));
+    let iced::Event::Keyboard(press) = press else { unreachable!() };
+    h.message(Message::Key(press));
+    assert_eq!((h.app.tablet.tool, h.app.tablet.color), (Tool::Marker, 1));
+    h.message(Message::Tablet(Msg::RemoveFavourite(0)));
+    assert_eq!(h.app.tablet.favourites.len(), 1);
+}
