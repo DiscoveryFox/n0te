@@ -319,6 +319,33 @@ impl Expr {
         })
     }
 
+    /// Its number of nodes, if it has at most `max` and nests at most [`MAX_DEPTH`] deep
+    /// (walked without recursion, so it works on any expression).
+    pub(crate) fn size_within(&self, max: usize) -> Option<usize> {
+        let mut stack: Vec<(&Expr, usize)> = vec![(self, 1)];
+        let mut nodes = 0;
+        while let Some((e, d)) = stack.pop() {
+            nodes += 1;
+            if nodes > max || d > MAX_DEPTH {
+                return None;
+            }
+            match e {
+                Expr::Num(_) | Expr::X | Expr::Y => {}
+                Expr::If(items, _, a, b) => {
+                    stack.extend(items.iter().map(|i| (i, d + 1)));
+                    stack.push((a, d + 1));
+                    stack.push((b, d + 1));
+                }
+                Expr::Neg(a) | Expr::Call(_, a) | Expr::Ref(_, _, a) => stack.push((a, d + 1)),
+                Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b) | Expr::Div(a, b) | Expr::Pow(a, b) => {
+                    stack.push((a, d + 1));
+                    stack.push((b, d + 1));
+                }
+            }
+        }
+        Some(nodes)
+    }
+
     /// Which functions it refers to.
     pub fn refs(&self, out: &mut Vec<usize>) {
         match self {
@@ -413,12 +440,45 @@ pub fn parse_line(src: &str, fns: usize) -> Result<Curve, String> {
     Ok(Curve::Of(parse_expr(src, fns)?))
 }
 
+/// The most characters a line of input may have. Far more than anyone types; it keeps
+/// whatever reads a line (and works on what it says) from taking long on pasted junk.
+pub const MAX_INPUT: usize = 4000;
+/// The most tokens a line may have: an expression tree is at most this deep, so evaluating,
+/// deriving, printing and dropping it recursively stays well within a thread's stack.
+pub(crate) const MAX_TOKENS: usize = 1000;
+/// How deeply brackets, signs, powers and functions may nest while reading (each level is a
+/// few recursive calls of the parser).
+pub(crate) const MAX_NESTING: u32 = 100;
+/// The highest derivative written with primes (f'''…) or asked for (Ableitung(f, n)). Each one
+/// can double the size of the expression.
+pub(crate) const MAX_DERIVATIVE: usize = 12;
+/// The most nodes the functions made for one object may have, and how deeply they may nest.
+/// Functions built from functions (g(x) = f(f(x)), h(x) = g(g(x)) …) and derivatives grow
+/// fast; past this they are refused instead of filling memory and the stack, or taking
+/// seconds to draw (a curve evaluates its function thousands of times).
+pub(crate) const MAX_NODES: usize = 30_000;
+pub(crate) const MAX_DEPTH: usize = 1_200;
+
+pub(crate) fn too_long() -> String {
+    "Die Eingabe ist zu lang".into()
+}
+
+pub(crate) fn too_deep() -> String {
+    "Zu tief verschachtelt".into()
+}
+
 fn parse_expr(src: &str, fns: usize) -> Result<Expr, String> {
+    if src.len() > MAX_INPUT {
+        return Err(too_long());
+    }
     let toks = lex(src, fns)?;
     if toks.is_empty() {
         return Err("Leer".into());
     }
-    let mut p = Parser { toks, i: 0, abs: 0 };
+    if toks.len() > MAX_TOKENS {
+        return Err(too_long());
+    }
+    let mut p = Parser { toks, i: 0, abs: 0, depth: 0 };
     let e = p.expr()?;
     if p.i < p.toks.len() {
         return Err(match p.toks[p.i] {
@@ -582,6 +642,8 @@ struct Parser {
     i: usize,
     /// Open absolute-value bars (a bar after a value closes one when there is one open).
     abs: usize,
+    /// Nesting so far (see [`MAX_NESTING`]).
+    depth: u32,
 }
 
 fn func_of(name: &str) -> Option<Func> {
@@ -657,7 +719,20 @@ impl Parser {
         }
     }
 
+    /// Every way the parser calls itself again goes through `unary` or `atom`: they count the
+    /// nesting, so hostile input (thousands of brackets or signs) is an error, not a stack
+    /// overflow.
     fn unary(&mut self) -> Result<Expr, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(too_deep());
+        }
+        let r = self.unary_in();
+        self.depth -= 1;
+        r
+    }
+
+    fn unary_in(&mut self) -> Result<Expr, String> {
         match self.peek() {
             Some(Tok::Minus) => {
                 self.i += 1;
@@ -692,6 +767,16 @@ impl Parser {
     }
 
     fn atom(&mut self) -> Result<Expr, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(too_deep());
+        }
+        let r = self.atom_in();
+        self.depth -= 1;
+        r
+    }
+
+    fn atom_in(&mut self) -> Result<Expr, String> {
         let Some(t) = self.peek().cloned() else { return Err("Da fehlt noch etwas am Ende".into()) };
         self.i += 1;
         match t {
@@ -701,11 +786,15 @@ impl Parser {
             Tok::Name("e") => Ok(Expr::Num(std::f64::consts::E)),
             Tok::Fn(k) => {
                 // f(…), f'(…), f''(…); a bare f is f(x).
-                let mut n = 0u8;
+                let mut n = 0usize;
                 while self.peek() == Some(&Tok::Prime) {
                     self.i += 1;
                     n += 1;
                 }
+                if n > MAX_DERIVATIVE {
+                    return Err(format!("Höchstens die {MAX_DERIVATIVE}. Ableitung"));
+                }
+                let n = n as u8;
                 if self.peek() == Some(&Tok::Open) {
                     self.i += 1;
                     let a = self.bracket()?;
@@ -791,9 +880,12 @@ pub fn handwritten_input(text: &str) -> String {
 /// `(1)/(2)x^(2)`); `f(x) =` / `y =` in front are kept for [`parse_line`] to drop.
 pub fn latex_to_expr(latex: &str) -> Result<String, String> {
     let s = latex.trim().trim_matches('$').trim();
+    if s.len() > MAX_INPUT {
+        return Err(too_long());
+    }
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
-    let out = latex_group(&chars, &mut i, None)?;
+    let out = latex_group(&chars, &mut i, None, 0)?;
     let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
     if out.trim().is_empty() {
         return Err("Keine Formel erkannt".into());
@@ -801,8 +893,11 @@ pub fn latex_to_expr(latex: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Reads LaTeX from `i` up to `end` (a closing brace) or the end.
-fn latex_group(c: &[char], i: &mut usize, end: Option<char>) -> Result<String, String> {
+/// Reads LaTeX from `i` up to `end` (a closing brace) or the end; `depth`: groups around it.
+fn latex_group(c: &[char], i: &mut usize, end: Option<char>, depth: u32) -> Result<String, String> {
+    if depth > MAX_NESTING {
+        return Err(too_deep());
+    }
     let mut out = String::new();
     while *i < c.len() {
         let ch = c[*i];
@@ -813,7 +908,7 @@ fn latex_group(c: &[char], i: &mut usize, end: Option<char>) -> Result<String, S
         match ch {
             '{' => {
                 *i += 1;
-                let g = latex_group(c, i, Some('}'))?;
+                let g = latex_group(c, i, Some('}'), depth + 1)?;
                 out.push('(');
                 out.push_str(&g);
                 out.push(')');
@@ -841,7 +936,7 @@ fn latex_group(c: &[char], i: &mut usize, end: Option<char>) -> Result<String, S
                     }
                     if *i < c.len() && c[*i] == '{' {
                         *i += 1;
-                        latex_group(c, i, Some('}'))
+                        latex_group(c, i, Some('}'), depth + 1)
                     } else if *i < c.len() {
                         let ch = c[*i];
                         *i += 1;
@@ -860,7 +955,7 @@ fn latex_group(c: &[char], i: &mut usize, end: Option<char>) -> Result<String, S
                         let mut root = None;
                         if *i < c.len() && c[*i] == '[' {
                             *i += 1;
-                            root = Some(latex_group(c, i, Some(']'))?);
+                            root = Some(latex_group(c, i, Some(']'), depth + 1)?);
                         }
                         let a = arg(i)?;
                         match root {
@@ -888,7 +983,7 @@ fn latex_group(c: &[char], i: &mut usize, end: Option<char>) -> Result<String, S
                 *i += 1;
                 if *i < c.len() && c[*i] == '{' {
                     *i += 1;
-                    latex_group(c, i, Some('}'))?;
+                    latex_group(c, i, Some('}'), depth + 1)?;
                 } else {
                     *i += 1;
                 }
@@ -898,7 +993,7 @@ fn latex_group(c: &[char], i: &mut usize, end: Option<char>) -> Result<String, S
                 out.push('^');
                 if *i < c.len() && c[*i] == '{' {
                     *i += 1;
-                    let g = latex_group(c, i, Some('}'))?;
+                    let g = latex_group(c, i, Some('}'), depth + 1)?;
                     out.push_str(&format!("({g})"));
                 } else if *i < c.len() {
                     out.push(c[*i]);

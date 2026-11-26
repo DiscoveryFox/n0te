@@ -161,9 +161,15 @@ impl Plot {
     }
 
     /// Whether the ranges and the box can be drawn.
+    /// Also a box that is a number and lies within reach: the box comes from another device or
+    /// a drag as it is, and drawing walks along it in small steps (an infinite or far-off box
+    /// never got to the end).
     pub fn is_valid(&self) -> bool {
         let fin = |v: f64| v.is_finite();
-        fin(self.x_min) && fin(self.x_max) && fin(self.y_min) && fin(self.y_max) && self.x_max > self.x_min && self.y_max > self.y_min && self.w > 1.0 && self.h > 1.0
+        let near = |v: f32| v.abs() <= 1e6;
+        let size = |v: f32| v > 1.0 && v <= crate::format::MAX_PT;
+        fin(self.x_min) && fin(self.x_max) && fin(self.y_min) && fin(self.y_max) && fin(self.x_max - self.x_min) && fin(self.y_max - self.y_min)
+            && self.x_max > self.x_min && self.y_max > self.y_min && size(self.w) && size(self.h) && near(self.x) && near(self.y)
     }
 
     pub fn view(&self) -> ViewRange {
@@ -709,6 +715,11 @@ impl Plot {
     pub fn set_slider(&self, id: &str, value: f64) -> Option<Plot> {
         let i = self.objs.iter().position(|o| o.id == id)?;
         let s = self.objs[i].style.slider?;
+        // A range from another device or an old version can be anything (f64::clamp panics on
+        // NaN or reversed bounds).
+        if !(s.min.is_finite() && s.max.is_finite() && value.is_finite()) {
+            return None;
+        }
         let v = value.clamp(s.min.min(s.max), s.max.max(s.min));
         let v = if s.step > 0.0 { s.min + ((v - s.min) / s.step).round() * s.step } else { v };
         let mut p = self.clone();
@@ -835,6 +846,9 @@ impl Plot {
             Axis::X => (self.x_min, self.x_max),
             Axis::Y => (self.y_min, self.y_max),
         };
+        if !self.is_valid() || !from.is_finite() || !to.is_finite() {
+            return self.clone();
+        }
         let at = 0f64.clamp(lo, hi);
         let pa = match axis {
             Axis::X => self.to_page(at, 0.0).0,

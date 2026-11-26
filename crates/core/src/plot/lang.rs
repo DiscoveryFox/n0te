@@ -7,6 +7,8 @@
 
 use std::collections::HashSet;
 
+use super::expr::{MAX_DERIVATIVE, MAX_INPUT, MAX_NESTING, MAX_TOKENS, too_deep, too_long};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Op {
     Add,
@@ -152,6 +154,9 @@ pub fn parse_input(src: &str, known: &HashSet<String>) -> Result<Input, String> 
     let src = src.trim();
     if src.is_empty() {
         return Err("Leer".into());
+    }
+    if src.len() > MAX_INPUT {
+        return Err(too_long());
     }
     // name: …  (a label in front; not inside brackets).
     let (label, rest) = split_label(src);
@@ -341,11 +346,17 @@ pub fn parse_expr(src: &str, known: &HashSet<String>) -> Result<Node, String> {
 fn parse_with(src: &str, known: &HashSet<String>, vars: &Vars) -> Result<Node, String> {
     let mut known = known.clone();
     known.extend(vars.iter().map(|v| v.0.clone()));
+    if src.len() > MAX_INPUT {
+        return Err(too_long());
+    }
     let toks = lex(src, &known)?;
     if toks.is_empty() {
         return Err("Leer".into());
     }
-    let mut p = P { toks, i: 0, abs: 0, sep: false, vars: vars.clone() };
+    if toks.len() > MAX_TOKENS {
+        return Err(too_long());
+    }
+    let mut p = P { toks, i: 0, abs: 0, sep: false, vars: vars.clone(), depth: 0 };
     let n = p.chain()?;
     if p.i < p.toks.len() {
         return Err(match p.toks[p.i] {
@@ -539,6 +550,10 @@ fn lex(src: &str, known: &HashSet<String>) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
+/// The longest name looked for inside a run of letters (the longest command has 21): trying
+/// every length up to the whole run made reading a long run of letters take cubic time.
+const MAX_NAME: usize = 48;
+
 /// A run of letters (and digits) read as names: the whole run when it is known (an object, a
 /// command, a function, x/y/t, pi, e), else known names one after the other, longest first.
 fn split_word(word: &str, known: &HashSet<String>, calls: bool) -> Result<Vec<String>, String> {
@@ -553,7 +568,7 @@ fn split_word(word: &str, known: &HashSet<String>, calls: bool) -> Result<Vec<St
     let mut at = 0;
     while at < chars.len() {
         let mut found = None;
-        for end in (at + 1..=chars.len()).rev() {
+        for end in (at + 1..=chars.len().min(at + MAX_NAME)).rev() {
             let piece: String = chars[at..end].iter().collect();
             // A piece that ends the word may be a command or function being called.
             let last = end == chars.len();
@@ -640,7 +655,7 @@ pub fn unknown_letters(src: &str, known: &HashSet<String>) -> Vec<String> {
         // Read like the lexer does: the longest known piece first; a letter that is none starts a name.
         let mut at = 0;
         while at < word.len() {
-            let found = (at + 1..=word.len()).rev().find(|&end| {
+            let found = (at + 1..=word.len().min(at + MAX_NAME)).rev().find(|&end| {
                 let piece: String = word[at..end].iter().collect();
                 is_known(&piece, calls && end == word.len())
             });
@@ -709,6 +724,8 @@ struct P {
     sep: bool,
     /// Variables besides x, y, t (see [`Vars`]).
     vars: Vars,
+    /// Nesting so far (see [`MAX_NESTING`]).
+    depth: u32,
 }
 
 impl P {
@@ -774,7 +791,20 @@ impl P {
         }
     }
 
+    /// Every way the parser calls itself again goes through `unary` or `atom`: they count the
+    /// nesting, so hostile input (thousands of brackets or signs) is an error, not a stack
+    /// overflow.
     fn unary(&mut self) -> Result<Node, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(too_deep());
+        }
+        let r = self.unary_in();
+        self.depth -= 1;
+        r
+    }
+
+    fn unary_in(&mut self) -> Result<Node, String> {
         if self.eat(&Tok::Minus) {
             return Ok(Node::Neg(Box::new(self.unary()?)));
         }
@@ -824,6 +854,16 @@ impl P {
     }
 
     fn atom(&mut self) -> Result<Node, String> {
+        self.depth += 1;
+        if self.depth > MAX_NESTING {
+            return Err(too_deep());
+        }
+        let r = self.atom_in();
+        self.depth -= 1;
+        r
+    }
+
+    fn atom_in(&mut self) -> Result<Node, String> {
         let Some(t) = self.peek().cloned() else { return Err("Da fehlt noch etwas am Ende".into()) };
         self.i += 1;
         match t {
@@ -849,10 +889,14 @@ impl P {
                     }
                     return Ok(Node::Var(v));
                 }
-                let mut primes = 0u8;
+                let mut primes = 0usize;
                 while self.eat(&Tok::Prime) {
                     primes += 1;
                 }
+                if primes > MAX_DERIVATIVE {
+                    return Err(format!("Höchstens die {MAX_DERIVATIVE}. Ableitung"));
+                }
+                let primes = primes as u8;
                 let lower = name.to_lowercase();
                 let is_func = FUNCS.contains(&lower.as_str());
                 // name(…) / name[…]: a call (object function, built-in or command).
