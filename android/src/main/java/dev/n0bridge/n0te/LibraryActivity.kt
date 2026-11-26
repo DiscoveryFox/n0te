@@ -105,6 +105,8 @@ class LibraryActivity : ComponentActivity() {
     private var joining by mutableStateOf<String?>(null)
     /** What's new in this version: shown once after an install or update. */
     private var news by mutableStateOf<Changelog.Entry?>(null)
+    /** The report of a crash since the last start (CrashLog), shown once. */
+    private var crash by mutableStateOf<String?>(null)
     private val syncListener: (uniffi.n0te_ffi.FfiSyncEvent) -> Unit = { e ->
         if (e is uniffi.n0te_ffi.FfiSyncEvent.RemoteChanged || e is uniffi.n0te_ffi.FfiSyncEvent.Paired) reload()
         // Joining an invite with approval: the owner lets us in by hand.
@@ -180,6 +182,7 @@ class LibraryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Themes.applyWindow(this)
         news = Changelog.unseen(this)
+        crash = CrashLog.unseen(CrashLog.dir(this))
         inviteFrom(intent)
         setContent { Screen() }
     }
@@ -384,6 +387,7 @@ class LibraryActivity : ComponentActivity() {
         newFolderIn?.let { NewFolderDialog(it) }
         tagFor?.let { TagDialog(it, list.orEmpty()) }
         news?.let { NewsDialog(it) }
+        crash?.takeIf { news == null }?.let { CrashDialog(it) { crash = null } }
         // A downloaded update: asked once when the app comes up; later the button at the top.
         (Updater.state as? Updater.State.Ready)?.takeIf { news == null && Updater.asked != it.release.version }?.let { UpdateDialog(it.release) }
         pinFor?.let { PinDialog(it) }

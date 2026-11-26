@@ -771,6 +771,14 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("n0te kann das Design so nicht importieren. Bitte korrigiere es und antworte wieder nur mit dem JSON:", "n0te can't import the design like this. Please fix it and again answer with only the JSON:"),
     ("Fehler kopieren", "Copy the errors"),
     ("Das ist keine Design-Datei", "That's not a design file"),
+    // Crash reports (crash.rs).
+    ("n0te ist beim letzten Mal abgestürzt", "n0te crashed last time"),
+    ("Fehler: {}", "Error: {}"),
+    ("Hilf beim Beheben: kopiere den Bericht und schick ihn mit, was du gerade getan hast. Er enthält keine Notizen.", "Help fix it: copy the report and send it along with what you were doing. It contains no notes."),
+    ("Auf GitHub melden", "Report on GitHub"),
+    ("Bericht kopieren", "Copy report"),
+    ("Bericht kopiert", "Report copied"),
+    ("Bericht kopiert: im Browser einfügen", "Report copied: paste it in the browser"),
     ("Nur PDF-, .n0te- und Design-Dateien (.json)", "Only PDF, .n0te and design (.json) files"),
     // --- The sync service ---------------------------------------------------------------------
     ("Der Sync-Dienst läuft nicht. n0te startet ihn gleich selbst (n0te-sync.exe im Programmordner).", "The sync service isn't running. n0te is starting it (n0te-sync.exe in the program folder)."),

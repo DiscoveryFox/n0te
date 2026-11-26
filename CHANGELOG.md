@@ -20,6 +20,9 @@ Neuigkeiten).
   leaves), Terminal (scanlines) and High contrast.
 - Decorations behind the library (only there, never while writing), with switches to turn them
   off or hold them still.
+- Crash reports: after a crash, n0te (tablet, laptop, n0te Tablet) offers to copy or share a
+  report of what went wrong, or to open a GitHub issue for it. Reports contain no notes. On
+  Windows a crash used to vanish without a trace.
 - `scripts/test.sh`: the whole test suite (Rust and the Android JVM tests) in one fast run.
 
 ### Changed

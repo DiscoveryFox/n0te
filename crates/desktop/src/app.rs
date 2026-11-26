@@ -178,6 +178,10 @@ pub enum Message {
     DesignDeleteConfirmed(String),
     DecorShow(bool),
     DecorMotion(bool),
+    /// The last crash's report: copy it, report it on GitHub, or put it away.
+    CrashCopy,
+    CrashReport,
+    CrashDismiss,
     SetRowGap(f32),
     FormulaCenter(bool),
     SetSideGap(f32),
@@ -390,6 +394,8 @@ pub struct App {
     pub design_deleting: Option<String>,
     /// Where imported designs are stored (the config folder; a temporary one in tests).
     pub designs_dir: PathBuf,
+    /// The report of a crash since the last start (crash.rs), until it is copied or put away.
+    pub crash: Option<String>,
     /// The sync service connection (None: not running).
     pub sync: Option<Arc<live::Session>>,
     pub devices: Vec<live::Device>,
@@ -538,6 +544,7 @@ impl App {
             design_read: None,
             design_deleting: None,
             designs_dir: std::env::temp_dir().join(format!("n0te-designs-{}", std::process::id())),
+            crash: None,
             sync: None,
             devices: Vec::new(),
             devices_at: None,
@@ -601,6 +608,7 @@ impl App {
         theme::load_imported(&theme::designs_dir());
         let mut app = Self::with_settings(root, Settings::load());
         app.designs_dir = theme::designs_dir();
+        app.crash = crate::crash::unseen(&crate::crash::dir()).map(|(_, text)| text);
         crate::i18n::set_from(&app.settings.language);
         app.persist_settings = true;
         app.offline = false;
@@ -1799,6 +1807,25 @@ impl App {
                 if theme::p().id == id {
                     return self.handle(Message::SetTheme("nothing"));
                 }
+            }
+            Message::CrashCopy => {
+                if let Some(report) = self.crash.take() {
+                    crate::crash::mark_seen(&crate::crash::dir());
+                    self.say(tr("Bericht kopiert"));
+                    return iced::clipboard::write(report);
+                }
+            }
+            Message::CrashReport => {
+                if let Some(report) = self.crash.take() {
+                    crate::crash::mark_seen(&crate::crash::dir());
+                    let _ = n0te_platform::open_path(crate::crash::issue_url(&report));
+                    self.say(tr("Bericht kopiert: im Browser einfügen"));
+                    return iced::clipboard::write(report);
+                }
+            }
+            Message::CrashDismiss => {
+                self.crash = None;
+                crate::crash::mark_seen(&crate::crash::dir());
             }
             Message::DecorShow(on) => {
                 self.settings.decor = on;

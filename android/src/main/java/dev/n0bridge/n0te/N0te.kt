@@ -15,6 +15,7 @@ import java.util.concurrent.Executors
 class N0teApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        CrashLog.install(this)
         N0te.init(this)
     }
 }
