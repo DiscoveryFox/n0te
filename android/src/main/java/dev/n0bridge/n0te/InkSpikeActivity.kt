@@ -48,7 +48,8 @@ class InkSpikeActivity : ComponentActivity() {
 
     private val brush = FfiBrush(width = 2.2f, thinning = 0.6f, color = 0xFF111111u, kind = 0u)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF111111.toInt(); style = Paint.Style.FILL }
-    private val finished = ArrayList<Path>()
+    // Read by the front-buffer renderer on its own thread while pen-up adds to it.
+    private val finished = java.util.concurrent.CopyOnWriteArrayList<Path>()
     private var samples = FloatArray(4 * 512)
     private var count = 0
     private var startTime = 0L

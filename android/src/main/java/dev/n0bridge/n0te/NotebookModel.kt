@@ -63,6 +63,22 @@ fun floatsOf(bytes: ByteArray): FloatArray {
     return FloatArray(fb.remaining()).also { fb.get(it) }
 }
 
+/** The box (left, top, right, bottom) around x, y pairs; all 0 for none. */
+fun pointBounds(f: FloatArray): FloatArray {
+    if (f.size < 2) return FloatArray(4)
+    var l = f[0]; var t = f[1]; var r = f[0]; var b = f[1]
+    var i = 2
+    while (i + 1 < f.size) {
+        val x = f[i]; val y = f[i + 1]
+        if (x < l) l = x
+        if (x > r) r = x
+        if (y < t) t = y
+        if (y > b) b = y
+        i += 2
+    }
+    return floatArrayOf(l, t, r, b)
+}
+
 fun bytesOf(f: FloatArray, n: Int = f.size): ByteArray {
     val bb = ByteBuffer.allocate(n * 4).order(ByteOrder.LITTLE_ENDIAN)
     bb.asFloatBuffer().put(f, 0, n)
@@ -95,6 +111,12 @@ class Header(val node: String, val title: String, val depth: Int, val collapsed:
 /** One sheet's content as the UI holds it. UI thread only, except where noted. */
 /** The id of a text page's body as a text box (n0te-core `BODY_ID`). */
 const val BODY_ID = "__body"
+
+/**
+ * A text page's body as a box, as the core lays it out (n0te-core `text_boxes_with_body`): shown
+ * while it is typed, before the core has it, so it must not jump when the core's comes back.
+ */
+fun bodyBox(pageWidth: Float, text: String) = uniffi.n0te_ffi.FfiTextBox(BODY_ID, 56f, 64f, (pageWidth - 112f).coerceAtLeast(100f), 12f, text)
 
 class SheetState(val id: String) {
     @Volatile var handle: SheetHandle? = null
@@ -260,6 +282,27 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
 
     fun state(id: String) = sheets.getOrPut(id) { SheetState(id) }
 
+    /**
+     * One core handle per sheet, whoever opens it first: the page view or the handwriting reader
+     * (any thread). Every page this device loads writes with the device's peer id, so two handles
+     * of one page that both write collide when saved: the core refused the page's saves (and the
+     * strokes drawn on it were never written) when the reader still held its own handle of a page
+     * that had just been opened to draw on.
+     */
+    private val handles = java.util.concurrent.ConcurrentHashMap<String, SheetHandle>()
+    /** Sheets whose handle the page view holds (the reader lets go only of the others). */
+    private val viewing = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** The sheet's handle for the page view (I/O thread). */
+    private fun openForView(id: String): SheetHandle =
+        handles.compute(id) { _, h -> viewing.add(id); h ?: nb.openSheet(id) }!!
+
+    /** The sheet's handle for the reader, let go of after [work] unless the page view holds it. */
+    private fun <T> withReaderHandle(id: String, work: (SheetHandle) -> T): T {
+        val h = handles.computeIfAbsent(id) { nb.openSheet(it) }
+        try { return work(h) } finally { handles.computeIfPresent(id) { _, v -> if (id in viewing) v else null } }
+    }
+
     /** Loads a sheet's strokes once (background), then redraws. */
     /** Loads a sheet's strokes and text (boxes, a text page's body for a [pageWidth] page) once. */
     fun ensureLoaded(id: String, pageWidth: Float = A4_W) {
@@ -270,7 +313,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.loading = true
         N0te.background({
             val t0 = SystemClock.uptimeMillis()
-            val h = nb.openSheet(id)
+            val h = openForView(id)
             val raw = h.allStrokes()
             val t1 = SystemClock.uptimeMillis()
             val ink = inkStrokes(raw)
@@ -341,14 +384,14 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.strokes += InkStroke(tmpId, preview, brush.color.toInt(), boundsOf(preview), brush.kind.toInt(), previewLayers, width = brush.width)
         st.invalidateNode()
         onChanged()
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ InkStroke.of(h.addStroke(brush, samples)) }) { r ->
                 val i = st.strokes.indexOfFirst { it.id == tmpId }
                 r.getOrNull()?.let { real -> if (i >= 0) st.strokes[i] = real else st.strokes += real }
                     ?: run { if (i >= 0) st.strokes.removeAt(i) }
                 st.invalidateNode()
-                pushUndo(sheetId)
-                markDirty(sheetId)
+                // Not stored: no undo step (undo would take back the edit before it).
+                if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) }
                 onChanged()
             }
         }
@@ -363,7 +406,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.hidden.clear()
         st.invalidateNode()
         onChanged()
-        withHandle(st) { h -> N0te.background({ h.remove(ids) }) { pushUndo(sheetId); markDirty(sheetId) } }
+        withEdit(st) { h -> N0te.background({ h.remove(ids) }) { if (it.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
     }
 
     fun deleteStrokes(sheetId: String, ids: Collection<String>) {
@@ -372,19 +415,19 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.images = st.images.filter { it.id !in ids }
         st.invalidateNode()
         onChanged()
-        withHandle(st) { h -> N0te.background({ h.remove(ids.toList()) }) { pushUndo(sheetId); markDirty(sheetId) } }
+        withEdit(st) { h -> N0te.background({ h.remove(ids.toList()) }) { if (it.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
     }
 
     fun recolor(sheetId: String, ids: Collection<String>, color: Int) {
         val st = state(sheetId)
-        withHandle(st) { h -> N0te.background({ h.recolor(ids.toList(), color.toUInt()); reloadSome(h, ids) }) { r -> applySome(st, r); pushUndo(sheetId); markDirty(sheetId) } }
+        withEdit(st) { h -> N0te.background({ h.recolor(ids.toList(), color.toUInt()); reloadSome(h, ids) }) { r -> applySome(st, r); if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
     }
 
     fun transform(sheetId: String, ids: Collection<String>, dx: Float, dy: Float, scale: Float, ox: Float, oy: Float, done: () -> Unit) {
         val st = state(sheetId)
         // Only moved: the strokes here are moved along (the core's outlines would be the same).
         val moved = scale == 1f
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ h.transform(ids.toList(), dx, dy, scale, ox, oy); if (moved) null else reloadSome(h, ids) }) { r ->
                 val some = when {
                     r.isFailure -> Changed(emptySet(), emptyList())
@@ -392,8 +435,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
                     else -> r.getOrThrow()!!
                 }
                 applySome(st, Result.success(some))
-                pushUndo(sheetId)
-                markDirty(sheetId)
+                if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) }
                 done()
             }
         }
@@ -402,11 +444,10 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Stretches strokes and images about (ax, ay): kx across, ky down (a selection's side dragged; width kept). */
     fun stretch(sheetId: String, ids: Collection<String>, ax: Float, ay: Float, kx: Float, ky: Float, done: () -> Unit) {
         val st = state(sheetId)
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ h.stretch(ids.toList(), ax, ay, kx, ky); reloadSome(h, ids) }) { r ->
                 applySome(st, r)
-                pushUndo(sheetId)
-                markDirty(sheetId)
+                if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) }
                 done()
             }
         }
@@ -415,11 +456,10 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Turns and stretches strokes about (ax, ay) by re + i·im (a line's end dragged; width kept). */
     fun spin(sheetId: String, ids: Collection<String>, ax: Float, ay: Float, re: Float, im: Float, done: () -> Unit) {
         val st = state(sheetId)
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ h.spin(ids.toList(), ax, ay, re, im); reloadSome(h, ids) }) { r ->
                 applySome(st, r)
-                pushUndo(sheetId)
-                markDirty(sheetId)
+                if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) }
                 done()
             }
         }
@@ -448,6 +488,8 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         if (sts.any { it.handle == null }) return
         val shape = step.reshape?.let { if (back) it.node to it.before else it.node to it.after }
         val size = step.resize?.let { if (back) it.node to it.before else it.node to it.after }
+        // Changed from now on (see [withEdit]).
+        for (st in sts) dirty += st.id
         // Text edits are undo steps too: reload the text boxes with the strokes.
         N0te.background({
             val lists = sts.map { st -> val h = st.handle!!; if (op(h)) reloadStrokes(h) to h.textBoxesWithBody(st.pageWidth) else null }
@@ -479,6 +521,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         val after = plan.height to plan.gaps
         val reshape = !p.isBoard && before != after
         if (plan.dy == 0f && !reshape) return done(false)
+        dirty += p.sheetId
         N0te.background({
             val moved = if (plan.dy != 0f) h.shiftBelow(y, plan.dy).toInt() else 0
             if (reshape) { nb.reshape(p.node, after.first, after.second); nb.save() }
@@ -507,6 +550,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         val after = plan.width to p.spec.height
         val resize = !p.isBoard && before != after
         if (plan.dx == 0f && !resize) return done(false)
+        dirty += p.sheetId
         N0te.background({
             val moved = if (plan.dx != 0f) h.shiftRightOf(x, plan.dx).toInt() else 0
             if (resize) { nb.setSize(p.node, after.first, after.second); nb.save() }
@@ -531,7 +575,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** A new, empty text box at (x, y) on the sheet; [then] gets its id. */
     fun addTextBox(sheetId: String, x: Float, y: Float, w: Float, size: Float, then: (String) -> Unit) {
         val st = state(sheetId)
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ h.addTextBox(x, y, w, size, "") }) { r ->
                 r.getOrNull()?.let { id ->
                     st.texts = st.texts + uniffi.n0te_ffi.FfiTextBox(id, x, y, w, size, "")
@@ -549,7 +593,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     fun setText(sheetId: String, id: String, text: String) {
         val st = state(sheetId)
         st.texts = if (id == BODY_ID && st.texts.none { it.id == BODY_ID }) {
-            listOf(uniffi.n0te_ffi.FfiTextBox(BODY_ID, 56f, 64f, (st.pageWidth - 112f).coerceAtLeast(100f), 12f, text)) + st.texts
+            listOf(bodyBox(st.pageWidth, text)) + st.texts
         } else {
             st.texts.map { if (it.id == id) it.copy(text = text) else it }
         }
@@ -594,7 +638,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.texts = st.texts.map { if (it.id == id) it.copy(x = x, y = y, w = w, size = size) else it }
         st.invalidateNode()
         onChanged()
-        withHandle(st) { h -> N0te.background({ h.placeTextBox(id, x, y, w, size) }) { if (it.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
+        withEdit(st) { h -> N0te.background({ h.placeTextBox(id, x, y, w, size) }) { if (it.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
     }
 
     /** Deletes a text box (for [BODY_ID]: empties the text page). */
@@ -604,7 +648,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         st.texts = st.texts.filter { it.id != id }
         st.invalidateNode()
         onChanged()
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ if (id == BODY_ID) h.setPageText("") else h.remove(listOf(id)) }) { if (it.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } }
         }
     }
@@ -621,7 +665,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Places a stored blob as an image (one undo step); [then] gets its id. */
     fun addImage(sheetId: String, blob: String, x: Float, y: Float, w: Float, h: Float, then: (String) -> Unit = {}) {
         val st = state(sheetId)
-        withHandle(st) { hd ->
+        withEdit(st) { hd ->
             N0te.background({ hd.addImage(blob, x, y, w, h).also { st.images = hd.images() } }) { r ->
                 r.getOrNull()?.let { id ->
                     st.invalidateNode()
@@ -637,7 +681,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Puts a coordinate system on a sheet (one undo step); [then] gets its id. */
     fun addPlot(sheetId: String, plot: uniffi.n0te_ffi.FfiPlot, then: (String) -> Unit = {}) {
         val st = state(sheetId)
-        withHandle(st) { hd ->
+        withEdit(st) { hd ->
             N0te.background({ hd.addPlot(plot).also { st.images = hd.images() } }) { r ->
                 r.getOrNull()?.let { id ->
                     pushUndo(sheetId)
@@ -652,7 +696,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Changes a coordinate system (its functions, ranges, look; one undo step); [then] once the page has it. */
     fun setPlot(sheetId: String, plot: uniffi.n0te_ffi.FfiPlot, then: () -> Unit = {}) {
         val st = state(sheetId)
-        withHandle(st) { hd ->
+        withEdit(st) { hd ->
             N0te.background({ hd.setPlot(plot); st.images = hd.images() }) { r ->
                 if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId); onChanged() }
                 then()
@@ -662,7 +706,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
 
     fun pasteStrokes(sheetId: String, data: List<uniffi.n0te_ffi.FfiStrokeData>, dx: Float, dy: Float, then: (List<InkStroke>) -> Unit = {}) {
         val st = state(sheetId)
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ inkStrokes(h.addStrokes(data, dx, dy, 1f, 0f, 0f)) }) { r ->
                 r.getOrNull()?.let { added ->
                     st.strokes.addAll(added)
@@ -682,8 +726,8 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
      */
     fun moveStrokes(from: String, to: String, ids: Collection<String>, dx: Float, dy: Float, k: Float, ox: Float, oy: Float, shiftX: Float, shiftY: Float, then: (List<InkStroke>) -> Unit) {
         val src = state(from); val dst = state(to)
-        withHandle(src) { hs ->
-            withHandle(dst) { hd ->
+        withEdit(src) { hs ->
+            withEdit(dst) { hd ->
                 N0te.background({
                     val data = hs.strokeData(ids.toList())
                     val added = inkStrokes(hd.addStrokes(data, dx + shiftX, dy + shiftY, k, ox, oy))
@@ -716,7 +760,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Area eraser: path as x, y, radius triples (sheet coordinates). One undo step. */
     fun eraseArea(sheetId: String, path: FloatArray, then: () -> Unit) {
         val st = state(sheetId)
-        withHandle(st) { h ->
+        withEdit(st) { h ->
             N0te.background({ if (h.eraseArea(bytesOf(path)) > 0u) reloadStrokes(h) else null }) { r ->
                 r.getOrNull()?.let { list -> applyReload(st, Result.success(list)); pushUndo(sheetId); markDirty(sheetId) }
                 then()
@@ -779,10 +823,22 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
 
     private fun withHandle(st: SheetState, f: (SheetHandle) -> Unit) {
         st.handle?.let(f) ?: run {
-            // Not loaded yet (drawn right after opening): load, then do it.
-            ensureLoaded(st.id)
+            // Not loaded yet (drawn right after opening): load, then do it. At the width the
+            // page was laid out at (a text page's body wraps in it), not A4's.
+            ensureLoaded(st.id, st.pageWidth)
             N0te.io.execute { N0te.main.post { st.handle?.let(f) } }
         }
+    }
+
+    /**
+     * [withHandle] for a change: the sheet counts as changed at once, so a [flush] right after
+     * (the app paused) saves it behind the change on the one I/O thread. It used to count only
+     * when the change came back, so a stroke still on its way when the app was left was saved
+     * only by the next scheduled save — gone if Android ended the app before that.
+     */
+    private fun withEdit(st: SheetState, f: (SheetHandle) -> Unit) {
+        if (st.handle != null) dirty += st.id
+        withHandle(st, f)
     }
 
     // --- structure ---------------------------------------------------------------------------
@@ -830,9 +886,9 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     }
 
     /** Folds or unfolds several groups at once (one save). */
-    fun setCollapsedAll(groups: List<String>, collapsed: Boolean) {
+    fun setCollapsedAll(groups: List<String>, collapsed: Boolean, then: (() -> Unit)? = null) {
         if (groups.isEmpty()) return
-        N0te.background({ groups.forEach { nb.setCollapsed(it, collapsed) }; nb.save() }) { refreshOutline() }
+        N0te.background({ groups.forEach { nb.setCollapsed(it, collapsed) }; nb.save() }) { refreshOutline(then) }
     }
 
     fun setCollapsed(group: String, collapsed: Boolean) {
@@ -1007,11 +1063,13 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
             val ids = runCatching { nb.outline(true).filterIsInstance<FfiOutlineRow.Sheet>().flatMap { r -> r.left.map { it.sheetId } + r.sheetId + r.right.map { it.sheetId } } }.getOrDefault(emptyList())
             for (id in ids) {
                 if (!Settings.handwritingSearch) break
-                val open = sheets[id]?.handle
+                // (From the thread-safe map: [sheets] belongs to the main thread.)
+                val open = handles[id]?.takeIf { id in viewing }
                 if (open != null) {
                     if (runCatching { Handwriting.indexSheet(open) }.getOrDefault(false)) N0te.main.post { quietDirty += id; scheduleSave() }
                 } else {
-                    runCatching { val h = nb.openSheet(id); if (Handwriting.indexSheet(h)) { h.saveQuiet(); SyncHub.notifyChanged(nb.id()) } }
+                    // Through the one handle of the page (see [handles]): the page may be opened to draw on meanwhile.
+                    runCatching { withReaderHandle(id) { h -> if (Handwriting.indexSheet(h)) { h.saveQuiet(); SyncHub.notifyChanged(nb.id()) } } }
                 }
             }
         }
@@ -1038,7 +1096,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
     /** Marks [ids] on [sheetId] as a heading reading [text] (one undo step). */
     fun addHeading(sheetId: String, ids: Collection<String>, text: String) {
         val st = state(sheetId)
-        withHandle(st) { h -> N0te.background({ h.addHeading(text, ids.toList()) }) { pushUndo(sheetId); dirty += sheetId; scheduleSave(); refreshHeadings() } }
+        withEdit(st) { h -> N0te.background({ h.addHeading(text, ids.toList()) }) { if (it.isSuccess) pushUndo(sheetId); dirty += sheetId; scheduleSave(); refreshHeadings() } }
     }
 
     /** The heading [ids] on [sheetId] already belong to, if any (to rename or unmark it). */
@@ -1050,12 +1108,12 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
 
     fun setHeadingText(sheetId: String, id: String, text: String) {
         val st = state(sheetId)
-        withHandle(st) { h -> N0te.background({ h.setHeadingText(id, text) }) { pushUndo(sheetId); dirty += sheetId; scheduleSave(); refreshHeadings() } }
+        withEdit(st) { h -> N0te.background({ h.setHeadingText(id, text) }) { if (it.isSuccess) pushUndo(sheetId); dirty += sheetId; scheduleSave(); refreshHeadings() } }
     }
 
     fun removeHeading(sheetId: String, id: String) {
         val st = state(sheetId)
-        withHandle(st) { h -> N0te.background({ h.removeHeading(id) }) { pushUndo(sheetId); dirty += sheetId; scheduleSave(); refreshHeadings() } }
+        withEdit(st) { h -> N0te.background({ h.removeHeading(id) }) { if (it.isSuccess) pushUndo(sheetId); dirty += sheetId; scheduleSave(); refreshHeadings() } }
     }
 
     private fun scheduleSave() {
@@ -1130,12 +1188,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         const val BOARD_W = 842f
         const val BOARD_H = 595f
 
-        fun boundsOf(f: FloatArray): RectF {
-            val r = RectF(Float.MAX_VALUE, Float.MAX_VALUE, -Float.MAX_VALUE, -Float.MAX_VALUE)
-            var i = 0
-            while (i + 1 < f.size) { r.union(f[i], f[i + 1]); i += 2 }
-            return r
-        }
+        fun boundsOf(f: FloatArray): RectF = pointBounds(f).let { RectF(it[0], it[1], it[2], it[3]) }
 
         fun defaultSpec(bg: FfiBackground = Settings.defaultPaper) = FfiSheetSpec(595f, 842f, bg, Settings.spacingFor(bg), null, 0u)
         fun boardSpec() = FfiSheetSpec(0f, 0f, FfiBackground.DOTS, Settings.dotSpacing, null, 0u)

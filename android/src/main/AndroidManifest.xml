@@ -19,10 +19,14 @@
         android:icon="@android:drawable/ic_menu_edit"
         android:theme="@style/N0te"
         android:allowBackup="false">
+        <!-- Turning the tablet or a keyboard coming and going keeps what is on screen (open
+             dialogs and what is typed in them, the search, the picked notebooks): Compose redraws.
+             A new design still rebuilds the screens (recreate()). -->
         <activity
             android:name=".LibraryActivity"
             android:exported="true"
-            android:launchMode="singleTop">
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -39,18 +43,22 @@
             android:name=".NotebookActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustNothing"
-            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|density|smallestScreenSize" />
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|density|smallestScreenSize|uiMode" />
         <activity
             android:name=".SettingsActivity"
-            android:exported="false" />
+            android:exported="false"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode" />
         <receiver
             android:name=".UpdateReceiver"
             android:exported="false" />
         <!-- "Teilen → n0te": pictures and PDFs into a notebook. -->
+        <!-- Turning the tablet must not start the share screen over while it takes the files in
+             (the old one opened the notebook, a second share screen stayed behind it). -->
         <activity
             android:name=".ShareActivity"
             android:exported="true"
-            android:label="n0te">
+            android:label="n0te"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|density|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

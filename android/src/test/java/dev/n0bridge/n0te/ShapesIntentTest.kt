@@ -102,7 +102,8 @@ class ShapesIntentTest {
         repeat(n) {
             val dr = make()
             val log = StringBuilder()
-            Shapes.trace = { log.append(it).append(" ; ") }
+            // The trace only for a dump: building it for every shape took most of the test's time.
+            if (dump != null) Shapes.trace = { log.append(it).append(" ; ") }
             val res = Shapes.detect(samples(dr.pts), dr.pts.size, still = 2.4f)
             Shapes.trace = null
             val bad = when {

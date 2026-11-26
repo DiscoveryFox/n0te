@@ -307,12 +307,12 @@ private val PAGES: List<Pair<String, List<List<Key>>>> = listOf(
         "qwertzuiopü".map { c -> Key(c.toString()) { f, k -> f.insert(if (k.shift) c.uppercase() else c.toString()); k.shift = false } } + listOf(BACK),
         "asdfghjklöä".map { c -> Key(c.toString()) { f, k -> f.insert(if (k.shift) c.uppercase() else c.toString()); k.shift = false } } + listOf(LEFT, RIGHT),
         listOf(Key("⇧", 2f, KeyKind.ACTION) { _, k -> k.shift = !k.shift }) + "yxcvbnm".map { c -> Key(c.toString()) { f, k -> f.insert(if (k.shift) c.uppercase() else c.toString()); k.shift = false } } +
-            listOf(t("_"), t("\"", "\"\""), OPEN, CLOSE),
+            listOf(t("_"), wrap("\"", "\"", "\""), OPEN, CLOSE),
         listOf(t(",", ", "), t("."), t("="," = "), t("\\"), Key("␣", 5f, KeyKind.NUMBER) { f, _ -> f.insert(" ") }, t("'"), t(":", ": "), ENTER),
     ),
     "αβγ" to listOf(
         "αβγδεθλμ".map { c -> t(c.toString()) } + listOf(t("σ"), t("φ"), t("ω"), BACK),
-        listOf(t("≤", " ≤ "), t("≥", " ≥ "), t("<", " < "), t(">", " > "), t("=", " = "), t("°"), t("′", "'"), t("\"", "\"\""), t("_"), t(";", "; "), t("|"), LEFT, RIGHT),
+        listOf(t("≤", " ≤ "), t("≥", " ≥ "), t("<", " < "), t(">", " > "), t("=", " = "), t("°"), t("′", "'"), wrap("\"", "\"", "\""), t("_"), t(";", "; "), t("|"), LEFT, RIGHT),
         listOf(t("["), t("]"), wrap("{ }", "{", "}"), t("\\"), t(":", ": "), t("!"), t("?"), t("&"), t("·"), t("−"), t("+"), OPEN, CLOSE),
         listOf(t(",", ", "), t("."), Key("␣", 9f, KeyKind.NUMBER) { f, _ -> f.insert(" ") }, ENTER),
     ),

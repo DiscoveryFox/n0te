@@ -61,3 +61,33 @@ class LibraryOrgTest {
         assertTrue(LibraryOrg.tagColor("Mathe") in LibraryOrg.TAG_COLORS)
     }
 }
+
+/** The library's organising and invite links: the bits that went wrong. */
+class LibraryOrgFixesTest {
+    @Test fun dissolvingAFolderKeepsTheEmptyFoldersInside() {
+        // "Auflösen" says nothing is deleted: "A/B/Leer" became nothing.
+        assertEquals(listOf("A/Leer", "A", "C"), LibraryOrg.dissolvedFolders(listOf("A/B/Leer", "A/B", "C"), "A/B"))
+        assertEquals(listOf("Leer"), LibraryOrg.dissolvedFolders(listOf("X/Leer", "X"), "X"))
+        assertEquals(listOf("A/Leer"), LibraryOrg.dissolvedFolders(listOf("A/B/Leer", "A/Leer"), "A/B"))
+    }
+
+    @Test fun aTapPicksOrPutsBackAgainstWhatIsPickedNow() {
+        assertEquals(setOf("a"), LibraryOrg.toggled(emptySet(), "a"))
+        assertEquals(setOf("b"), LibraryOrg.toggled(setOf("a", "b"), "a"))
+        assertEquals(null, LibraryOrg.toggled(null, "a"))
+    }
+
+    @Test fun inviteLinksAreFoundInWhatIsPastedOrTapped() {
+        val link = "n0te://invite/AbC-12_xyz"
+        assertEquals(link, LibraryOrg.inviteIn(link))
+        assertEquals(link, LibraryOrg.inviteIn("Hier der Link: $link."))
+        assertEquals(link, LibraryOrg.inviteIn("($link)"))
+        assertEquals(link, LibraryOrg.inviteIn("$link/"))
+        assertEquals(link, LibraryOrg.inviteIn("$link?utm=chat"))
+        assertEquals(link, LibraryOrg.inviteIn("  N0TE://INVITE/AbC-12_xyz\n"))
+        assertEquals(null, LibraryOrg.inviteIn("n0te://invite/"))
+        assertEquals(null, LibraryOrg.inviteIn("n0te://invite"))
+        assertEquals(null, LibraryOrg.inviteIn("https://example.com"))
+        assertEquals(null, LibraryOrg.inviteIn(null))
+    }
+}

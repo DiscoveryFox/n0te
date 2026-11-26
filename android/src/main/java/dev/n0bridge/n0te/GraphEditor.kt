@@ -252,7 +252,7 @@ private fun StyleBar(s: GraphSession, tick: Int, info: FfiObjInfo, onSettings: (
     @Suppress("UNUSED_VARIABLE") val t = tick
     val o = s.draft.objs.firstOrNull { it.id == info.id } ?: return
     val st = o.style
-    fun set(change: (FfiStyle) -> FfiStyle) = s.style(o.id, change)
+    fun set(change: (FfiStyle) -> FfiStyle) = s.style(o.id, change = change)
     Row(Modifier.bar(18f).padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(info.name, color = Ui.Chalk, fontSize = 15.sp, fontWeight = FontWeight.SemiBold, fontFamily = Type.Mono, maxLines = 1, modifier = Modifier.widthIn(max = 90.dp))
         BarDivider()
@@ -358,7 +358,9 @@ private fun AlgebraView(s: GraphSession, tick: Int) {
     if (input.text != seen) { seen = input.text; error = null }
     fun template(word: Int, tmpl: String) {
         val v = field.value
-        val head = v.text.substring(0, word); val tail = v.text.substring(v.selection.max)
+        // The text may have changed since the suggestion was shown (a hardware key in the same frame).
+        val end = v.selection.max.coerceIn(0, v.text.length)
+        val head = v.text.substring(0, word.coerceIn(0, end)); val tail = v.text.substring(end)
         val open = tmpl.indexOf('(')
         field.value = TextFieldValue(head + tmpl + tail, if (open >= 0) TextRange(head.length + open + 1, head.length + tmpl.length - 1) else TextRange(head.length + tmpl.length))
         s.keys.active = field
@@ -489,7 +491,7 @@ private fun AlgebraRow(s: GraphSession, tick: Int, o: uniffi.n0te_ffi.FfiObj, in
         if (sl != null && v != null) {
             Row(Modifier.padding(start = 40.dp, end = 12.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(Plots.format(sl.min), color = Ui.Muted, fontSize = 11.sp)
-                N0Slider(v.toFloat(), { nv -> uniffi.n0te_ffi.plotSetSlider(s.draft, o.id, nv.toDouble())?.let { s.set(it, quiet = true) } }, sl.min.toFloat()..sl.max.toFloat(), Modifier.weight(1f))
+                N0Slider(v.toFloat(), { nv -> uniffi.n0te_ffi.plotSetSlider(s.draft, o.id, nv.toDouble())?.let { s.set(it, merge = "slider" to o.id) } }, sl.min.toFloat()..sl.max.toFloat(), Modifier.weight(1f))
                 Text(Plots.format(sl.max), color = Ui.Muted, fontSize = 11.sp)
             }
         }
@@ -545,7 +547,9 @@ private fun ToolGrid(s: GraphSession, tick: Int, tools: List<GTool>) {
 private fun ObjectSettings(s: GraphSession, tick: Int, o: uniffi.n0te_ffi.FfiObj, info: FfiObjInfo) {
     @Suppress("UNUSED_VARIABLE") val t = tick
     val st = o.style
-    fun set(change: (FfiStyle) -> FfiStyle) = s.style(o.id, change)
+    fun set(change: (FfiStyle) -> FfiStyle) = s.style(o.id, change = change)
+    /** A slider's moves: one undo step per drag. */
+    fun slide(what: String, change: (FfiStyle) -> FfiStyle) = s.style(o.id, merge = what to o.id, change = change)
     val fillable = info.kind in listOf("Vieleck", "Kreis", "Winkel", "Integral")
     Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 14.dp, end = 12.dp, bottom = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // A plain text: its words; anything else: its definition.
@@ -575,14 +579,14 @@ private fun ObjectSettings(s: GraphSession, tick: Int, o: uniffi.n0te_ffi.FfiObj
         if (info.kind in LINEAR) {
             Caption("Linie", Modifier.padding(top = 6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { LINES.forEachIndexed { i, l -> SmallChoice(l, st.line.toInt() == i, keepCase = true) { set { it.copy(line = i.toUByte()) } } } }
-            LabeledSlider("Stärke", if (st.width > 0f) st.width else s.draft.width, 0.4f..5f) { w -> set { it.copy(width = w) } }
+            LabeledSlider("Stärke", if (st.width > 0f) st.width else s.draft.width, 0.4f..5f) { w -> slide("width") { it.copy(width = w) } }
         }
         if (info.kind in POINTY) {
             Caption("Punkt", Modifier.padding(top = 6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) { POINTS.forEachIndexed { i, l -> SmallChoice(l, st.point.toInt() == i, keepCase = true) { set { it.copy(point = i.toUByte()) } } } }
-            LabeledSlider("Größe", if (st.size > 0f) st.size else 2.4f, 1f..6f) { v -> set { it.copy(size = v) } }
+            LabeledSlider("Größe", if (st.size > 0f) st.size else 2.4f, 1f..6f) { v -> slide("size") { it.copy(size = v) } }
         }
-        if (fillable) LabeledSlider("Füllung", st.fill, 0f..1f) { v -> set { it.copy(fill = v) } }
+        if (fillable) LabeledSlider("Füllung", st.fill, 0f..1f) { v -> slide("fill") { it.copy(fill = v) } }
 
         Caption("Beschriftung", Modifier.padding(top = 6.dp))
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -703,8 +707,8 @@ private fun GraphicsProps(s: GraphSession, tick: Int) {
         ToggleRow("Achsen", p.axes) { s.view { it.copy(axes = !it.axes) } }
         if (p.axes) Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Namen", color = Ui.Muted, fontSize = 13.sp, modifier = Modifier.width(52.dp))
-            Field(p.xName, "x", modifier = Modifier.width(80.dp), onChange = { n -> s.view { it.copy(xName = n) } })
-            Field(p.yName, "y", modifier = Modifier.width(80.dp), onChange = { n -> s.view { it.copy(yName = n) } })
+            Field(p.xName, "x", modifier = Modifier.width(80.dp), onChange = { n -> s.view(merge = "xName") { it.copy(xName = n) } })
+            Field(p.yName, "y", modifier = Modifier.width(80.dp), onChange = { n -> s.view(merge = "yName") { it.copy(yName = n) } })
         }
         ToggleRow("Raster", p.grid) { s.view { it.copy(grid = !it.grid) } }
         if (p.grid) ToggleRow("Feines Raster dazwischen", p.minor) { s.view { it.copy(minor = !it.minor) } }
@@ -722,7 +726,7 @@ private fun GraphicsProps(s: GraphSession, tick: Int) {
 
         Caption("Aussehen", Modifier.padding(top = 6.dp))
         ToggleRow("Wie mit dem Lineal (sonst von Hand gezeichnet)", p.clean) { s.view { it.copy(clean = !it.clean) } }
-        LabeledSlider("Strich", p.width, 0.5f..4f) { w -> s.view { it.copy(width = w) } }
+        LabeledSlider("Strich", p.width, 0.5f..4f) { w -> s.view(merge = "line") { it.copy(width = w) } }
 
         Caption("Auf der Seite", Modifier.padding(top = 6.dp))
         ToggleRow("Interaktiv: Punkte und Schieberegler auf der Seite ziehen", p.interactive) { s.view { it.copy(interactive = !it.interactive) } }

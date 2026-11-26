@@ -63,10 +63,19 @@ class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Themes.applyWindow(this)
-        intent.getStringExtra(EXTRA_SECTION)?.let { section = it }
-        Handwriting.onChange { tick++ }
+        // Only when opened (not again when rebuilt for a new design); a section that exists.
+        if (savedInstanceState == null) intent.getStringExtra(EXTRA_SECTION)?.takeIf { s -> sections.any { it.first == s } }?.let { section = it }
+        Handwriting.onChange(handwritingListener)
         if (Settings.handwritingSearch) Handwriting.check(fetch = false)
         setContent { Screen() }
+    }
+
+    private val handwritingListener: () -> Unit = { tick++ }
+
+    override fun onDestroy() {
+        // Else every settings screen opened stayed in Handwriting's listeners for good.
+        Handwriting.offChange(handwritingListener)
+        super.onDestroy()
     }
 
     private val sections = listOf(
@@ -374,7 +383,7 @@ class SettingsActivity : ComponentActivity() {
                     scanQr { code ->
                         if (!code.startsWith("n0te-pair:")) { pairStatus = "Das ist kein Koppel-Code von n0te"; return@scanQr }
                         pairStatus = "Kopple …"
-                        N0te.background({ engine.acceptPair(code) }) { r ->
+                        N0te.aside("n0te-pair", { engine.acceptPair(code) }) { r ->
                             pairStatus = r.fold({ "Gekoppelt mit ${it.name}" }, { "Koppeln fehlgeschlagen: ${it.message}" })
                             SyncHub.refreshDevices()
                             tick++
@@ -386,7 +395,7 @@ class SettingsActivity : ComponentActivity() {
                     val code = if (clip.trim().startsWith("n0te-pair:")) clip.trim() else pairText.trim()
                     if (!code.startsWith("n0te-pair:")) { pairStatus = "Kein Koppel-Code in der Zwischenablage — unten einfügen"; return@Btn }
                     pairStatus = "Kopple …"
-                    N0te.background({ engine.acceptPair(code) }) { r ->
+                    N0te.aside("n0te-pair", { engine.acceptPair(code) }) { r ->
                         pairStatus = r.fold({ "Gekoppelt mit ${it.name}" }, { "Koppeln fehlgeschlagen: ${it.message}" })
                         SyncHub.refreshDevices()
                         tick++

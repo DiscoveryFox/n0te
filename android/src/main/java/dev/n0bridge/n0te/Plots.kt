@@ -13,25 +13,46 @@ object Plots {
     /** A plot's last look by id: shown while its new one (after an edit) is worked out. */
     private val last = HashMap<String, List<InkStroke>>()
     private val busy = HashSet<FfiPlot>()
+    /** Plots (by id) being worked out, and the newest look asked for meanwhile (main thread). */
+    private val running = HashSet<String>()
+    private val wanted = HashMap<String, FfiPlot>()
+    /**
+     * Its own thread, not n0te-io: dragging a graph asks for a look every frame, and saves waited
+     * behind the stale ones. A big stack, as the main thread has: the core's expression reader is
+     * recursive, and a deeply nested formula that the editor took must not overflow here.
+     */
+    private val worker = java.util.concurrent.Executors.newSingleThreadExecutor { r -> Thread(null, r, "n0te-plots", 16L shl 20).apply { priority = Thread.NORM_PRIORITY - 1 } }
 
     /** Called on the main thread when a look is ready (redraw). */
     var listener: (() -> Unit)? = null
 
-    /** The plot's strokes (page points), or its previous look / null while they are worked out. */
+    /**
+     * The plot's strokes (page points), or its previous look / null while they are worked out.
+     * One look per plot at a time: while one is worked out only the newest asked for waits (a
+     * drag doesn't queue one per frame).
+     */
     fun strokes(p: FfiPlot): List<InkStroke>? {
         cache.get(p)?.let { return it }
-        if (busy.add(p)) {
-            N0te.io.execute {
-                val s = runCatching { plotStrokes(p).map { InkStroke.of(it) } }.getOrDefault(emptyList())
-                N0te.main.post {
-                    busy.remove(p)
-                    cache.put(p, s)
-                    if (p.id.isNotEmpty()) last[p.id] = s
-                    listener?.invoke()
-                }
+        if (p in busy) return last[p.id]
+        if (p.id.isNotEmpty() && p.id in running) { wanted[p.id] = p; return last[p.id] }
+        render(p)
+        return last[p.id]
+    }
+
+    private fun render(p: FfiPlot) {
+        busy += p
+        if (p.id.isNotEmpty()) running += p.id
+        worker.execute {
+            val s = runCatching { plotStrokes(p).map { InkStroke.of(it) } }.getOrDefault(emptyList())
+            N0te.main.post {
+                busy.remove(p)
+                running.remove(p.id)
+                cache.put(p, s)
+                if (p.id.isNotEmpty()) last[p.id] = s
+                wanted.remove(p.id)?.let { next -> if (cache.get(next) == null && next !in busy) render(next) }
+                listener?.invoke()
             }
         }
-        return last[p.id]
     }
 
     /** Axes and numbers: nearly black ink. */

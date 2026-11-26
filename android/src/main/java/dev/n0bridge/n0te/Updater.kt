@@ -104,7 +104,20 @@ object Updater {
     fun versionIn(s: String): List<Int>? =
         Regex("(\\d+)\\.(\\d+)(?:\\.(\\d+))?").find(s)?.groupValues?.drop(1)?.map { it.ifEmpty { "0" }.toInt() }
 
-    /** Whether version [a] is newer than [b] ("0.27.0" > "0.26.1"). */
+    /**
+     * The pre-release label right after the version in [s] ("v0.35.0-beta.2" → "beta.2"), "" for
+     * a release. Only for versions and tags: in a file name ("n0te-0.35.0-release.apk") what
+     * follows is no label.
+     */
+    fun labelIn(s: String): String {
+        val m = Regex("(\\d+)\\.(\\d+)(?:\\.(\\d+))?").find(s) ?: return ""
+        return Regex("^-([0-9A-Za-z.-]+)").find(s.substring(m.range.last + 1))?.groupValues?.get(1)?.trim('.', '-').orEmpty()
+    }
+
+    /**
+     * Whether version [a] is newer than [b] ("0.27.0" > "0.26.1"). Same numbers: a release is
+     * newer than its pre-releases ("0.35.0" > "0.35.0-beta.2" > "0.35.0-beta.1"), as in semver.
+     */
     fun newer(a: String, b: String): Boolean {
         val x = versionIn(a) ?: return false
         val y = versionIn(b) ?: return true
@@ -112,7 +125,26 @@ object Updater {
             val d = x.getOrElse(i) { 0 } - y.getOrElse(i) { 0 }
             if (d != 0) return d > 0
         }
-        return false
+        return compareLabels(labelIn(a), labelIn(b)) > 0
+    }
+
+    /** Semver's order of pre-release labels: none is highest, numbers by value, below words. */
+    private fun compareLabels(a: String, b: String): Int {
+        if (a == b) return 0
+        if (a.isEmpty()) return 1
+        if (b.isEmpty()) return -1
+        val p = a.split('.'); val q = b.split('.')
+        for (i in 0 until minOf(p.size, q.size)) {
+            val m = p[i].toIntOrNull(); val n = q[i].toIntOrNull()
+            val c = when {
+                m != null && n != null -> m.compareTo(n)
+                m != null -> -1
+                n != null -> 1
+                else -> p[i].compareTo(q[i])
+            }
+            if (c != 0) return c
+        }
+        return p.size.compareTo(q.size)
     }
 
     /**
@@ -134,7 +166,9 @@ object Updater {
             val apk = apks.firstOrNull { (it["name"] as String).lowercase().contains("n0te") } ?: apks.singleOrNull() ?: continue
             val name = apk["name"] as String
             val v = versionIn(name) ?: versionIn(tag) ?: continue
-            val version = v.joinToString(".")
+            // A pre-release's label comes from its tag (the tag is the version, see version.sh).
+            val label = labelIn(tag).takeIf { it.isNotEmpty() && versionIn(tag) == v }
+            val version = v.joinToString(".") + (label?.let { "-$it" } ?: "")
             if (!newer(version, current) || (best != null && !newer(version, best.version))) continue
             best = Release(
                 version = version, tag = tag, title = (m["name"] as? String)?.takeIf { it.isNotBlank() } ?: tag,
@@ -155,7 +189,16 @@ object Updater {
     /** At the start of the app: a download from before is ready again; every half hour a look if set so. */
     fun start(ctx: Context) {
         val app = ctx.applicationContext
-        restore(app)
+        // Hashing a downloaded APK (tens of MB) takes a while: not on the main thread while the
+        // app starts. Busy meanwhile, so a check doesn't download it again.
+        busy = true
+        net.execute {
+            val ready = runCatching { restore(app) }.getOrNull()
+            N0te.main.post {
+                busy = false
+                if (ready != null && state is State.Idle) state = ready
+            }
+        }
         N0te.main.postDelayed(object : Runnable {
             override fun run() {
                 if (mode == "periodic") maybeCheck(app)
@@ -211,12 +254,12 @@ object Updater {
     private fun download(app: Context, r: Release) {
         val file = File(dir(app), "n0te-${r.version}.apk")
         keepFound(r)
-        // Downloaded before: ready at once.
-        if (complete(file, r)) { state = State.Ready(r, file); busy = false; return }
-        dir(app).listFiles()?.forEach { if (it != file) it.delete() }
         state = State.Downloading(r, 0, r.size)
         net.execute {
             val res = runCatching {
+                // Downloaded before: ready at once (checked here, hashing takes a moment).
+                if (complete(file, r)) return@runCatching
+                dir(app).listFiles()?.forEach { if (it != file) it.delete() }
                 val part = File(file.path + ".part")
                 val c = if (token.isNotEmpty() && r.apiUrl.isNotEmpty()) open(r.apiUrl, "application/octet-stream") else open(r.url, "application/octet-stream")
                 val total = c.contentLengthLong.takeIf { it > 0 } ?: r.size
@@ -295,16 +338,18 @@ object Updater {
         Settings.set("update_found", listOf(r.version, r.tag, r.title, r.notes, r.asset, r.url, r.apiUrl, r.size.toString(), r.sha256 ?: "").joinToString(sep.toString()))
     }
 
-    private fun restore(app: Context) {
+    /** The download from before if it is still there and whole (the [net] thread). */
+    private fun restore(app: Context): State.Ready? {
         val f = Settings.str("update_found", "").split('\u001f')
         val now = current(app)
         if (f.size == 9 && newer(f[0], now)) {
             val r = Release(f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7].toLongOrNull() ?: -1L, f[8].ifEmpty { null })
             val file = File(dir(app), "n0te-${r.version}.apk")
-            if (complete(file, r)) { state = State.Ready(r, file); return }
+            if (complete(file, r)) return State.Ready(r, file)
         }
         // Installed already (or gone): away with what is left.
         dir(app).listFiles()?.forEach { it.delete() }
+        return null
     }
 
     // --- installing ---------------------------------------------------------------------------
@@ -318,10 +363,14 @@ object Updater {
             activity.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, android.net.Uri.parse("package:${activity.packageName}")))
             return
         }
-        checkApk(activity, s.file)?.let { state = State.Failed(it); return }
         state = State.Installing(s.release)
         val app = activity.applicationContext
         net.execute {
+            // Reading the APK's signature takes a moment: here, not on the main thread.
+            runCatching { checkApk(app, s.file) }.getOrElse { it.message ?: "Update nicht lesbar" }?.let { why ->
+                N0te.main.post { state = State.Failed(why) }
+                return@execute
+            }
             val r = runCatching {
                 val installer = app.packageManager.packageInstaller
                 val params = PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL).apply {

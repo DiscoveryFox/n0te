@@ -45,14 +45,19 @@ enum class GTool(val label: String, val hint: String, val needs: List<GNeed>, va
 
     REFLECT_LINE("Spiegeln an Gerade", "Ein Objekt an einer Geraden spiegeln", listOf(GNeed.OBJECT, GNeed.OBJECT), listOf("Objekt antippen", "Spiegelgerade antippen"), { "Spiegle(${it[0]}, ${it[1]})" }),
     REFLECT_POINT("Spiegeln an Punkt", "Ein Objekt an einem Punkt spiegeln", listOf(GNeed.OBJECT, GNeed.POINT), listOf("Objekt antippen", "Spiegelpunkt antippen"), { "Spiegle(${it[0]}, ${it[1]})" }),
-    ROTATE("Drehen um Punkt", "Ein Objekt um einen Punkt drehen", listOf(GNeed.OBJECT, GNeed.POINT, GNeed.NUMBER), listOf("Objekt antippen", "Drehpunkt antippen"), { "Drehe(${it[0]}, ${it[2]}°, ${it[1]})" }),
+    ROTATE("Drehen um Punkt", "Ein Objekt um einen Punkt drehen", listOf(GNeed.OBJECT, GNeed.POINT, GNeed.NUMBER), listOf("Objekt antippen", "Drehpunkt antippen"), { "Drehe(${it[0]}, (${it[2].trim().removeSuffix("°")})°, ${it[1]})" }),
     TRANSLATE("Verschieben mit Vektor", "Ein Objekt um einen Vektor verschieben", listOf(GNeed.OBJECT, GNeed.OBJECT), listOf("Objekt antippen", "Vektor antippen"), { "Verschiebe(${it[0]}, ${it[1]})" }),
 
     SLIDER("Schiebe\u00ADregler", "Eine Zahl zum Ziehen", listOf(GNeed.PLACE), listOf("Tippen, wo er stehen soll"), { null }),
     TEXT("Text", "Ein Text im Graphen", listOf(GNeed.PLACE), listOf("Tippen, wo er stehen soll"), { null });
 
-    /** The name on the top bar's buttons: its first word. */
-    val short: String get() = label.substringBefore(' ')
+    /** The name on the top bar's buttons: its first word, or its own where two tools share it. */
+    val short: String get() = when (this) {
+        CIRCLE_RADIUS -> "Radius"
+        CIRCLE3 -> "Umkreis"
+        REFLECT_POINT -> "Punktspiegeln"
+        else -> label.substringBefore(' ')
+    }
 
     companion object {
         /** The tools offered first (like GeoGebra's basic tools). */
@@ -160,10 +165,21 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
     fun infoOf(id: String?) = infos.firstOrNull { it.id == id }
     fun nameOf(id: String) = infoOf(id)?.name ?: ""
 
-    /** A new draft (one step back to undo); [quiet]: a drag in progress, no new step. */
-    fun set(p: FfiPlot, quiet: Boolean = false) {
+    /** The last change that the next one of the same kind joins (a slider being dragged), and when. */
+    private var mergeKey: Any? = null
+    private var mergeAt = 0L
+
+    /**
+     * A new draft (one step back to undo); [quiet]: a drag in progress, no new step. [merge]: a
+     * change that joins the step before when it is of the same kind and follows soon (a slider:
+     * one step per drag, not one per move, which pushed the real history out).
+     */
+    fun set(p: FfiPlot, quiet: Boolean = false, merge: Any? = null) {
         if (p == draft) return
-        if (!quiet) { undo.addLast(draft); while (undo.size > 200) undo.removeFirst(); redo.clear(); notice = null }
+        val now = System.currentTimeMillis()
+        val joins = merge != null && merge == mergeKey && now - mergeAt < MERGE_MS
+        mergeKey = merge; mergeAt = now
+        if (!quiet && !joins) { undo.addLast(draft); while (undo.size > 200) undo.removeFirst(); redo.clear(); notice = null }
         draft = p
         if (settings != null && draft.objs.none { it.id == settings }) settings = null
         onChange()
@@ -214,8 +230,8 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
     /** A drag starts: the plot before it is the step to undo. */
     fun beginGesture() { undo.addLast(draft); redo.clear() }
 
-    fun undo() { val p = undo.removeLastOrNull() ?: return; redo.addLast(draft); draft = p; clearPicks(); notice = null; error = null; fixRefs(); onChange() }
-    fun redo() { val p = redo.removeLastOrNull() ?: return; undo.addLast(draft); draft = p; clearPicks(); notice = null; error = null; fixRefs(); onChange() }
+    fun undo() { mergeKey = null; val p = undo.removeLastOrNull() ?: return; redo.addLast(draft); draft = p; clearPicks(); notice = null; error = null; fixRefs(); onChange() }
+    fun redo() { mergeKey = null; val p = redo.removeLastOrNull() ?: return; undo.addLast(draft); draft = p; clearPicks(); notice = null; error = null; fixRefs(); onChange() }
 
     /** Selected or open objects that are gone (undone) let go. */
     private fun fixRefs() {
@@ -238,6 +254,7 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
     /** A line of input (GeoGebra's input bar); null: done, else what is wrong. */
     fun input(text: String): String? {
         if (text.isBlank()) return null
+        tooComplex(text)?.let { return it }
         return try {
             val before = draft.objs.map { it.id }.toSet()
             set(uniffi.n0te_ffi.plotAdd(draft, plain(text)))
@@ -248,7 +265,7 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
         } catch (e: Exception) { errText(e) }
     }
 
-    fun setDef(id: String, def: String): String? = try {
+    fun setDef(id: String, def: String): String? = tooComplex(def) ?: try {
         set(uniffi.n0te_ffi.plotSetDef(draft, id, plain(def))); null
     } catch (e: Exception) { errText(e) }
 
@@ -265,7 +282,7 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
 
     /** How a typed line looks set (LaTeX), for the preview under the input; "" while it doesn't read yet. */
     fun preview(text: String): String {
-        if (text.isBlank()) return ""
+        if (text.isBlank() || tooComplex(text) != null) return ""
         // Typed as LaTeX: shown as typed.
         if ('\\' in text) return text.trim()
         return runCatching { uniffi.n0te_ffi.plotInputLatex(draft, text.trim()) }.getOrDefault("")
@@ -281,11 +298,11 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
         onChange()
     }
 
-    fun style(id: String, change: (uniffi.n0te_ffi.FfiStyle) -> uniffi.n0te_ffi.FfiStyle) {
-        set(draft.copy(objs = draft.objs.map { if (it.id == id) it.copy(style = change(it.style)) else it }))
+    fun style(id: String, merge: Any? = null, change: (uniffi.n0te_ffi.FfiStyle) -> uniffi.n0te_ffi.FfiStyle) {
+        set(draft.copy(objs = draft.objs.map { if (it.id == id) it.copy(style = change(it.style)) else it }), merge = merge)
     }
 
-    fun view(change: (FfiPlot) -> FfiPlot) = set(change(draft))
+    fun view(merge: Any? = null, change: (FfiPlot) -> FfiPlot) = set(change(draft), merge = merge)
 
     /** The plot as the page shows it while editing: picked and selected objects drawn bolder. */
     fun shown(): FfiPlot {
@@ -363,11 +380,18 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
 
     /** The number a tool asked for (radius, angle). */
     fun answer(text: String): String? {
-        val v = text.trim().replace(',', '.')
+        val v = decimalPoints(text.trim())
         if (v.isEmpty()) return "Eine Zahl eingeben"
+        // A wrong entry asks again with what was picked so far (it started the tool over).
+        val keep = picks.toList(); val keepIds = pickIds.toList(); val ask = asking
         picks += v; pickIds += ""
         asking = null
-        return finish()
+        val err = finish()
+        if (err != null) {
+            picks.addAll(keep); pickIds.addAll(keepIds); asking = ask
+            onChange()
+        }
+        return err
     }
 
     private fun nextNeed(): GNeed? {
@@ -578,10 +602,40 @@ class GraphSession(val sheetId: String, start: FfiPlot, val fresh: Boolean, priv
         /** What the core said is wrong (its German message, not the exception's wrapping). */
         fun errText(e: Throwable): String = (e as? uniffi.n0te_ffi.N0teException.Failed)?.msg ?: e.message ?: "Fehler"
 
-        /** A number for a definition: dot decimals (it reads back exactly). */
+        /**
+         * A number for a definition: dot decimals, six places at most, never in E notation (the core
+         * read "4.0E-4" as 4.0 times a point E).
+         */
         fun num(v: Double): String {
-            val r = Math.round(v * 1e6) / 1e6
-            return if (r == Math.rint(r)) r.toLong().toString() else r.toString()
+            if (!v.isFinite()) return "0"
+            val r = java.math.BigDecimal(v).setScale(6, java.math.RoundingMode.HALF_UP).stripTrailingZeros()
+            return if (r.signum() == 0) "0" else r.toPlainString()
         }
+
+        /**
+         * Why an input is refused before the core reads it (null: fine): the core's reader is
+         * recursive without a limit, and a deep nesting (a paste of a thousand brackets) overflows
+         * the stack of the thread that draws the graph: that ends the app at every redraw.
+         */
+        fun tooComplex(s: String): String? {
+            if (s.length > MAX_INPUT) return "Zu lang (höchstens $MAX_INPUT Zeichen)"
+            var depth = 0; var deepest = 0; var minus = 0; var minusRun = 0
+            for (c in s) {
+                when (c) {
+                    '(', '[', '{' -> { depth++; deepest = maxOf(deepest, depth) }
+                    ')', ']', '}' -> depth--
+                }
+                minusRun = if (c == '-' || c == '−') minusRun + 1 else if (c == ' ') minusRun else 0
+                minus = maxOf(minus, minusRun)
+            }
+            return if (deepest > MAX_DEPTH || minus > MAX_DEPTH) "Zu tief verschachtelt" else null
+        }
+        const val MAX_INPUT = 2000
+        /** Changes of one kind this close together are one undo step (see [set]). */
+        const val MERGE_MS = 1500L
+        const val MAX_DEPTH = 60
+
+        /** A decimal comma between digits as a point ("1,5" → "1.5"); commas between arguments stay. */
+        fun decimalPoints(s: String): String = s.replace(Regex("(?<=\\d),(?=\\d)"), ".")
     }
 }

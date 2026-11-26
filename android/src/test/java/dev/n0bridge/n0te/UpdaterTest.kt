@@ -34,8 +34,8 @@ class UpdaterTest {
         assertEquals("abcdef", r.sha256)
         assertEquals("n0bridge 0.15", r.title)
         assertTrue(r.notes.contains("Graphen \"größer\"") && r.notes.contains("Tastatur ä"))
-        // Pre-releases only when wanted; nothing newer: nothing.
-        assertEquals("0.27.1", Updater.pick(releases, "0.26.1", pre = true)!!.version)
+        // Pre-releases only when wanted (with the label from their tag); nothing newer: nothing.
+        assertEquals("0.27.1-beta", Updater.pick(releases, "0.26.1", pre = true)!!.version)
         assertNull(Updater.pick(releases, "0.27.0", pre = false))
         assertNull(Updater.pick("[]", "0.1.0", pre = true))
     }
@@ -48,6 +48,38 @@ class UpdaterTest {
         assertFalse(Updater.newer("0.26", "0.26.0"))
         assertEquals(listOf(0, 27, 1), Updater.versionIn("n0te-v0.27.1-release.apk"))
         assertNull(Updater.versionIn("n0te.apk"))
+    }
+
+    @Test fun aPreReleaseIsOlderThanItsReleaseAndLabelsCount() {
+        // A beta tester on 0.35.0-beta.1 was never offered 0.35.0 (same numbers: "not newer").
+        assertTrue(Updater.newer("0.35.0", "0.35.0-beta.1"))
+        assertFalse(Updater.newer("0.35.0-beta.1", "0.35.0"))
+        assertTrue(Updater.newer("0.35.0-beta.2", "0.35.0-beta.1"))
+        assertTrue("numbers in a label count as numbers", Updater.newer("0.35.0-beta.10", "0.35.0-beta.9"))
+        assertTrue(Updater.newer("0.35.0-rc.1", "0.35.0-beta.3"))
+        assertTrue(Updater.newer("0.35.0-beta.1", "0.34.9"))
+        assertFalse(Updater.newer("0.35.0-beta.1", "0.35.0-beta.1"))
+        assertFalse(Updater.newer("0.34.1", "0.34.1"))
+    }
+
+    @Test fun aBetaTesterGetsTheReleaseAndTheNextBeta() {
+        val json = """
+        [
+          {"tag_name": "v0.35.0-beta.2", "name": "", "draft": false, "prerelease": true,
+           "assets": [{"name": "n0te-0.35.0-beta.2-android.apk", "browser_download_url": "https://x/b2", "url": "", "size": 1}]},
+          {"tag_name": "v0.35.0-beta.1", "name": "", "draft": false, "prerelease": true,
+           "assets": [{"name": "n0te-0.35.0-beta.1-android.apk", "browser_download_url": "https://x/b1", "url": "", "size": 1}]}
+        ]
+        """.trimIndent()
+        val b = Updater.pick(json, "0.35.0-beta.1", pre = true)!!
+        assertEquals("0.35.0-beta.2", b.version)
+        assertEquals("https://x/b2", b.url)
+        assertNull(Updater.pick(json, "0.35.0-beta.2", pre = true))
+        // The release itself (newer than every beta of it); its asset name carries no label.
+        val withRelease = json.replaceFirst("[", """[{"tag_name": "v0.35.0", "name": "", "draft": false, "prerelease": false,
+           "assets": [{"name": "n0te-0.35.0-android.apk", "browser_download_url": "https://x/r", "url": "", "size": 1}]},""")
+        assertEquals("0.35.0", Updater.pick(withRelease, "0.35.0-beta.2", pre = true)!!.version)
+        assertEquals("0.35.0", Updater.pick(withRelease, "0.35.0-beta.1", pre = false)!!.version)
     }
 
     @Test fun theJsonReaderReadsGitHubsAnswers() {
