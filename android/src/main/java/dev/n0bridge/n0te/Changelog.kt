@@ -11,6 +11,20 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.35.0", "26. Nov. 2026", "Eigene Designs, Weihnachten und viele Fehler weniger", listOf(
+            "Eigene Designs mit KI: Einstellungen › Design › „Mit KI gestalten“ kopiert eine Anleitung für ChatGPT, Claude oder Gemini; die Antwort einfach wieder einfügen. n0te prüft sie, zeigt eine Vorschau und sagt sonst genau, was die KI ändern soll",
+            "Acht neue Designs: Weihnachten (Schneefall und Lichterkette), Blaupause, Kreidetafel, Sternennacht, Kirschblüte, Herbst, Terminal und Hoher Kontrast – mit Dekorationen hinter der Bibliothek, nie beim Schreiben, abschaltbar",
+            "Designs teilen: dieselbe Datei funktioniert auf dem Tablet, am Laptop und unter Windows",
+            "Absturzberichte: nach einem Absturz kannst du einen Bericht (ohne Notizen) kopieren oder teilen",
+            "Was du kurz vor dem Verlassen schreibst, wird immer gespeichert; ist eine Seite zweimal offen, gehen keine Striche mehr verloren",
+            "Beschädigte Dateien werden vom anderen Gerät repariert; kaputte Importe hinterlassen keine halben Notizbücher",
+            "Abstürze behoben: Mitwandern am Seitenrand, Lupe in schmalen Bereichen, Ordner namens „+“, Formeln wie f(x) = f(x) + 1 und mehr",
+            "Updates erreichen auch Beta-Tester; PDF-Seiten bleiben nach dem Zoomen nicht mehr weiß",
+            "Bibliothek: Mehrfachauswahl wählt die richtigen Notizbücher, Einladungslinks aus Chats funktionieren",
+            "Graphen: Zurück behält die Änderungen; Zahlen, Winkel und Kommas werden richtig gelesen; ein Schieberegler ist ein Rückgängig-Schritt",
+            "Änderungen vom Laptop erscheinen sofort, auch wenn n0te kurz im Hintergrund war; Seiten mit mehreren Fotos flackern nicht mehr",
+            "Beim Drehen bleiben offene Dialoge erhalten, lange Dialoge scrollen, Treffer in zugeklappten Gruppen klappen sie auf",
+        )),
         Entry("0.34.1", "26. Nov. 2026", "Gäste bleiben verbunden", listOf(
             "Gäste in mehreren deiner Notizbücher bleiben verbunden: vorher kamen und gingen sie ständig, und was sie schrieben oder an Graphen änderten, kam kaum an",
             "Denselben Einladungslink noch einmal öffnen stört die Verbindung nicht mehr",

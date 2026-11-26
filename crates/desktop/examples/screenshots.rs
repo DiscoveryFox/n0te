@@ -273,11 +273,10 @@ fn main() {
     // the design picker in the settings with an AI-written design waiting to be applied.
     h.message(Message::Back);
     h.message(Message::SetTheme("christmas"));
-    h.app.settings.decor_motion = false;
     shot(&mut h, "christmas");
     h.message(Message::DesignText(Some(TEA_HOUSE.into())));
     settle(&mut h);
-    h.scroll(iced::Point::new(W / 2.0, H / 2.0), 0.0, -360.0);
+    h.scroll(iced::Point::new(W / 2.0, H / 2.0), 0.0, -760.0);
     shot(&mut h, "designs");
     h.message(Message::DesignDiscard);
     h.message(Message::ShowSettings(false));

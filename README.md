@@ -168,6 +168,8 @@ select several to tag or move them at once.
 
 ### Designs
 
+![The library in the Christmas design: fairy lights along the top, snow behind the notebooks](docs/screenshots/christmas.png)
+
 Fourteen designs, each with its own colours, shapes and fonts, the same on the tablet and on the
 laptop:
 
@@ -181,6 +183,8 @@ You can also **make your own design with an AI:**
 1. Copy n0te's instructions (Settings › Design).
 2. Paste them into ChatGPT, Claude or Gemini together with your idea.
 3. Paste the answer back into n0te.
+
+![The design picker: classic and special designs, and an AI-written "Tea house" design waiting to be applied](docs/screenshots/designs.png)
 
 n0te checks the design and shows a preview. If something doesn't fit, it lists what the AI should
 fix. A design file imports the same way on Android, Windows and Linux. The format and the rules
