@@ -75,6 +75,22 @@ object LibraryOrg {
         else -> null
     }
 
+    /**
+     * The invite link in [text] ("Hier: n0te://invite/AbC…." from a chat, a link with "?…" or a
+     * "/" behind it, an upper-case scheme), as the core reads it; null if there is none. The core
+     * decodes everything after the prefix, so a full stop behind the link made it "beschädigt".
+     */
+    fun inviteIn(text: String?): String? =
+        text?.let { INVITE.find(it) }?.let { "n0te://invite/" + it.groupValues[1] }
+    private val INVITE = Regex("(?i)n0te://invite/([A-Za-z0-9_-]+)")
+
+    /** The notebooks picked after a tap on [id] (null: not picking). */
+    fun toggled(picked: Set<String>?, id: String): Set<String>? = picked?.let { if (id in it) it - id else it + id }
+
+    /** Folders made but still empty ([extra]) after folder [path] is dissolved: the ones inside one level up, none lost. */
+    fun dissolvedFolders(extra: List<String>, path: String): List<String> =
+        extra.map { dissolved(it, path) ?: it }.filter { it.isNotEmpty() }.distinct()
+
     /** When notebooks were opened last, from what the settings keep ("id:ms;id:ms"). */
     fun opened(stored: String): Map<String, Long> =
         stored.split(';').mapNotNull { p -> p.split(':').takeIf { it.size == 2 }?.let { (id, t) -> t.toLongOrNull()?.let { id to it } } }.toMap()

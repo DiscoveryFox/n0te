@@ -32,6 +32,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -106,7 +108,7 @@ class LibraryActivity : ComponentActivity() {
     /** What's new in this version: shown once after an install or update. */
     private var news by mutableStateOf<Changelog.Entry?>(null)
     private val syncListener: (uniffi.n0te_ffi.FfiSyncEvent) -> Unit = { e ->
-        if (e is uniffi.n0te_ffi.FfiSyncEvent.RemoteChanged || e is uniffi.n0te_ffi.FfiSyncEvent.Paired) reload()
+        if (e is uniffi.n0te_ffi.FfiSyncEvent.RemoteChanged || e is uniffi.n0te_ffi.FfiSyncEvent.Paired) reloadSoon()
         // Joining an invite with approval: the owner lets us in by hand.
         if (e is uniffi.n0te_ffi.FfiSyncEvent.JoinWaiting) busy = "Warte, bis ${e.owner} dich hereinlässt …"
     }
@@ -123,13 +125,24 @@ class LibraryActivity : ComponentActivity() {
 
     /** A picked file: a `.n0te` notebook (from the laptop) is merged in, a PDF becomes a notebook. */
     private fun importFile(uri: android.net.Uri) {
-        val head = runCatching { contentResolver.openInputStream(uri)?.use { s -> ByteArray(8).also { s.read(it) } } }.getOrNull() ?: ByteArray(0)
-        if (String(head, Charsets.ISO_8859_1).startsWith("N0TEBNDL")) importBundle(uri) else importPdf(uri)
+        // In the background: opening a file from a cloud provider can download it first.
+        busy = "Öffne die Datei …"
+        N0te.background({
+            // All 8 bytes (one read may return fewer; readNBytes needs Android 13).
+            contentResolver.openInputStream(uri)?.use { s ->
+                val b = ByteArray(8); var n = 0
+                while (n < b.size) { val k = s.read(b, n, b.size - n); if (k < 0) break; n += k }
+                b.copyOf(n)
+            } ?: ByteArray(0)
+        }) { r ->
+            busy = null
+            if (String(r.getOrDefault(ByteArray(0)), Charsets.ISO_8859_1).startsWith("N0TEBNDL")) importBundle(uri) else importPdf(uri)
+        }
     }
 
     /** Takes over a notebook sent as `.n0te`, merged with the copy here (nothing is lost). */
     private fun importBundle(uri: android.net.Uri) {
-        busy = "Übernehme Notizbuch…"
+        busy = "Übernehme Notizbuch …"
         N0te.background({
             val f = java.io.File(cacheDir, "import.n0te")
             contentResolver.openInputStream(uri)?.use { input -> f.outputStream().use { input.copyTo(it) } } ?: error("nicht lesbar")
@@ -143,7 +156,7 @@ class LibraryActivity : ComponentActivity() {
 
     /** Sends the notebook as a `.n0te` file to the laptop (through n0bridge). */
     private fun sendToLaptop(e: Entry) {
-        busy = "Packe „${e.title}“…"
+        busy = "Packe „${e.title}“ …"
         N0te.background({
             val dir = java.io.File(cacheDir, "share").apply { mkdirs() }
             val safe = e.title.ifBlank { "Notizbuch" }.replace(Regex("[^\\p{L}\\p{N} _-]"), "_").trim().replace(' ', '_')
@@ -160,14 +173,19 @@ class LibraryActivity : ComponentActivity() {
     /** A PDF (lecture slides) becomes a new notebook, one page per PDF page. */
     private fun importPdf(uri: android.net.Uri) {
         val svc = N0te.pdf ?: return android.widget.Toast.makeText(this, "PDF-Unterstützung nicht geladen", android.widget.Toast.LENGTH_LONG).show()
-        val name = contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-            if (c.moveToFirst()) c.getString(0) else null
-        }?.removeSuffix(".pdf")?.removeSuffix(".PDF") ?: "PDF"
-        busy = "Importiere $name…"
+        // A provider that refuses the query (SecurityException) no longer ends the app.
+        val name = runCatching {
+            contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        }.getOrNull()?.removeSuffix(".pdf")?.removeSuffix(".PDF")?.ifBlank { null } ?: "PDF"
+        busy = "Importiere $name …"
         N0te.background({
             val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("nicht lesbar")
+            if (bytes.size < 5 || String(bytes, 0, 5, Charsets.ISO_8859_1) != "%PDF-") error("keine PDF-Datei und kein n0te-Notizbuch")
             val nb = N0te.library.createNotebook(name)
-            nb.importPdf(svc, bytes, null, 0u)
+            // A PDF pdfium can't read leaves no empty notebook behind (as in ShareActivity).
+            runCatching { nb.importPdf(svc, bytes, null, 0u) }.onFailure { runCatching { N0te.library.trashNotebook(nb.id()) }; throw it }
             nb.save()
             nb.id()
         }) { r ->
@@ -180,25 +198,28 @@ class LibraryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Themes.applyWindow(this)
         news = Changelog.unseen(this)
-        inviteFrom(intent)
+        // Only a fresh start: rebuilt (a new design, the system ended the app), the link was
+        // dealt with already and the join dialog came back.
+        if (savedInstanceState == null) inviteFrom(intent)
         setContent { Screen() }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         inviteFrom(intent)
     }
 
     /** A tapped n0te://invite/… link: the join dialog with it filled in. */
     private fun inviteFrom(i: Intent?) {
-        val link = i?.dataString ?: return
-        if (i.action == Intent.ACTION_VIEW && link.startsWith("n0te://invite/")) joining = link
+        if (i?.action != Intent.ACTION_VIEW) return
+        LibraryOrg.inviteIn(i.dataString)?.let { joining = it }
     }
 
     /** "Einladung": an invite link in the clipboard is filled in already. */
     private fun clipboardInvite(): String = runCatching {
         val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
-        cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString()?.trim()?.takeIf { it.startsWith("n0te://invite/") }
+        LibraryOrg.inviteIn(cm.primaryClip?.getItemAt(0)?.coerceToText(this)?.toString())
     }.getOrNull() ?: ""
 
     override fun onResume() {
@@ -220,15 +241,17 @@ class LibraryActivity : ComponentActivity() {
     private fun join(link: String, pin: String? = null) {
         val engine = SyncHub.engine ?: return android.widget.Toast.makeText(this, "Sync startet noch …", android.widget.Toast.LENGTH_SHORT).show()
         busy = "Verbinde mit dem Besitzer …"
-        N0te.background({
-            val id = engine.joinWith(link.trim(), pin)
+        // On a thread of its own: the wait below takes up to 45 s, and on n0te-io every save and
+        // the library list would wait behind it.
+        N0te.aside("n0te-join", {
+            val id = engine.joinWith(LibraryOrg.inviteIn(link) ?: link.trim(), pin)
             N0te.main.post { busy = "Lade das Notizbuch vom Besitzer …" }
             // It arrives in the background: wait until it is here (opening it right away was the
             // "error on first load"), at most 45 s.
             val until = System.currentTimeMillis() + 45_000
             var ready = false
             while (!ready && System.currentTimeMillis() < until) {
-                ready = runCatching { N0te.library.loadNotebook(id).sheetCount() > 0u }.getOrDefault(false)
+                ready = runCatching { N0te.library.loadNotebook(id).use { it.sheetCount() > 0u } }.getOrDefault(false)
                 if (!ready) Thread.sleep(400)
             }
             id to ready
@@ -277,14 +300,44 @@ class LibraryActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * One reload for a burst of changes: the laptop writing live sends one per stroke batch, and
+     * each reload reads every notebook (they queued up on the I/O thread).
+     */
+    private var reloadPending = false
+    private val reloadLater = Runnable { reloadPending = false; reload() }
+    private fun reloadSoon() {
+        if (reloadPending) return
+        reloadPending = true
+        N0te.main.postDelayed(reloadLater, 600)
+    }
+
+    /** Several notebooks to the bin: one job and one reload (not one each), one message if some failed. */
+    private fun trashAll(es: List<Entry>) {
+        if (es.isEmpty()) return
+        N0te.background({
+            es.count { e -> runCatching { N0te.library.trashNotebook(e.id); thumbFile(e.id).delete() }.isFailure }
+        }) { r ->
+            val failed = r.getOrDefault(es.size)
+            if (failed > 0) android.widget.Toast.makeText(this, if (failed == 1) "Ein Notizbuch konnte nicht gelöscht werden" else "$failed Notizbücher konnten nicht gelöscht werden", android.widget.Toast.LENGTH_LONG).show()
+            reload()
+        }
+    }
+
     private fun reload() {
         N0te.background({
             N0te.library.notebookIds().mapNotNull { id ->
-                runCatching { N0te.library.loadNotebook(id) }.getOrNull()?.let {
+                // Closed right away: a list of many notebooks (each reload) doesn't pile up their
+                // documents in native memory until the garbage collector gets round to them.
+                runCatching { N0te.library.loadNotebook(id) }.getOrNull()?.use {
                     Entry(id, it.title(), it.folder(), it.sheetCount().toInt(), it.cover(), java.io.File(N0te.root, "notebooks/$id").lastModified(), it.tags(), it.pinned())
                 }
             }.sortedWith(compareBy({ it.folder.lowercase() }, { it.title.lowercase() }))
-        }) { r -> entries = r.getOrDefault(emptyList()); loadRecentPages() }
+        }) { r ->
+            // Unreadable library: what was shown stays and it is said (not "Noch leer", as if all were gone).
+            r.onSuccess { entries = it; loadRecentPages() }
+                .onFailure { if (entries == null) entries = emptyList(); android.widget.Toast.makeText(this, "Bibliothek nicht lesbar: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+        }
     }
 
     /** The pages changed last, with their pictures (after the list, so it never waits for them). */
@@ -313,12 +366,19 @@ class LibraryActivity : ComponentActivity() {
                 val pic = runCatching { PagePictures.of(dir, nb, r.sheet, spec, r.changed, 320) }.getOrNull() ?: continue
                 out += RecentPage(r.notebook, r.sheet, r.changed, nb.title(), label, (spec.height / spec.width).coerceIn(0.4f, 2f), pic.path)
             }
+            for (b in books.values) b?.first?.close()
             PagePictures.keepOnly(dir, out.map { java.io.File(it.picture).name }.toSet())
             out
         }) { r -> r.getOrNull()?.let { recentPages = it } }
     }
 
+    /** When a notebook was opened last: a quick second tap opened it a second time on top. */
+    private var openedAt = 0L
+
     private fun open(id: String, sheet: String? = null) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - openedAt < 700) return
+        openedAt = now
         Settings.set("lib_opened", LibraryOrg.openedNow(Settings.str("lib_opened", ""), id, System.currentTimeMillis()))
         startActivity(Intent(this, NotebookActivity::class.java).putExtra(NotebookActivity.EXTRA_ID, id).apply { sheet?.let { putExtra(NotebookActivity.EXTRA_SHEET, it) } })
     }
@@ -330,28 +390,34 @@ class LibraryActivity : ComponentActivity() {
             nb.addSheet(null, 0u, spec)
             nb.save()
             nb.id()
-        }) { r -> r.getOrNull()?.let { open(it) } }
+        }) { r ->
+            // A failure said nothing ("Anlegen" seemed to do nothing).
+            r.onSuccess { open(it) }.onFailure { android.widget.Toast.makeText(this, "Anlegen fehlgeschlagen: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+        }
     }
 
+    @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
     @Composable
     private fun Screen() = N0teType {
         var creating by remember { mutableStateOf(false) }
         val list = entries
         Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().background(Ui.Black)) {
+        // Clear of the system bars (as Settings and Share are; Android 15 draws the app under them).
+        Column(Modifier.fillMaxSize().background(Ui.Black).statusBarsPadding().navigationBarsPadding()) {
             Row(Modifier.fillMaxWidth().padding(start = 28.dp, end = 20.dp, top = 16.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Wordmark(cell = 4.dp)
-                Spacer(Modifier.weight(1f))
-                SyncChip()
-                Spacer(Modifier.width(14.dp))
-                UpdateButton()
-                Btn("Einladung") { joining = clipboardInvite() }
-                Spacer(Modifier.width(10.dp))
-                Btn("Importieren") { pickFile.launch(arrayOf("application/pdf", "application/octet-stream", "*/*")) }
-                Spacer(Modifier.width(10.dp))
-                Btn("+ Neues Notizbuch", BtnKind.PRIMARY) { creating = true }
-                Spacer(Modifier.width(8.dp))
-                IconBtn(Glyph.SETTINGS) { startActivity(Intent(this@LibraryActivity, SettingsActivity::class.java)) }
+                Spacer(Modifier.width(16.dp))
+                // Upright (or in a narrow window) the buttons wrap onto a second line instead of
+                // squeezing the last ones (the settings) to nothing.
+                androidx.compose.foundation.layout.FlowRow(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                    verticalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterVertically)) {
+                    SyncChip()
+                    UpdateButton()
+                    Btn("Einladung") { joining = clipboardInvite() }
+                    Btn("Importieren") { pickFile.launch(arrayOf("application/pdf", "application/octet-stream", "*/*")) }
+                    Btn("+ Neues Notizbuch", BtnKind.PRIMARY) { creating = true }
+                    IconBtn(Glyph.SETTINGS) { startActivity(Intent(this@LibraryActivity, SettingsActivity::class.java)) }
+                }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(Ui.Border))
             Row(Modifier.fillMaxSize()) {
@@ -421,7 +487,7 @@ class LibraryActivity : ComponentActivity() {
                 // Organising isn't editing: the notebook keeps its place under "Zuletzt geändert".
                 val dir = java.io.File(N0te.root, "notebooks/$id")
                 val was = dir.lastModified()
-                val nb = N0te.library.loadNotebook(id); what(id, nb); nb.save()
+                N0te.library.loadNotebook(id).use { nb -> what(id, nb); nb.save() }
                 if (was > 0) dir.setLastModified(was)
             }
         }) { r ->
@@ -572,13 +638,13 @@ class LibraryActivity : ComponentActivity() {
                 }
             }
             when {
-                all == null -> Text("Lade…", color = Ui.Muted, fontSize = 14.sp, modifier = Modifier.padding(32.dp))
+                all == null -> Text("Lade …", color = Ui.Muted, fontSize = 14.sp, modifier = Modifier.padding(32.dp))
                 all.isEmpty() -> Box(Modifier.padding(32.dp)) { EmptyState(onCreate) }
                 else -> {
                   val grid = androidx.compose.foundation.lazy.grid.rememberLazyGridState()
                   // A new place starts at its top; the recent pages (loaded after the list) don't push it down.
                   androidx.compose.runtime.LaunchedEffect(p, searching) { grid.scrollToItem(0) }
-                  androidx.compose.runtime.LaunchedEffect(recentPages.size) { if (grid.firstVisibleItemIndex <= 3) grid.scrollToItem(0) }
+                  androidx.compose.runtime.LaunchedEffect(recentPages.size) { if (p is LibraryOrg.Place.Home && !searching && grid.firstVisibleItemIndex <= 3) grid.scrollToItem(0) }
                   LazyVerticalGrid(
                     state = grid,
                     columns = if (asList) GridCells.Fixed(1) else GridCells.Adaptive(190.dp),
@@ -688,10 +754,15 @@ class LibraryActivity : ComponentActivity() {
      * drag takes it (with the others picked) onto a folder, a tag or "pinned" in the sidebar.
      */
     @Composable
-    private fun Modifier.notebookTouch(e: Entry, toggle: () -> Unit): Modifier {
+    private fun Modifier.notebookTouch(entry: Entry, menuKey: String, onToggle: () -> Unit): Modifier {
         val haptic = androidx.compose.ui.platform.LocalHapticFeedback.current
         var origin by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
-        return this.onGloballyPositioned { origin = it.positionInRoot() }.pointerInput(e.id) {
+        // The gesture below keeps running across recompositions (keyed by the id only): it must
+        // see the notebook and the picking as they are now, not as at its first touch (a tap
+        // then ended picking, or put back a notebook just taken out).
+        val e by androidx.compose.runtime.rememberUpdatedState(entry)
+        val toggle by androidx.compose.runtime.rememberUpdatedState(onToggle)
+        return this.onGloballyPositioned { origin = it.positionInRoot() }.pointerInput(entry.id) {
             awaitEachGesture {
                 val down = awaitFirstDown(requireUnconsumed = false)
                 val long = awaitLongPressOrCancellation(down.id)
@@ -708,16 +779,19 @@ class LibraryActivity : ComponentActivity() {
                 val sel = picked
                 val group = if (sel != null && e.id in sel) entries.orEmpty().filter { it.id in sel } else listOf(e)
                 var moved = false
-                drag(long.id) { ch ->
-                    ch.consume()
-                    val at = origin + ch.position
-                    if (!moved && (at - start).getDistance() > viewConfiguration.touchSlop * 2) { moved = true; dragging = group; menuFor = null }
-                    if (moved) { dragAt = at; dropOn = targets.entries.firstOrNull { it.value.contains(at) }?.key }
+                try {
+                    drag(long.id) { ch ->
+                        ch.consume()
+                        val at = origin + ch.position
+                        if (!moved && (at - start).getDistance() > viewConfiguration.touchSlop * 2) { moved = true; dragging = group; menuFor = null }
+                        if (moved) { dragAt = at; dropOn = targets.entries.firstOrNull { it.value.contains(at) }?.key }
+                    }
+                    if (moved) dropOn?.let { dropTo(it, group) }
+                    else if (picked == null) menuFor = menuKey else toggle()
+                } finally {
+                    // Also when the card goes away mid-drag (sorted anew, removed by sync): no ghost chip left.
+                    if (moved) { dragging = null; dropOn = null }
                 }
-                if (moved) {
-                    dropOn?.let { dropTo(it, group) }
-                    dragging = null; dropOn = null
-                } else if (picked == null) menuFor = e.id else toggle()
             }
         }
     }
@@ -733,7 +807,7 @@ class LibraryActivity : ComponentActivity() {
             }
             key.startsWith("tag:") -> {
                 val t = key.removePrefix("tag:")
-                change(group.filter { e -> e.tags.none { it.equals(t, ignoreCase = true) } }.map { it.id }) { id, nb -> nb.setTags(group.first { it.id == id }.tags + t) }
+                change(group.filter { e -> e.tags.none { it.equals(t, ignoreCase = true) } }.map { it.id }) { _, nb -> nb.setTags(nb.tags() + t) }
             }
         }
         picked?.let { picked = emptySet() }
@@ -744,11 +818,11 @@ class LibraryActivity : ComponentActivity() {
     private fun NotebookRow(e: Entry, showFolder: Boolean) {
         val sel = picked
         val chosen = sel?.contains(e.id) == true
-        fun toggle() { picked = sel?.let { if (chosen) it - e.id else it + e.id } }
+        fun toggle() { picked = LibraryOrg.toggled(picked, e.id) }
         Box {
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(if (chosen) Ui.Elevated else Ui.Surface)
                 .then(if (chosen) Modifier.border(1.5.dp, Ui.Red, RoundedCornerShape(12.dp)) else Modifier)
-                .notebookTouch(e) { toggle() }.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                .notebookTouch(e, e.id) { toggle() }.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
                 if (sel != null) Box(Modifier.padding(end = 12.dp).size(22.dp).clip(androidx.compose.foundation.shape.CircleShape).background(if (chosen) Ui.Red else Color.Transparent)
                     .border(1.5.dp, if (chosen) Ui.Red else Ui.Muted, androidx.compose.foundation.shape.CircleShape), contentAlignment = Alignment.Center) { if (chosen) GlyphIcon(Glyph.CHECK, Ui.OnAccent, 14.dp) }
                 CoverArt(e.cover, e.title, e.id, Modifier.size(width = 40.dp, height = 52.dp))
@@ -808,16 +882,18 @@ class LibraryActivity : ComponentActivity() {
     @Composable
     private fun SelectBar(sel: Set<String>, list: List<Entry>, modifier: Modifier) {
         val chosen = list.filter { it.id in sel }
-        var sure by remember { mutableStateOf(false) }
+        // Asked again whenever the picking changes (a "Wirklich?" left standing deleted what was picked later).
+        var sure by remember(sel) { mutableStateOf(false) }
         Row(modifier.bar(24f).padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(Voice.cased("${sel.size} ausgewählt"), color = Ui.Chalk, fontSize = 13.sp, fontFamily = Voice.metaFont, modifier = Modifier.padding(end = 8.dp))
+            // The ones still there (one removed by sync meanwhile isn't counted).
+            Text(Voice.cased("${chosen.size} ausgewählt"), color = Ui.Chalk, fontSize = 13.sp, fontFamily = Voice.metaFont, modifier = Modifier.padding(end = 8.dp))
             val any = chosen.isNotEmpty()
             BarBtn(Glyph.FOLDER, "Verschieben", any) { moving = chosen }
             BarBtn(Glyph.TAG, "Tags", any) { tagging = chosen }
             val allPinned = any && chosen.all { it.pinned }
-            BarBtn(Glyph.PIN, if (allPinned) "Lösen" else "Anheften", any) { change(chosen.map { it.id }) { _, nb -> nb.setPinned(!allPinned) } }
+            BarBtn(Glyph.PIN, if (allPinned) "Nicht anheften" else "Anheften", any) { change(chosen.map { it.id }) { _, nb -> nb.setPinned(!allPinned) } }
             BarBtn(Glyph.TRASH, if (sure) "Wirklich?" else "Löschen", any) {
-                if (!sure) sure = true else { sure = false; chosen.forEach { trash(it) }; picked = emptySet() }
+                if (!sure) sure = true else { sure = false; trashAll(chosen); picked = emptySet() }
             }
             Box(Modifier.padding(horizontal = 6.dp).width(1.dp).height(22.dp).background(Ui.Border))
             BarBtn(Glyph.CLOSE, "Fertig", true) { picked = null }
@@ -845,7 +921,7 @@ class LibraryActivity : ComponentActivity() {
                     MenuRow(Glyph.PEN, "Umbenennen") { close(); renaming = e }
                     MenuRow(Glyph.FOLDER, "Verschieben …") { close(); moving = listOf(e) }
                     MenuRow(Glyph.TAG, "Tags …") { close(); tagging = listOf(e) }
-                    MenuRow(Glyph.PIN, if (e.pinned) "Lösen" else "Anheften") { close(); change(listOf(e.id)) { _, nb -> nb.setPinned(!e.pinned) } }
+                    MenuRow(Glyph.PIN, if (e.pinned) "Nicht mehr anheften" else "Anheften") { close(); change(listOf(e.id)) { _, nb -> nb.setPinned(!e.pinned) } }
                     MenuRow(Glyph.PAGE, "Cover …") { close(); covering = e }
                     MenuRow(Glyph.LAPTOP, "An den Laptop") { close(); sendToLaptop(e) }
                     Box(Modifier.padding(vertical = 4.dp, horizontal = 14.dp).fillMaxWidth().height(1.dp).background(Ui.Border))
@@ -962,19 +1038,22 @@ class LibraryActivity : ComponentActivity() {
         var have by remember { mutableStateOf(es.associate { it.id to it.tags }) }
         var newTag by remember { mutableStateOf("") }
         val known = (tagsOf(list).map { it.first } + have.values.flatten()).distinctBy { it.lowercase() }.sortedBy { it.lowercase() }
-        fun apply(next: Map<String, List<String>>) {
-            val changed = next.filter { (id, t) -> t != have[id] }
+        fun apply(op: (List<String>) -> List<String>) {
+            val next = have.mapValues { (_, t) -> op(t) }
+            val changed = next.filter { (id, t) -> t != have[id] }.keys
             have = next
-            change(changed.keys) { id, nb -> nb.setTags(changed.getValue(id)) }
+            // Applied to each notebook as it is now: tags given on the laptop meanwhile stay.
+            change(changed) { _, nb -> nb.setTags(op(nb.tags())) }
         }
         SmallDialog(if (es.size == 1) "Tags für „${es[0].title}“" else "Tags für ${es.size} Notizbücher", { tagging = null; picked?.let { picked = emptySet() } }, 480.dp) {
             if (known.isEmpty()) Text("Noch keine Tags. Einfach unten einen eintippen.", color = Ui.Muted, fontSize = 13.sp)
-            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Many tags scroll: the new-tag field and "Fertig" stay on screen.
+            androidx.compose.foundation.layout.FlowRow(Modifier.heightIn(max = 300.dp).verticalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 known.forEach { t ->
                     val on = have.values.all { tags -> tags.any { it.equals(t, ignoreCase = true) } }
                     Row(Modifier.clip(RoundedCornerShape(16.dp)).background(if (on) Ui.Elevated else Color.Transparent).border(1.dp, if (on) Color(LibraryOrg.tagColor(t)) else Ui.Border, RoundedCornerShape(16.dp))
                         .clickable {
-                            apply(have.mapValues { (_, tags) -> if (on) tags.filterNot { it.equals(t, ignoreCase = true) } else if (tags.any { it.equals(t, ignoreCase = true) }) tags else tags + t })
+                            apply { tags -> if (on) tags.filterNot { it.equals(t, ignoreCase = true) } else if (tags.any { it.equals(t, ignoreCase = true) }) tags else tags + t }
                         }.padding(horizontal = 12.dp, vertical = 7.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(9.dp).clip(androidx.compose.foundation.shape.CircleShape).background(Color(LibraryOrg.tagColor(t))))
                         Text(t, color = Ui.Chalk, fontSize = 13.sp, modifier = Modifier.padding(start = 8.dp))
@@ -988,7 +1067,7 @@ class LibraryActivity : ComponentActivity() {
                 Btn("Dazu", enabled = newTag.isNotBlank()) {
                     val t = newTag.trim()
                     newTag = ""
-                    apply(have.mapValues { (_, tags) -> if (tags.any { it.equals(t, ignoreCase = true) }) tags else tags + t })
+                    apply { tags -> if (tags.any { it.equals(t, ignoreCase = true) }) tags else tags + t }
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -1014,7 +1093,8 @@ class LibraryActivity : ComponentActivity() {
                     extraFolders.replaceAll { LibraryOrg.renamed(it, path, to) ?: it }
                     keepFolders()
                     (place as? LibraryOrg.Place.Folder)?.let { f -> LibraryOrg.renamed(f.path, path, to)?.let { place = LibraryOrg.Place.Folder(it) } }
-                    change(inside.map { it.id }) { id, nb -> LibraryOrg.renamed(list.first { it.id == id }.folder, path, to)?.let { nb.setFolder(it) } }
+                    // From the notebook as it is now (the list may be older: a move on the laptop meanwhile).
+                    change(inside.map { it.id }) { _, nb -> LibraryOrg.renamed(nb.folder(), path, to)?.let { nb.setFolder(it) } }
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1022,13 +1102,14 @@ class LibraryActivity : ComponentActivity() {
                 Btn(if (sure) "Wirklich auflösen?" else "Auflösen", BtnKind.DANGER) {
                     if (!sure) { sure = true; return@Btn }
                     folderFor = null
-                    extraFolders.removeAll { it == path || it.startsWith("$path/") }
+                    // Empty folders inside go one level up too (the text says nothing is deleted).
+                    LibraryOrg.dissolvedFolders(extraFolders.toList(), path).let { extraFolders.clear(); extraFolders.addAll(it) }
                     keepFolders()
                     if ((place as? LibraryOrg.Place.Folder)?.path?.let { it == path || it.startsWith("$path/") } == true) place = LibraryOrg.Place.Folder(LibraryOrg.parent(path)).takeIf { LibraryOrg.parent(path).isNotEmpty() } ?: LibraryOrg.Place.Home
-                    change(inside.map { it.id }) { id, nb -> LibraryOrg.dissolved(list.first { it.id == id }.folder, path)?.let { nb.setFolder(it) } }
+                    change(inside.map { it.id }) { _, nb -> LibraryOrg.dissolved(nb.folder(), path)?.let { nb.setFolder(it) } }
                 }
             }
-            if (sure) Text("Die ${inside.size} Notizbücher darin kommen eine Ebene höher. Gelöscht wird nichts.", color = Ui.Muted, fontSize = 12.sp)
+            if (sure) Text(if (inside.size == 1) "Das Notizbuch darin kommt eine Ebene höher. Gelöscht wird nichts." else "Die ${inside.size} Notizbücher darin kommen eine Ebene höher. Gelöscht wird nichts.", color = Ui.Muted, fontSize = 12.sp)
         }
     }
 
@@ -1055,6 +1136,7 @@ class LibraryActivity : ComponentActivity() {
     @Composable
     private fun TagDialog(tag: String, list: List<Entry>) {
         var name by remember(tag) { mutableStateOf(tag) }
+        var sure by remember(tag) { mutableStateOf(false) }
         val with = list.filter { e -> e.tags.any { it.equals(tag, ignoreCase = true) } }
         SmallDialog("Tag „$tag“", { tagFor = null }) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1064,13 +1146,16 @@ class LibraryActivity : ComponentActivity() {
                     val to = name.trim()
                     tagFor = null
                     if ((place as? LibraryOrg.Place.Tag)?.name?.equals(tag, ignoreCase = true) == true) place = LibraryOrg.Place.Tag(to)
-                    change(with.map { it.id }) { id, nb -> nb.setTags(list.first { it.id == id }.tags.map { if (it.equals(tag, ignoreCase = true)) to else it }) }
+                    change(with.map { it.id }) { _, nb -> nb.setTags(nb.tags().map { if (it.equals(tag, ignoreCase = true)) to else it }) }
                 }
             }
-            Btn("Von allen ${with.size} Notizbüchern entfernen", BtnKind.DANGER) {
+            // Asks once more, like dissolving a folder: one tap took it off every notebook.
+            val all = if (with.size == 1) "Vom Notizbuch entfernen" else "Von allen ${with.size} Notizbüchern entfernen"
+            Btn(if (sure) "Wirklich? $all" else all, BtnKind.DANGER) {
+                if (!sure) { sure = true; return@Btn }
                 tagFor = null
                 if ((place as? LibraryOrg.Place.Tag)?.name?.equals(tag, ignoreCase = true) == true) place = LibraryOrg.Place.All
-                change(with.map { it.id }) { id, nb -> nb.setTags(list.first { it.id == id }.tags.filterNot { it.equals(tag, ignoreCase = true) }) }
+                change(with.map { it.id }) { _, nb -> nb.setTags(nb.tags().filterNot { it.equals(tag, ignoreCase = true) }) }
             }
         }
     }
@@ -1114,12 +1199,14 @@ class LibraryActivity : ComponentActivity() {
     @Composable
     private fun Card(e: Entry, showFolder: Boolean, small: Boolean = false) {
         val st = Ui.theme.style
+        // The small cards (opened lately) show notebooks that are also listed: a menu of its own each.
+        val menuKey = if (small) "recent:${e.id}" else e.id
         val sel = picked
         val chosen = sel?.contains(e.id) == true
-        fun toggle() { picked = sel?.let { if (chosen) it - e.id else it + e.id } }
+        fun toggle() { picked = LibraryOrg.toggled(picked, e.id) }
         Box {
             Column(Modifier.cardBox().then(if (chosen) Modifier.border(2.dp, Ui.Red, RoundedCornerShape(minOf(st.card, 18f).dp)) else Modifier)
-                .notebookTouch(e) { toggle() }.padding(if (small) 9.dp else 12.dp)) {
+                .notebookTouch(e, menuKey) { toggle() }.padding(if (small) 9.dp else 12.dp)) {
                 Box {
                     CoverArt(e.cover, e.title, e.id, Modifier.fillMaxWidth().aspectRatio(0.78f))
                     if (sel != null) {
@@ -1130,7 +1217,7 @@ class LibraryActivity : ComponentActivity() {
                         if (e.pinned) Box(Modifier.align(Alignment.TopStart).padding(6.dp).size(28.dp).clip(RoundedCornerShape(minOf(st.button, 14f).dp)).background(Ui.Bar), contentAlignment = Alignment.Center) {
                             GlyphIcon(Glyph.PIN, Ui.Chalk, 16.dp)
                         }
-                        Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(32.dp).clip(RoundedCornerShape(minOf(st.button, 16f).dp)).background(Ui.Bar).clickable { menuFor = e.id },
+                        Box(Modifier.align(Alignment.TopEnd).padding(6.dp).size(32.dp).clip(RoundedCornerShape(minOf(st.button, 16f).dp)).background(Ui.Bar).clickable { menuFor = menuKey },
                             contentAlignment = Alignment.Center) { Text("⋯", color = Ui.Chalk, fontSize = 16.sp) }
                     }
                 }
@@ -1152,7 +1239,7 @@ class LibraryActivity : ComponentActivity() {
                     if (e.tags.size > 3) Text("+${e.tags.size - 3}", color = Ui.Muted, fontSize = 11.sp)
                 }
             }
-            if (menuFor == e.id) CardMenu(e)
+            if (menuFor == menuKey) CardMenu(e)
         }
     }
 
@@ -1263,9 +1350,10 @@ class LibraryActivity : ComponentActivity() {
         var asDefault by remember { mutableStateOf(false) }
         Dialog(onDismissRequest = onDismiss, properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false)) {
             N0teType {
-                Column(Modifier.width(760.dp).panel().padding(26.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                Column(Modifier.widthIn(max = 760.dp).padding(horizontal = 16.dp).panel().padding(26.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                     Heading("Neues Notizbuch", 22.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+                    // The middle scrolls: with the keyboard up (or a small window) "Anlegen" stays in reach.
+                    Row(Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
                         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Field(title, "z. B. Analysis I", label = "Titel") { title = it }
                             FolderChooser(folder) { folder = it }
@@ -1339,12 +1427,13 @@ class LibraryActivity : ComponentActivity() {
                 Text(if (folder.isEmpty()) "Ohne Ordner" else folder.split('/').joinToString(" › "), color = Ui.Muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             androidx.compose.foundation.lazy.LazyRow(state = row, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                item(key = "") { FolderTile("Ohne Ordner", null, folder.isEmpty(), kind = 1) { onPick("") } }
-                items(folders.size, key = { folders[it] }) { i ->
+                // Keys of their own kind: a folder named "+" crashed the dialog (the same key twice).
+                item(key = "none") { FolderTile("Ohne Ordner", null, folder.isEmpty(), kind = 1) { onPick("") } }
+                items(folders.size, key = { "f:" + folders[it] }) { i ->
                     val p = folders[i]
                     FolderTile(LibraryOrg.name(p), LibraryOrg.parent(p).takeIf { it.isNotEmpty() }?.let { "in ${LibraryOrg.name(it)}" }, folder == p) { onPick(p) }
                 }
-                item(key = "+") { FolderTile("Neuer Ordner", null, adding, kind = 2) { adding = !adding } }
+                item(key = "new") { FolderTile("Neuer Ordner", null, adding, kind = 2) { adding = !adding } }
             }
             if (adding) Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { Field(name, if (folder.isEmpty()) "Name des Ordners" else "Neuer Ordner in „${LibraryOrg.name(folder)}“") { name = it } }
