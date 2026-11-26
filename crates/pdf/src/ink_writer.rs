@@ -699,12 +699,23 @@ fn push_ref<'a>(file: &File<'a>, dict: &mut Dict<'a>, key: &str, num: u32) -> Re
 }
 
 /// Usable gaps, sorted by `at`: finite, with a positive height, `at` clamped to the page
-/// (0 ..= `base`, the page's height as displayed).
+/// (0 ..= `base`, the page's height as displayed), together at most [`MAX_GAPS`] high (a gap
+/// from another device can say anything; 10^30 points made a page nothing can show and paper
+/// ruling that never ended).
 fn clean_gaps(gaps: &[(f32, f32)], base: f32) -> Vec<(f32, f32)> {
     let mut out: Vec<(f32, f32)> = gaps.iter().filter(|g| g.0.is_finite() && g.1.is_finite() && g.1 > 0.0).map(|&(at, h)| (at.clamp(0.0, base), h)).collect();
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut left = MAX_GAPS;
+    out.retain_mut(|g| {
+        g.1 = g.1.min(left);
+        left -= g.1;
+        g.1 > 0.0
+    });
     out
 }
+
+/// The most space inserted into one page (PDF's largest page side).
+const MAX_GAPS: f32 = 14_400.0;
 
 /// A page to split at inserted space.
 struct SplitPage<'a, 'g> {
@@ -1006,6 +1017,10 @@ fn paper_content(out: &mut Vec<u8>, plan: &Plan) {
     use n0te_core::notebook::Background;
     let Some((paper, w, h)) = plan.paper else { return };
     let step = paper.spacing as f64;
+    // At most a page of PDF's largest size (the lines are counted out one by one).
+    if !(w.is_finite() && h.is_finite() && w <= 2.0 * MAX_GAPS as f64 && h <= 2.0 * MAX_GAPS as f64) {
+        return;
+    }
     out.extend_from_slice(b"q\n");
     for v in plan.matrix {
         write_num(out, v, 4);

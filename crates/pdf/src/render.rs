@@ -51,6 +51,7 @@ impl PdfDoc {
         let size = self.size_locked(page)?;
         let scale = width_px as f32 / size.width;
         let (w, h) = (width_px.max(1), page_pixels(size, scale).1);
+        check_size(Tile { x: 0, y: 0, width: w, height: h })?;
         let mut data = vec![0u8; w as usize * h as usize * 4];
         self.render_locked(page, (w, h), Tile { x: 0, y: 0, width: w, height: h }, &mut data)?;
         Ok(Rgba { width: w, height: h, data })
@@ -58,6 +59,9 @@ impl PdfDoc {
 
     /// Renders `tile` of the page drawn at `scale` pixels per point (see [`page_pixels`]).
     pub fn render_tile(&self, page: u32, scale: f32, tile: Tile) -> Result<Rgba> {
+        // Checked before the buffer is made: a tile of absurd size (a caller's bug) would else
+        // be an allocation of gigabytes, which aborts the process instead of failing.
+        check_size(tile)?;
         let mut data = vec![0u8; tile.width as usize * tile.height as usize * 4];
         self.render_tile_into(page, scale, tile, &mut data)?;
         Ok(Rgba { width: tile.width, height: tile.height, data })
@@ -75,7 +79,9 @@ impl PdfDoc {
     }
 
     fn render_locked(&self, page: u32, full: (u32, u32), tile: Tile, out: &mut [u8]) -> Result<()> {
-        if tile.width == 0 || tile.height == 0 || tile.x + tile.width > full.0 || tile.y + tile.height > full.1 {
+        // Checked sums: x + width past u32 must not wrap around into the page.
+        let inside = |at: u32, len: u32, max: u32| at.checked_add(len).is_some_and(|end| end <= max);
+        if tile.width == 0 || tile.height == 0 || !inside(tile.x, tile.width, full.0) || !inside(tile.y, tile.height, full.1) {
             return Err(Error::Invalid(format!("tile {tile:?} outside page of {}x{} px", full.0, full.1)));
         }
         if out.len() != tile.width as usize * tile.height as usize * 4 {
@@ -102,6 +108,17 @@ impl PdfDoc {
             Ok(())
         })
     }
+}
+
+/// The largest bitmap rendered at once (a tile or a whole page): 2^26 pixels, 256 MB of RGBA.
+/// Tiles are a few hundred pixels wide; more is a caller's mistake.
+pub const MAX_PIXELS: u64 = 1 << 26;
+
+fn check_size(tile: Tile) -> Result<()> {
+    if tile.width as u64 * tile.height as u64 > MAX_PIXELS {
+        return Err(Error::Invalid(format!("tile of {}x{} px is too large", tile.width, tile.height)));
+    }
+    Ok(())
 }
 
 /// Extra pixels rendered left of and above a tile and then dropped. pdfium places cached glyph
