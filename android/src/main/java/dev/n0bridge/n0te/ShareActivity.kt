@@ -78,7 +78,7 @@ class ShareActivity : ComponentActivity() {
         if (shared().isEmpty()) { finish(); return }
         N0te.background({
             N0te.library.notebookIds().mapNotNull { id ->
-                runCatching { N0te.library.loadNotebook(id) }.getOrNull()?.let { Nb(id, it.title(), it.folder(), java.io.File(N0te.root, "notebooks/$id").lastModified()) }
+                runCatching { N0te.library.loadNotebook(id) }.getOrNull()?.use { Nb(id, it.title(), it.folder(), java.io.File(N0te.root, "notebooks/$id").lastModified()) }
             }.sortedByDescending { it.modified }
         }) { r -> notebooks = r.getOrDefault(emptyList()) }
         setContent { Screen() }
@@ -97,12 +97,18 @@ class ShareActivity : ComponentActivity() {
         val uris = shared()
         N0te.background({
             uris.mapNotNull { uri ->
-                val bytes = contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return@mapNotNull null
                 val type = contentResolver.getType(uri) ?: ""
-                if (type == "application/pdf" || (bytes.size > 4 && String(bytes, 0, 4, Charsets.ISO_8859_1) == "%PDF")) {
-                    val f = java.io.File(cacheDir, "shared-${System.nanoTime()}.pdf").apply { writeBytes(bytes) }
-                    "pdf|${f.path}"
-                } else Images.prepare(bytes)?.let { (jpeg, w, h) -> "img|${N0te.library.putBlob(jpeg)}|$w|$h" }
+                contentResolver.openInputStream(uri)?.buffered()?.use { input ->
+                    input.mark(8)
+                    val head = ByteArray(4).also { input.read(it) }
+                    input.reset()
+                    if (type == "application/pdf" || String(head, Charsets.ISO_8859_1) == "%PDF") {
+                        // Straight into the file: a big PDF isn't held in memory on the way.
+                        val f = java.io.File(cacheDir, "shared-${System.nanoTime()}.pdf")
+                        f.outputStream().use { input.copyTo(it) }
+                        "pdf|${f.path}"
+                    } else Images.prepare(input.readBytes())?.let { (jpeg, w, h) -> "img|${N0te.library.putBlob(jpeg)}|$w|$h" }
+                }
             }
         }) { r ->
             busy = false
@@ -173,7 +179,12 @@ class ShareActivity : ComponentActivity() {
                 color = Ui.Muted, fontSize = 14.sp,
             )
             val list = notebooks
-            if (list == null) Text("Lade …", color = Ui.Muted) else LazyColumn(Modifier.widthIn(max = 760.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (list == null) Text("Lade …", color = Ui.Muted)
+            else if (list.isEmpty()) Text(
+                if (pdf != null) "Noch keine Notizbücher: „Neues Notizbuch“ oben macht aus der PDF eins." else "Noch keine Notizbücher. Leg in n0te eins an und teile dann nochmal.",
+                color = Ui.Muted, fontSize = 14.sp,
+            )
+            else LazyColumn(Modifier.widthIn(max = 760.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 items(list, key = { it.id }) { nb ->
                     Row(Modifier.fillMaxWidth().cardBox().clickable { into(nb) }.padding(horizontal = 18.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
