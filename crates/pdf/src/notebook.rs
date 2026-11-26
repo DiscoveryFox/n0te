@@ -53,6 +53,85 @@ pub fn store_pdf(lib: &Library, worker: &PdfWorker, bytes: Vec<u8>) -> Result<St
     Ok(StoredPdf { blob, pages })
 }
 
+/// How a PDF's pages go into the notebook when its table of contents becomes groups (see
+/// [`chapters`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Part {
+    /// A page, titled when an entry of the table of contents opens it alone.
+    Page { page: u32, title: Option<String> },
+    /// A chapter of several pages: a group.
+    Group { title: String, parts: Vec<Part> },
+}
+
+/// The PDF's pages as chapters, from its table of contents, `depth` levels deep (1: chapters,
+/// 2: their sections too). An entry's chapter runs from its page to the next entry's; one of a
+/// single page becomes that page's title rather than a group (decks with an entry per slide stay
+/// pages). Pages before the first entry stay loose; entries without a page are skipped.
+pub fn chapters(outline: &[crate::OutlineEntry], pages: u32, depth: usize) -> Vec<Part> {
+    plan(outline, 0, pages, depth)
+}
+
+fn plan(entries: &[crate::OutlineEntry], from: u32, to: u32, depth: usize) -> Vec<Part> {
+    let loose = |a: u32, b: u32| (a..b).map(|page| Part::Page { page, title: None }).collect::<Vec<_>>();
+    let mut es: Vec<(u32, &crate::OutlineEntry)> = entries.iter().filter_map(|e| e.page.filter(|&p| p >= from && p < to).map(|p| (p, e))).collect();
+    if depth == 0 || es.is_empty() {
+        return loose(from, to);
+    }
+    es.sort_by_key(|e| e.0);
+    // Several entries on one page: the first one owns it.
+    es.dedup_by_key(|e| e.0);
+    let mut out = loose(from, es[0].0);
+    for (i, &(start, e)) in es.iter().enumerate() {
+        let end = es.get(i + 1).map_or(to, |n| n.0);
+        let title = if e.title.is_empty() { "Kapitel".to_string() } else { e.title.clone() };
+        if end - start <= 1 {
+            out.push(Part::Page { page: start, title: Some(title) });
+        } else {
+            out.push(Part::Group { title, parts: plan(&e.children, start, end, depth - 1) });
+        }
+    }
+    out
+}
+
+/// Imports a PDF with its table of contents as groups ([`chapters`], `depth` levels): pages of
+/// a chapter go into a group named after it. Without a table of contents (or `depth` 0) like
+/// [`import_pdf`]. The notebook is not saved.
+pub fn import_pdf_chapters(lib: &Library, nb: &Notebook, worker: &PdfWorker, bytes: Vec<u8>, parent: Option<&str>, index: usize, depth: usize) -> Result<Vec<ImportedSheet>> {
+    let pdf = store_pdf(lib, worker, bytes)?;
+    let key = pdf.blob.clone();
+    let outline = if depth == 0 { Vec::new() } else { worker.call(priority::INTERACTIVE, move |docs| docs.get(&key).map(|d| d.outline())).ok().and_then(|r| r.ok()).unwrap_or_default() };
+    add_pdf_parts(nb, &pdf, &chapters(&outline, pdf.pages.len() as u32, depth), parent, index)
+}
+
+/// Adds `pdf`'s pages as `parts` (groups and titled pages), starting at `index` under `parent`.
+pub fn add_pdf_parts(nb: &Notebook, pdf: &StoredPdf, parts: &[Part], parent: Option<&str>, index: usize) -> Result<Vec<ImportedSheet>> {
+    let mut out = Vec::with_capacity(pdf.pages.len());
+    place(nb, pdf, parts, parent, index, &mut out)?;
+    Ok(out)
+}
+
+fn place(nb: &Notebook, pdf: &StoredPdf, parts: &[Part], parent: Option<&str>, mut index: usize, out: &mut Vec<ImportedSheet>) -> Result<()> {
+    for part in parts {
+        match part {
+            Part::Page { page, title } => {
+                let Some(&size) = pdf.pages.get(*page as usize) else { continue };
+                let spec = SheetSpec { width: size.width, height: size.height, background: Background::Blank, spacing: 20.0, pdf: Some((pdf.blob.clone(), *page)), gaps: Vec::new() };
+                let (node, sheet_id) = nb.add_sheet(parent, index, &spec)?;
+                if let Some(t) = title {
+                    nb.set_title_of(&node, t)?;
+                }
+                out.push(ImportedSheet { node, sheet_id, page: *page, size });
+            }
+            Part::Group { title, parts } => {
+                let g = nb.add_group(parent, index, title)?;
+                place(nb, pdf, parts, Some(&g), 0, out)?;
+            }
+        }
+        index = index.saturating_add(1);
+    }
+    Ok(())
+}
+
 /// Adds one sheet per page of `pdf`, `SheetSpec { width, height: page size, pdf: Some((blob,
 /// page)) }`, starting at `index` under `parent` (`None` = main column, else a group node).
 pub fn add_pdf_sheets(nb: &Notebook, pdf: &StoredPdf, parent: Option<&str>, index: usize) -> Result<Vec<ImportedSheet>> {

@@ -575,3 +575,89 @@ fn export_keeps_every_page_size_also_big_and_odd_ones() {
     drop(w);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// Five pages with a table of contents (Kapitel 1 › Abschnitt 1.1, Kapitel 2, Anhang) and two
+/// links on the first page: one to page 3, one to a web address.
+fn chapters_pdf() -> Vec<u8> {
+    let page = |extra: &str| format!("<</Type/Page/Parent 2 0 R/Resources<<>>{extra}>>");
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R/Outlines 8 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R 6 0 R 7 0 R]/Count 5/MediaBox[0 0 595 842]>>".to_string(),
+        page("/Annots[13 0 R 14 0 R]"),
+        page(""),
+        page(""),
+        page(""),
+        page(""),
+        "<</Type/Outlines/First 9 0 R/Last 12 0 R/Count 3>>".to_string(),
+        "<</Title(Kapitel 1)/Parent 8 0 R/Next 11 0 R/First 10 0 R/Last 10 0 R/Count 1/Dest[3 0 R/Fit]>>".to_string(),
+        "<</Title(Abschnitt 1.1)/Parent 9 0 R/Dest[4 0 R/Fit]>>".to_string(),
+        "<</Title(Kapitel 2)/Parent 8 0 R/Prev 9 0 R/Next 12 0 R/Dest[5 0 R/Fit]>>".to_string(),
+        "<</Title(Anhang)/Parent 8 0 R/Prev 11 0 R/Dest[7 0 R/Fit]>>".to_string(),
+        "<</Type/Annot/Subtype/Link/Rect[100 700 200 720]/Dest[5 0 R/Fit]/Border[0 0 0]>>".to_string(),
+        "<</Type/Annot/Subtype/Link/Rect[100 600 300 620]/A<</S/URI/URI(https://example.org/folien)>>/Border[0 0 0]>>".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f\r\n", objs.len() + 1).as_bytes());
+    for o in offs {
+        pdf.extend_from_slice(format!("{o:010} 00000 n\r\n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+#[test]
+fn links_and_the_table_of_contents_come_out_and_become_groups() {
+    use n0te_core::notebook::OutlineRow;
+    use n0te_pdf::notebook::{Part, chapters, import_pdf_chapters};
+    use n0te_pdf::{LinkTarget, OutlineEntry};
+    let e = engine();
+    let doc = e.open(chapters_pdf()).unwrap();
+    // Links, in page coordinates (top-left origin).
+    let links = doc.page_links(0).unwrap();
+    assert_eq!(links.len(), 2, "{links:?}");
+    assert_eq!(links[0].target, LinkTarget::Page(2));
+    assert!((links[0].rect.x0 - 100.0).abs() < 0.5 && (links[0].rect.y0 - 122.0).abs() < 0.5 && (links[0].rect.y1 - 142.0).abs() < 0.5, "{:?}", links[0].rect);
+    assert_eq!(links[1].target, LinkTarget::Uri("https://example.org/folien".into()));
+    assert!(doc.page_links(1).unwrap().is_empty());
+    // The table of contents.
+    let toc = doc.outline();
+    let titles: Vec<(&str, Option<u32>)> = toc.iter().map(|o| (o.title.as_str(), o.page)).collect();
+    assert_eq!(titles, vec![("Kapitel 1", Some(0)), ("Kapitel 2", Some(2)), ("Anhang", Some(4))]);
+    assert_eq!(toc[0].children, vec![OutlineEntry { title: "Abschnitt 1.1".into(), page: Some(1), children: vec![] }]);
+    // As chapters: a group per chapter of several pages, a titled page for one of a single page.
+    let p = |page: u32, t: Option<&str>| Part::Page { page, title: t.map(Into::into) };
+    assert_eq!(
+        chapters(&toc, 5, 2),
+        vec![
+            Part::Group { title: "Kapitel 1".into(), parts: vec![p(0, None), p(1, Some("Abschnitt 1.1"))] },
+            Part::Group { title: "Kapitel 2".into(), parts: vec![p(2, None), p(3, None)] },
+            p(4, Some("Anhang")),
+        ]
+    );
+    assert_eq!(chapters(&toc, 5, 0), (0..5).map(|i| p(i, None)).collect::<Vec<_>>());
+
+    // Imported that way into a notebook.
+    let root = std::env::temp_dir().join(format!("n0te-pdf-toc-{}", n0te_core::ids::new_id(9)));
+    let lib = Arc::new(Library::open(&root).unwrap());
+    let l = lib.clone();
+    let w = PdfWorker::start(e, move |key| Ok(l.blob(key)?), |_| {}, WorkerOptions::default());
+    let nb = lib.create_notebook("Skript").unwrap();
+    let imported = import_pdf_chapters(&lib, &nb, &w, chapters_pdf(), None, 0, 2).unwrap();
+    assert_eq!(imported.iter().map(|s| s.page).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+    let rows: Vec<String> = nb
+        .outline(true)
+        .into_iter()
+        .map(|r| match r {
+            OutlineRow::Group { depth, title, .. } => format!("{depth} G {title}"),
+            OutlineRow::Sheet { depth, title, spec, .. } => format!("{depth} S {} {title}", spec.pdf.map_or(99, |p| p.1)),
+        })
+        .collect();
+    assert_eq!(rows, vec!["0 G Kapitel 1", "1 S 0 ", "1 S 1 Abschnitt 1.1", "0 G Kapitel 2", "1 S 2 ", "1 S 3 ", "0 S 4 Anhang"]);
+    std::fs::remove_dir_all(root).ok();
+}

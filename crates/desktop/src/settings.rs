@@ -46,6 +46,8 @@ pub struct Settings {
     pub decor: bool,
     /// Decorations move (off: they hold still).
     pub decor_motion: bool,
+    /// Importing a PDF: its table of contents becomes groups.
+    pub pdf_chapters: bool,
 }
 
 /// How many open times the settings keep.
@@ -70,6 +72,7 @@ impl Default for Settings {
             side_gap: o.side_gap,
             remote_frame: true,
             formula_center: true,
+            pdf_chapters: true,
             guest_frames: true,
             share_view: true,
             momentum: true,
@@ -108,6 +111,7 @@ impl Settings {
                 "side_gap" => s.side_gap = v.parse().unwrap_or(s.side_gap).clamp(4.0, 200.0),
                 "remote_frame" => s.remote_frame = v != "0",
                 "formula_center" => s.formula_center = v != "0",
+                "pdf_chapters" => s.pdf_chapters = v != "0",
                 "guest_frames" => s.guest_frames = v != "0",
                 "share_view" => s.share_view = v != "0",
                 "momentum" => s.momentum = v != "0",
@@ -165,7 +169,7 @@ impl Settings {
         let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
         let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\nexport_sides={}\ndecor={}\ndecor_motion={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\nexport_sides={}\ndecor={}\ndecor_motion={}\npdf_chapters={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -187,6 +191,7 @@ impl Settings {
             if self.export_sides_at_end { "end" } else { "inline" },
             u8::from(self.decor),
             u8::from(self.decor_motion),
+            u8::from(self.pdf_chapters),
         )
     }
 

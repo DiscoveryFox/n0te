@@ -787,6 +787,15 @@ pub struct RemoteMark {
     pub name: String,
 }
 
+/// Where a clicked link in a PDF page goes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LinkHit {
+    /// A page of the same PDF in this notebook (its sheet).
+    Sheet { sheet_id: String },
+    /// A web address.
+    Uri(String),
+}
+
 /// Another device's (or a guest's) laser pointer, played back smoothly (core `laser`).
 pub struct LaserMark {
     pub sheet_id: String,
@@ -1054,6 +1063,8 @@ pub struct Pages {
     pub lasers: RefCell<HashMap<String, LaserMark>>,
     /// This app's own pointer.
     pub own_laser: RefCell<OwnLaser>,
+    /// The links of PDF pages (by blob and page), read once each.
+    links: RefCell<HashMap<(String, u32), std::rc::Rc<Vec<n0te_pdf::PdfLink>>>>,
     /// The spot just jumped to, lighting up.
     pub flash: Option<Flash>,
     /// A board open on its own (n0te Tablet): endless paper, nothing else shown.
@@ -1083,6 +1094,7 @@ impl Pages {
             show_remote_frame: Cell::new(true),
             lasers: RefCell::new(HashMap::new()),
             own_laser: RefCell::new(OwnLaser::default()),
+            links: RefCell::new(HashMap::new()),
             flash: None,
             board: None,
             space: RefCell::new(None),
@@ -1196,6 +1208,28 @@ impl Pages {
     }
 
     /// The sheet under a page point (a board open on its own: it, everywhere).
+    /// The link of a PDF page at (x, y) (page coordinates), if any: to a page of the same PDF
+    /// in this notebook, or a web address.
+    pub fn link_at(&self, x: f32, y: f32) -> Option<LinkHit> {
+        let page = self.page_at(x, y)?;
+        let (blob, n) = page.placed.spec.pdf.clone()?;
+        let pdf = self.pdf.as_ref()?;
+        let lx = x - page.placed.rect.x0;
+        let ly = page.placed.spec.base_y(y - page.placed.rect.y0)?;
+        let key = (blob.clone(), n);
+        let cached = self.links.borrow().get(&key).cloned();
+        let links = cached.unwrap_or_else(|| {
+            let l = std::rc::Rc::new(pdf.links(&blob, n));
+            self.links.borrow_mut().insert(key, l.clone());
+            l
+        });
+        let hit = links.iter().find(|l| l.rect.contains(lx, ly))?;
+        match &hit.target {
+            n0te_pdf::LinkTarget::Uri(u) => Some(LinkHit::Uri(u.clone())),
+            n0te_pdf::LinkTarget::Page(q) => self.pages.iter().find(|p| p.placed.spec.pdf.as_ref().is_some_and(|(b, i)| *b == blob && i == q)).map(|p| LinkHit::Sheet { sheet_id: p.placed.sheet_id.clone() }),
+        }
+    }
+
     pub fn sheet_at(&self, x: f32, y: f32) -> Option<&Placed> {
         self.page_at(x, y).map(|p| &p.placed)
     }
@@ -1589,6 +1623,7 @@ pub struct PageView<'a, Message> {
     on_fold: Box<dyn Fn(String) -> Message + 'a>,
     on_double: Option<Box<dyn Fn(String, f32, f32) -> Message + 'a>>,
     on_plot: Option<Box<dyn Fn(String, String) -> Message + 'a>>,
+    on_link: Option<Box<dyn Fn(LinkHit) -> Message + 'a>>,
     /// n0te Tablet: the mouse draws like a pen (these events), fingers pan and zoom.
     on_pen: Option<Box<dyn Fn(crate::tablet::pen::PenEvent) -> Message + 'a>>,
     /// n0te Tablet: one finger writes too (two still pan and zoom).
@@ -1606,7 +1641,7 @@ pub struct PageView<'a, Message> {
 }
 
 pub fn page_view<'a, Message>(pages: &'a Pages, camera: Camera, on_camera: impl Fn(Camera) -> Message + 'a, on_fold: impl Fn(String) -> Message + 'a) -> PageView<'a, Message> {
-    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_pen: None, finger_draws: false, slot: Slot::Main, fixed: false, ruler: None, on_ruler: None, spots: Vec::new() }
+    PageView { pages, camera, on_camera: Box::new(on_camera), on_fold: Box::new(on_fold), on_double: None, on_plot: None, on_link: None, on_pen: None, finger_draws: false, slot: Slot::Main, fixed: false, ruler: None, on_ruler: None, spots: Vec::new() }
 }
 
 impl<'a, Message> PageView<'a, Message> {
@@ -1661,6 +1696,12 @@ impl<'a, Message> PageView<'a, Message> {
     /// A click on a coordinate system: (sheet id, plot id) — its editor opens.
     pub fn on_plot_click(mut self, f: impl Fn(String, String) -> Message + 'a) -> Self {
         self.on_plot = Some(Box::new(f));
+        self
+    }
+
+    /// A click on a link in a PDF page.
+    pub fn on_link_click(mut self, f: impl Fn(LinkHit) -> Message + 'a) -> Self {
+        self.on_link = Some(Box::new(f));
         self
     }
 }
@@ -2018,7 +2059,12 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                     let double = state.last_click.is_some_and(|(t, p)| t.elapsed().as_millis() < 400 && p.distance(at) * cam.zoom < 8.0);
                     state.last_click = if double { None } else { Some((std::time::Instant::now(), at)) };
                     let plot = if *button == mouse::Button::Left && self.on_plot.is_some() { self.pages.plot_at(at.x, at.y) } else { None };
-                    if let Some(h) = self.pages.header_at(at) {
+                    let link = if *button == mouse::Button::Left && plot.is_none() { self.on_link.as_ref().and_then(|f| self.pages.link_at(at.x, at.y).map(f)) } else { None };
+                    if let Some(m) = link {
+                        state.last_click = None;
+                        shell.publish(m);
+                        shell.capture_event();
+                    } else if let Some(h) = self.pages.header_at(at) {
                         // A click on a group title folds/unfolds the group.
                         fold = Some(h.node.clone());
                     } else if let (Some(f), Some((sheet, id))) = (&self.on_plot, plot) {
@@ -2061,6 +2107,13 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
             (_, Some(p)) if self.on_plot.is_some() && {
                 let at = self.camera.to_page(bounds, p);
                 self.pages.plot_at(at.x, at.y).is_some()
+            } =>
+            {
+                mouse::Interaction::Pointer
+            }
+            (_, Some(p)) if self.on_link.is_some() && {
+                let at = self.camera.to_page(bounds, p);
+                self.pages.link_at(at.x, at.y).is_some()
             } =>
             {
                 mouse::Interaction::Pointer

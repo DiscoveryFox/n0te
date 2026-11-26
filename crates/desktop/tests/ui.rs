@@ -184,6 +184,64 @@ fn pdf_import_insert_and_export() {
     assert!(std::fs::metadata(&picked).unwrap().len() < bytes.len() as u64);
 }
 
+/// Five pages with a table of contents (Kapitel 1 › Abschnitt 1.1, Kapitel 2, Anhang) and a
+/// link on the first page to page 3.
+fn chapters_pdf() -> Vec<u8> {
+    let page = |extra: &str| format!("<</Type/Page/Parent 2 0 R/Resources<<>>{extra}>>");
+    let objs = [
+        "<</Type/Catalog/Pages 2 0 R/Outlines 8 0 R>>".to_string(),
+        "<</Type/Pages/Kids[3 0 R 4 0 R 5 0 R 6 0 R 7 0 R]/Count 5/MediaBox[0 0 595 842]>>".to_string(),
+        page("/Annots[13 0 R]"),
+        page(""),
+        page(""),
+        page(""),
+        page(""),
+        "<</Type/Outlines/First 9 0 R/Last 12 0 R/Count 3>>".to_string(),
+        "<</Title(Kapitel 1)/Parent 8 0 R/Next 11 0 R/First 10 0 R/Last 10 0 R/Count 1/Dest[3 0 R/Fit]>>".to_string(),
+        "<</Title(Abschnitt 1.1)/Parent 9 0 R/Dest[4 0 R/Fit]>>".to_string(),
+        "<</Title(Kapitel 2)/Parent 8 0 R/Prev 9 0 R/Next 12 0 R/Dest[5 0 R/Fit]>>".to_string(),
+        "<</Title(Anhang)/Parent 8 0 R/Prev 11 0 R/Dest[7 0 R/Fit]>>".to_string(),
+        "<</Type/Annot/Subtype/Link/Rect[100 700 200 720]/Dest[5 0 R/Fit]/Border[0 0 0]>>".to_string(),
+    ];
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    let mut offs = Vec::new();
+    for (i, o) in objs.iter().enumerate() {
+        offs.push(pdf.len());
+        pdf.extend_from_slice(format!("{} 0 obj\n{o}\nendobj\n", i + 1).as_bytes());
+    }
+    let x = pdf.len();
+    pdf.extend_from_slice(format!("xref\n0 {}\n0000000000 65535 f\r\n", objs.len() + 1).as_bytes());
+    for o in offs {
+        pdf.extend_from_slice(format!("{o:010} 00000 n\r\n").as_bytes());
+    }
+    pdf.extend_from_slice(format!("trailer\n<</Size {}/Root 1 0 R>>\nstartxref\n{x}\n%%EOF\n", objs.len() + 1).as_bytes());
+    pdf
+}
+
+#[test]
+fn a_pdfs_table_of_contents_becomes_groups_and_its_links_jump() {
+    use n0te_core::notebook::OutlineRow;
+    let root = temp_root("pdftoc");
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    let file = root.join("Skript.pdf");
+    std::fs::write(&file, chapters_pdf()).unwrap();
+    h.message(Message::ImportPdf(file.clone()));
+    h.message(Message::Open(h.app.entries[0].id.clone()));
+    h.events(&[]);
+    let groups: Vec<String> = open(&h).nb.outline(true).into_iter().filter_map(|r| if let OutlineRow::Group { title, .. } = r { Some(title) } else { None }).collect();
+    assert_eq!(groups, vec!["Kapitel 1", "Kapitel 2"]);
+    // A click on the link of the first page shows the page it links to; Alt+← goes back.
+    let first = open(&h).pages.pages.iter().find(|p| p.placed.spec.pdf.as_ref().is_some_and(|p| p.1 == 0)).unwrap().placed.clone();
+    let target = open(&h).pages.pages.iter().find(|p| p.placed.spec.pdf.as_ref().is_some_and(|p| p.1 == 2)).unwrap().placed.sheet_id.clone();
+    assert_eq!(open(&h).pages.link_at(first.rect.x0 + 150.0, first.rect.y0 + 132.0), Some(n0te_desktop::pages::LinkHit::Sheet { sheet_id: target.clone() }));
+    assert_eq!(open(&h).pages.link_at(first.rect.x0 + 150.0, first.rect.y0 + 300.0), None);
+    let before = open(&h).camera;
+    h.message(Message::OpenLink(n0te_desktop::pages::LinkHit::Sheet { sheet_id: target }));
+    assert!(open(&h).camera.y > before.y + 500.0, "jumped down to page 3: {:?}", open(&h).camera);
+    h.message(Message::LinkBack);
+    assert_eq!(open(&h).camera.y, before.y);
+}
+
 #[test]
 fn a_single_side_page_can_be_exported_on_its_own() {
     let mut h = opened("sideexport");

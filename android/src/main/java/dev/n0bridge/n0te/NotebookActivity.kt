@@ -349,6 +349,8 @@ class NotebookActivity : ComponentActivity() {
         // A graph being edited: back finishes it (kept). It used to close the notebook and the edits were gone.
         if (a.graph != null) { a.finishGraph(true); return }
         if (a.view.board != null) { a.view.exitBoard(); return }
+        // Followed a link in a PDF: back goes back to where it was.
+        if (a.view.linkBack()) return
         // Two notebooks: back first shows one alone again, then closes the second.
         if (maxed != null) { showAlone(null); return }
         if (panes.size > 1) { closePane(panes.first { it !== mainPane }); return }

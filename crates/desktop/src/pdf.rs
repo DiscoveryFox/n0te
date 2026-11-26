@@ -208,11 +208,18 @@ impl Pdf {
         out
     }
 
-    /// Imports a PDF into `nb` (one sheet per page) at `index` under `parent`; saves the notebook.
-    pub fn import(&self, lib: &Library, nb: &Notebook, bytes: Vec<u8>, parent: Option<&str>, index: usize) -> Result<usize, String> {
-        let sheets = n0te_pdf::notebook::import_pdf(lib, nb, &self.worker, bytes, parent, index).map_err(|e| e.to_string())?;
+    /// Imports a PDF into `nb` (one sheet per page) at `index` under `parent`, with its table of
+    /// contents as groups `chapters` levels deep (0: none); saves the notebook.
+    pub fn import(&self, lib: &Library, nb: &Notebook, bytes: Vec<u8>, parent: Option<&str>, index: usize, chapters: usize) -> Result<usize, String> {
+        let sheets = n0te_pdf::notebook::import_pdf_chapters(lib, nb, &self.worker, bytes, parent, index, chapters).map_err(|e| e.to_string())?;
         lib.save_notebook(nb).map_err(|e| e.to_string())?;
         Ok(sheets.len())
+    }
+
+    /// The links on a page of a stored PDF (page points of the PDF page, top-left origin).
+    pub fn links(&self, blob: &str, page: u32) -> Vec<n0te_pdf::PdfLink> {
+        let b = blob.to_string();
+        self.worker.call(n0te_pdf::worker::priority::INTERACTIVE, move |d| d.get(&b)?.page_links(page)).ok().and_then(|r| r.ok()).unwrap_or_default()
     }
 
     /// Exports all sheets (`None`) or the given ones as a PDF, side pages where `order` puts

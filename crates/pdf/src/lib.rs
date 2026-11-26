@@ -32,6 +32,7 @@
 
 mod export;
 pub mod ink_writer;
+mod links;
 pub mod notebook;
 mod render;
 mod syntax;
@@ -53,6 +54,7 @@ pub use export::{ExportPage, PageSource, Stroke};
 pub use ink_writer::{INK_LAYER_NAME, Paper, PdfImage, add_ink, add_ink_and_paper, add_ink_paper_text, add_ink_paper_text_images, add_ink_paper_text_images_gaps, hide_ink, jpeg_info};
 pub use text_layout::PdfText;
 pub use render::{Rgba, Tile, page_pixels, tiles};
+pub use links::{LinkTarget, OutlineEntry, PdfLink};
 pub use text::{PageText, TextChar};
 pub use worker::{Docs, ExportSheet, PdfWorker, SheetSource, TileRequest, TileResult, WorkerOptions};
 

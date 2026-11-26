@@ -260,14 +260,49 @@ impl NotebookHandle {
     }
 }
 
+/// A link on a PDF page: its box (page points, top-left origin) and where it goes: a `page` of
+/// the same PDF (0-based) or a `uri`.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiPdfLink {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub page: Option<u32>,
+    pub uri: Option<String>,
+}
+
+#[uniffi::export]
+impl PdfService {
+    /// The links on a page of a stored PDF (empty when it has none or can't be read).
+    pub fn page_links(&self, blob: String, page: u32) -> Vec<FfiPdfLink> {
+        let links = self.worker.call(priority::INTERACTIVE, move |d| d.get(&blob)?.page_links(page)).ok().and_then(|r| r.ok()).unwrap_or_default();
+        links
+            .into_iter()
+            .map(|l| {
+                let (page, uri) = match l.target {
+                    n0te_pdf::LinkTarget::Page(p) => (Some(p), None),
+                    n0te_pdf::LinkTarget::Uri(u) => (None, Some(u)),
+                };
+                FfiPdfLink { x0: l.rect.x0, y0: l.rect.y0, x1: l.rect.x1, y1: l.rect.y1, page, uri }
+            })
+            .collect()
+    }
+}
+
 #[uniffi::export]
 impl NotebookHandle {
     /// Imports a PDF: stores it as a blob and adds one sheet per page at `index` under `parent`
-    /// (None = main column, else a group node), sized like the page. Save the notebook after.
-    pub fn import_pdf(&self, pdf: Arc<PdfService>, bytes: Vec<u8>, parent: Option<String>, index: u32) -> R<Vec<FfiImportedSheet>> {
+    /// (None = main column, else a group node), sized like the page. With `chapters` > 0 its
+    /// table of contents becomes groups that many levels deep (a chapter of one page: the page's
+    /// title). Save the notebook after.
+    pub fn import_pdf(&self, pdf: Arc<PdfService>, bytes: Vec<u8>, parent: Option<String>, index: u32, chapters: u32) -> R<Vec<FfiImportedSheet>> {
         // The pdfium part runs without the notebook lock.
         let stored = n0te_pdf::notebook::store_pdf(&pdf.lib.inner, &pdf.worker, bytes)?;
-        let sheets = n0te_pdf::notebook::add_pdf_sheets(&lock(&self.nb), &stored, parent.as_deref(), index as usize)?;
+        let key = stored.blob.clone();
+        let outline = if chapters == 0 { Vec::new() } else { pdf.worker.call(priority::INTERACTIVE, move |d| d.get(&key).map(|d| d.outline())).ok().and_then(|r| r.ok()).unwrap_or_default() };
+        let parts = n0te_pdf::notebook::chapters(&outline, stored.pages.len() as u32, chapters.min(4) as usize);
+        let sheets = n0te_pdf::notebook::add_pdf_parts(&lock(&self.nb), &stored, &parts, parent.as_deref(), index as usize)?;
         Ok(sheets
             .into_iter()
             .map(|s| FfiImportedSheet { node: s.node, sheet_id: s.sheet_id, page: s.page, width: s.size.width, height: s.size.height })
@@ -336,13 +371,13 @@ mod tests {
         let nb = lib.clone().create_notebook("Physik".into()).unwrap();
         let group = nb.add_group(None, 0, "VL 1".into()).unwrap();
         let bytes = two_pages(&PdfEngine::load(pdfium()).unwrap());
-        let sheets = nb.import_pdf(pdf.clone(), bytes, Some(group), 0).unwrap();
+        let sheets = nb.import_pdf(pdf.clone(), bytes, Some(group), 0, 2).unwrap();
         assert_eq!(sheets.len(), 2);
         assert_eq!((sheets[0].width.round(), sheets[0].height.round(), sheets[1].page), (595.0, 842.0, 1)); // A4
         let FfiOutlineRow::Sheet { spec, .. } = &nb.outline(true)[1] else { panic!() };
         let blob = spec.pdf_blob.clone().unwrap();
         assert_eq!(pdf.page_sizes(blob.clone()).unwrap().len(), 2);
-        assert!(nb.import_pdf(pdf.clone(), b"not a pdf".to_vec(), None, 0).is_err());
+        assert!(nb.import_pdf(pdf.clone(), b"not a pdf".to_vec(), None, 0, 0).is_err());
 
         assert_eq!(pdf_page_pixels(595.0, 842.0, 2.0), vec![1190, 1684]);
         let req = FfiTileRequest { blob: blob.clone(), page: 1, scale: 2.0, x: 0, y: 0, width: 256, height: 256, priority: 0, view: 0, generation: 1 };

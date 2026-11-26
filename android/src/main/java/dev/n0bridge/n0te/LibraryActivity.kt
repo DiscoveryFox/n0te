@@ -187,7 +187,7 @@ class LibraryActivity : ComponentActivity() {
             if (bytes.size < 5 || String(bytes, 0, 5, Charsets.ISO_8859_1) != "%PDF-") error("keine PDF-Datei und kein n0te-Notizbuch")
             val nb = N0te.library.createNotebook(name)
             // A PDF pdfium can't read leaves no empty notebook behind (as in ShareActivity).
-            runCatching { nb.importPdf(svc, bytes, null, 0u) }.onFailure { runCatching { N0te.library.trashNotebook(nb.id()) }; throw it }
+            runCatching { nb.importPdf(svc, bytes, null, 0u, Settings.pdfChapterDepth) }.onFailure { runCatching { N0te.library.trashNotebook(nb.id()) }; throw it }
             nb.save()
             nb.id()
         }) { r ->

@@ -932,7 +932,7 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         val svc = N0te.pdf ?: return then(Result.failure(IllegalStateException("PDF nicht verfügbar")))
         N0te.background({
             val (parent, index) = positionAfter(afterNode)
-            nb.importPdf(svc, bytes, parent, index).size.also { nb.save() }
+            nb.importPdf(svc, bytes, parent, index, Settings.pdfChapterDepth).size.also { nb.save() }
         }) { r -> refreshOutline { then(r) } }
     }
 

@@ -188,6 +188,11 @@ pub enum Message {
     CrashDismiss,
     SetRowGap(f32),
     FormulaCenter(bool),
+    PdfChapters(bool),
+    /// A link in a PDF page was clicked.
+    OpenLink(crate::pages::LinkHit),
+    /// Back to where the view was before following a link (Alt+←).
+    LinkBack,
     SetSideGap(f32),
     MoveText(iced::Vector),
     ResizeText(iced::Vector),
@@ -410,6 +415,8 @@ pub struct App {
     pub devices: Vec<live::Device>,
     devices_at: Option<Instant>,
     pub live_session: Option<LiveSession>,
+    /// Where the view was before following links in PDFs (Alt+← goes back), newest last.
+    pub link_back: Vec<(PaneKey, Camera)>,
     /// Guests in our notebooks right now, and notebooks we joined as a guest.
     pub guests: Vec<live::Guest>,
     pub joined: Vec<live::Joined>,
@@ -563,6 +570,7 @@ impl App {
             devices: Vec::new(),
             devices_at: None,
             live_session: None,
+            link_back: Vec::new(),
             guests: Vec::new(),
             joined: Vec::new(),
             waiting: Vec::new(),
@@ -1070,6 +1078,8 @@ impl App {
                     }
                 }
             }
+            // Alt+←: back to where the view was before following a link in a PDF.
+            Message::Key(keyboard::Event::KeyPressed { key: Key::Named(Named::ArrowLeft), modifiers, .. }) if modifiers.alt() && !self.link_back.is_empty() && self.editing.is_none() => return self.handle(Message::LinkBack),
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => return self.shortcut(key, modifiers),
             Message::Key(_) => {}
             Message::ShowImports(on) => {
@@ -1942,6 +1952,42 @@ impl App {
             }
             Message::DecorMotion(on) => {
                 self.settings.decor_motion = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+            }
+            Message::OpenLink(hit) => match hit {
+                crate::pages::LinkHit::Sheet { sheet_id } => {
+                    if let Some(o) = self.pane() {
+                        self.link_back.push((o.key, o.camera));
+                        if self.link_back.len() > 20 {
+                            self.link_back.remove(0);
+                        }
+                    }
+                    self.reveal(&sheet_id, [0.0, 0.0, 0.0, 0.0]);
+                    self.say(tr("Alt+← springt zurück").to_string());
+                }
+                crate::pages::LinkHit::Uri(u) => {
+                    // Only web and mail links leave n0te (never files or programs).
+                    let lower = u.to_ascii_lowercase();
+                    if lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:") {
+                        let _ = n0te_platform::open_path(&u);
+                        self.say(trf("Öffne {}", &[&u]));
+                    } else {
+                        self.say(trf("Link nicht geöffnet: {}", &[&u]));
+                    }
+                }
+            },
+            Message::LinkBack => {
+                if let Some((key, cam)) = self.link_back.pop()
+                    && let Screen::Notebook(s) = &mut self.screen
+                    && let Some(o) = s.pane_mut(key)
+                {
+                    o.camera = o.pages.clamp(cam);
+                }
+            }
+            Message::PdfChapters(on) => {
+                self.settings.pdf_chapters = on;
                 if self.persist_settings {
                     self.settings.save();
                 }
@@ -3377,7 +3423,7 @@ impl App {
                 let current = o.pages.current_number(&o.camera);
                 let node = o.pages.index_of_number(current).map(|i| o.pages.pages[i].placed.node.clone());
                 let (parent, index) = pdf::position_after(&o.nb, node.as_deref());
-                match pdf.import(&self.lib, &o.nb, bytes, parent.as_deref(), index) {
+                match pdf.import(&self.lib, &o.nb, bytes, parent.as_deref(), index, if self.settings.pdf_chapters { 2 } else { 0 }) {
                     Ok(n) => {
                         self.relayout();
                         self.say(trf("{} Seiten aus „{}“ eingefügt", &[&n, &name]));
@@ -3386,7 +3432,7 @@ impl App {
                 }
             }
             Screen::Library => {
-                let made = self.lib.create_notebook(&name).map_err(|e| e.to_string()).and_then(|nb| pdf.import(&self.lib, &nb, bytes, None, 0).map(|_| nb.id()));
+                let made = self.lib.create_notebook(&name).map_err(|e| e.to_string()).and_then(|nb| pdf.import(&self.lib, &nb, bytes, None, 0, if self.settings.pdf_chapters { 2 } else { 0 }).map(|_| nb.id()));
                 match made {
                     Ok(id) => {
                         self.refresh();
@@ -4176,6 +4222,12 @@ impl App {
             ),
             rule(),
             section(
+                tr("PDF"),
+                tr("Beim Importieren von Folien und Skripten."),
+                iced::widget::toggler(self.settings.pdf_chapters).label(tr("Inhaltsverzeichnis übernehmen (Kapitel werden Gruppen)")).on_toggle(Message::PdfChapters).size(20).text_size(14).spacing(12).style(theme::switch).into(),
+            ),
+            rule(),
+            section(
                 tr("Sprache"),
                 tr("Automatisch: unter Windows die Sprache des Systems."),
                 {
@@ -4294,7 +4346,7 @@ impl App {
             let spots = self.handles_in(key).iter().map(|h| o.camera.to_screen(view, h.at.x, h.at.y)).collect();
             page_view.on_pen(Message::Pen).finger_draws(self.tablet.finger_draws).ruler(ruler, move |r| Message::Tablet(crate::tablet::Msg::RulerMoved(key, r))).pen_spots(spots)
         } else {
-            page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot)
+            page_view.on_double_click(Message::NewText).on_plot_click(Message::EditPlot).on_link_click(Message::OpenLink)
         };
         let mut layers: Vec<Element<'a, Message>> = vec![page_view.into()];
         layers.extend(self.text_layers(o));

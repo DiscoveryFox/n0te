@@ -62,6 +62,19 @@ impl SheetSpec {
         out.push(Band { src, len: self.base_height() - src, dst: src + shift });
         out
     }
+
+    /// Which point of the PDF page (or base page) is at height `y` of this sheet; None in space
+    /// inserted into it.
+    pub fn base_y(&self, y: f32) -> Option<f32> {
+        self.bands().into_iter().find(|b| y >= b.dst && y < b.dst + b.len).map(|b| b.src + y - b.dst)
+    }
+
+    /// Where height `base` of the PDF page is on this sheet (inserted space pushes it down).
+    pub fn sheet_y(&self, base: f32) -> f32 {
+        let bands = self.bands();
+        let b = bands.iter().find(|b| base < b.src + b.len).or(bands.last()).expect("one band at least");
+        b.dst + (base - b.src)
+    }
 }
 
 /// What lies below a line on a page (its top and bottom; none if nothing does). Also what
@@ -922,6 +935,22 @@ fn value_str(v: Option<ValueOrContainer>) -> String {
     match v {
         Some(ValueOrContainer::Value(LoroValue::String(s))) => s.to_string(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod band_tests {
+    use super::*;
+
+    #[test]
+    fn heights_map_around_inserted_space() {
+        let mut s = SheetSpec::a4(Background::Blank);
+        s.gaps = vec![(100.0, 50.0)];
+        assert_eq!(s.base_y(80.0), Some(80.0));
+        assert_eq!(s.base_y(120.0), None, "in the inserted space");
+        assert_eq!(s.base_y(160.0), Some(110.0));
+        assert_eq!(s.sheet_y(110.0), 160.0);
+        assert_eq!(s.sheet_y(80.0), 80.0);
     }
 }
 

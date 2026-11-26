@@ -62,6 +62,10 @@ object Settings {
     val arrows get() = b("arrows", true)
     val sideButtonErases get() = b("side_button_erases", true)
     val scribbleErase get() = b("scribble_erase", true)
+    /** Importing a PDF: its table of contents becomes groups (a chapter of one page: the page's title). */
+    val pdfChapters get() = b("pdf_chapters", true)
+    /** The depth for the core's import: chapters and their sections, or none. */
+    val pdfChapterDepth get() = if (pdfChapters) 2u else 0u
     /** A line that is only a $$…$$ formula is centred. */
     val formulaCenter get() = b("formula_center", true)
     /** Live: the other device's view as a red frame (its laser shows either way). */

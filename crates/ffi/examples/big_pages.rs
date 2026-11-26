@@ -139,7 +139,7 @@ fn main() {
         }
         doc.save_to_bytes().unwrap()
     });
-    let imported = nb.import_pdf(pdf.clone(), bytes, None, u32::MAX).unwrap();
+    let imported = nb.import_pdf(pdf.clone(), bytes, None, u32::MAX, 0).unwrap();
     let s4 = nb.clone().open_sheet(imported[0].sheet_id.clone()).unwrap();
     let n4 = write(&s4, &mut rng, (100.0, 100.0, 2500.0, 1500.0), 18.0, 3000, &[ink(0xFFD71921)]);
     s4.save().unwrap();

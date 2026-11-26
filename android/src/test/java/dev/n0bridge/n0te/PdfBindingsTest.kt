@@ -119,7 +119,7 @@ class PdfBindingsTest {
         })
         try {
             val nb = lib.createNotebook("A4")
-            nb.importPdf(pdf, a4Pdf(), null, 0u)
+            nb.importPdf(pdf, a4Pdf(), null, 0u, 0u)
             val spec = (nb.outline(true).first { it is FfiOutlineRow.Sheet } as FfiOutlineRow.Sheet).spec
             val blob = spec.pdfBlob!!
             var b = 0.25f
@@ -163,7 +163,7 @@ class PdfBindingsTest {
         })
         try {
             val nb = lib.createNotebook("Physik")
-            val sheets = nb.importPdf(pdf, tinyPdf(), null, 0u)
+            val sheets = nb.importPdf(pdf, tinyPdf(), null, 0u, 2u)
             assertEquals(2, sheets.size)
             assertEquals(400f to 300f, sheets[0].width to sheets[0].height)
             assertEquals(300f to 400f, sheets[1].width to sheets[1].height) // displayed upright
@@ -195,7 +195,7 @@ class PdfBindingsTest {
 
             // Import the export again: same pages, ink where it was drawn.
             val nb2 = lib.createNotebook("Export")
-            val again = nb2.importPdf(pdf, exported, null, 0u)
+            val again = nb2.importPdf(pdf, exported, null, 0u, 2u)
             assertEquals(2, again.size)
             assertEquals(300f to 400f, again[1].width to again[1].height)
             pdf.requestTiles(listOf(FfiTileRequest(firstBlob(nb2), 0u, 1f, 0u, 0u, 400u, 300u, 0u, 0u, 1uL)))

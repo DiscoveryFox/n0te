@@ -149,6 +149,7 @@ class SettingsActivity : ComponentActivity() {
                                 }
                                 Toggle("boards", "Boards (unendliche Fläche)", "Im Plus-Menü anbieten", Settings.boards)
                                 Toggle("groups", "Gruppen", "Seiten zu einklappbaren Gruppen zusammenfassen", Settings.groups)
+                                Toggle("pdf_chapters", "Inhaltsverzeichnis von PDFs übernehmen", "Beim Import werden Kapitel zu Gruppen, einseitige Kapitel zu Seitentiteln", Settings.pdfChapters)
                             }
                             Card("Ansicht") {
                                 Toggle("main_column", "Hauptspalte hervorheben", "Ein sanftes Band hinter den Hauptseiten, wenn es Seitenblätter gibt", Settings.mainColumn)

@@ -3530,6 +3530,8 @@ class NotebookView(context: Context) : View(context) {
         }
         eyedropper?.let { pick -> eyedropper = null; pickColorAt(x.toInt(), y.toInt())?.let(pick); return }
         val wx = toWorldX(x); val wy = toWorldY(y)
+        // A link in a PDF page: to another page of it, or a web address.
+        if (tool != Tool.TEXT && linkTap(wx, wy)) return
         val now = SystemClock.uptimeMillis()
         val double = now - lastTapAt < DOUBLE_TAP_MS && hypot(x - lastTapX, y - lastTapY) < 60f * density
         lastTapAt = if (double) 0L else now
@@ -3552,6 +3554,72 @@ class NotebookView(context: Context) : View(context) {
         }
         m.headers.firstOrNull { it.rect.contains(wx, wy) }?.let { headerTap(it, wx, x, y); return }
         if (selection != null) clearSelection()
+    }
+
+    /** The links of PDF pages (blob, page), read once each. */
+    private val links = HashMap<Pair<String, Int>, List<uniffi.n0te_ffi.FfiPdfLink>>()
+    /** Where the view was before following links (back goes there), newest last. */
+    private val linkBack = ArrayList<FloatArray>()
+
+    /** Which height of the PDF page is at [y] of a sheet with space inserted ([gaps]: at, height pairs); null in the space. */
+    private fun baseY(gaps: List<Float>, y: Float): Float? {
+        var src = 0f; var shift = 0f
+        var i = 0
+        while (i + 1 < gaps.size) {
+            val at = gaps[i]; val h = gaps[i + 1]
+            if (y < at + shift) return if (y >= src + shift) y - shift else null
+            if (y < at + shift + h) return null
+            shift += h; src = at; i += 2
+        }
+        return if (y >= src + shift) y - shift else null
+    }
+
+    /** A tap at (wx, wy) on a link of a PDF page follows it; true if there was one. */
+    private fun linkTap(wx: Float, wy: Float): Boolean {
+        val m = model ?: return false
+        val p = m.placed.firstOrNull { it.rect.contains(wx, wy) } ?: return false
+        val blob = p.spec.pdfBlob ?: return false
+        val page = p.spec.pdfPage.toInt()
+        val lx = wx - p.rect.left
+        val ly = baseY(p.spec.gaps, wy - p.rect.top) ?: return false
+        val known = links[blob to page]
+        if (known == null) {
+            // Read once in the background, then act on this tap.
+            val svc = N0te.pdf ?: return false
+            N0te.background({ svc.pageLinks(blob, page.toUInt()) }) { r -> r.getOrNull()?.let { links[blob to page] = it; followLink(it, blob, lx, ly) } }
+            return false
+        }
+        return followLink(known, blob, lx, ly)
+    }
+
+    private fun followLink(list: List<uniffi.n0te_ffi.FfiPdfLink>, blob: String, lx: Float, ly: Float): Boolean {
+        val l = list.firstOrNull { lx >= it.x0 && lx <= it.x1 && ly >= it.y0 && ly <= it.y1 } ?: return false
+        val target = l.page
+        val uri = l.uri
+        if (target != null) {
+            val p = model?.placed?.firstOrNull { it.spec.pdfBlob == blob && it.spec.pdfPage == target } ?: return false
+            linkBack += floatArrayOf(scale, tx, ty)
+            if (linkBack.size > 20) linkBack.removeAt(0)
+            lookAt(p.sheetId, RectF(0f, 0f, p.rect.width(), p.rect.width() * height / width.coerceAtLeast(1)))
+            listener?.onMessage("Zurück-Geste: wieder hierher")
+            return true
+        }
+        if (uri != null) {
+            val lower = uri.lowercase()
+            // Only web and mail links leave n0te.
+            if (!(lower.startsWith("https://") || lower.startsWith("http://") || lower.startsWith("mailto:"))) { listener?.onMessage("Link nicht geöffnet: $uri"); return true }
+            runCatching { context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(uri)).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                .onFailure { listener?.onMessage("Kein Programm für diesen Link") }
+            return true
+        }
+        return false
+    }
+
+    /** Back to where the view was before following a link; false when there is none. */
+    fun linkBack(): Boolean {
+        val c = linkBack.removeLastOrNull() ?: return false
+        animateTo(c[0], c[1], c[2])
+        return true
     }
 
     /** End of a locked pan: a long enough sideways pull moves to the side page there. */
