@@ -396,7 +396,7 @@ impl Tablet {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(path, text);
+        let _ = n0te_core::store::write_atomic(&path, text.as_bytes());
     }
 
     /// The colour in use (0xAARRGGBB).

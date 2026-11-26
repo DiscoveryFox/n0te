@@ -652,7 +652,13 @@ impl App {
                 o.outline.menu = None;
                 o.outline.asked = None;
                 let group = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, .. } if *n == node));
-                let on_it = o.text_page.as_ref().is_some_and(|t| o.rows.iter().any(|r| matches!(r, OutlineRow::Sheet { node: n, sheet_id, .. } if *n == node && *sheet_id == t.sheet_id)));
+                // The text page open on it: the page itself, one of its side pages, or the notes
+                // docked beside it (they go with it).
+                let on_it = o.text_page.as_ref().is_some_and(|t| {
+                    t.main_node.as_deref() == Some(node.as_str())
+                        || o.rows.iter().any(|r| matches!(r, OutlineRow::Sheet { node: n, sheet_id, .. } if *n == node && *sheet_id == t.sheet_id))
+                        || o.pages.pages.iter().any(|p| (p.placed.node == node || p.placed.main_node == node) && p.placed.sheet_id == t.sheet_id)
+                });
                 let id = o.id.clone();
                 self.finish_text();
                 if group || on_it {

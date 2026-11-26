@@ -90,6 +90,8 @@ pub enum Message {
     /// PDF export: side pages at the end (else right after their page); remembered.
     ExportSidesAtEnd(bool),
     Export(ExportWhat),
+    /// The PDF export (written in the background) is done: where and how many pages, or why not.
+    Exported(Result<(PathBuf, usize), String>),
     TogglePick(String),
     OpenPath(PathBuf),
     /// Text boxes: new at (sheet, x, y), edit (sheet, box), typing, move/resize drags, size,
@@ -364,6 +366,8 @@ pub struct App {
     /// The scope chosen in the export dialog.
     pub export_mode: ExportWhat,
     pub last_export: Option<PathBuf>,
+    /// A PDF export is being written (in the background).
+    pub exporting: bool,
     /// Where exported PDFs go (~/Downloads).
     pub export_dir: PathBuf,
     pub editing: Option<Editing>,
@@ -512,6 +516,7 @@ impl App {
             export: None,
             export_mode: ExportWhat::All,
             last_export: None,
+            exporting: false,
             export_dir: downloads(),
             editing: None,
             settings,
@@ -684,6 +689,11 @@ impl App {
                     if self.plot_pane == key {
                         self.plot_edit = None;
                     }
+                    // The panels belong to the notebook that was there (its invites, its history,
+                    // its pages picked for export).
+                    if s.active == key {
+                        self.close_panels();
+                    }
                     self.gone(&before);
                 }
             }
@@ -853,6 +863,8 @@ impl App {
 
     pub(crate) fn say(&mut self, s: impl Into<String>) {
         self.status = Some(s.into());
+        // "Öffnen" belongs to the export just told, not to whatever is said next.
+        self.last_export = None;
     }
 
     /// Runs a message, then what it left to do in the background: headings to read (again), a
@@ -940,8 +952,9 @@ impl App {
                 let Some(o) = self.pane() else { return Task::none() };
                 let collapsed = o.rows.iter().any(|r| matches!(r, OutlineRow::Group { node: n, collapsed: true, .. } if *n == node));
                 if o.nb.set_collapsed(&node, !collapsed).is_ok() {
-                    let _ = self.lib.save_notebook(&o.nb);
+                    let saved = self.lib.save_notebook(&o.nb);
                     let id = o.id.clone();
+                    self.report_save(saved);
                     self.relayout_book(&id);
                 }
             }
@@ -974,6 +987,8 @@ impl App {
                 self.show_imports = on;
                 if on {
                     self.bundles = find_bundles(&bundle_dirs());
+                    // The panel offers PDFs beside the bundles: the ones there now.
+                    self.pdfs = pdf::recent_pdfs();
                 }
             }
             Message::Import(path) => match std::fs::read(&path).map_err(|e| e.to_string()).and_then(|b| self.lib.import_bundle(&b).map_err(|e| e.to_string())) {
@@ -1239,7 +1254,17 @@ impl App {
                     p.insert(node);
                 }
             }
-            Message::Export(what) => self.export_pdf(what),
+            Message::Export(what) => return self.export_pdf(what),
+            Message::Exported(r) => {
+                self.exporting = false;
+                match r {
+                    Ok((path, pages)) => {
+                        self.say(if pages == 1 { trf("1 Seite exportiert: {}", &[&path.display()]) } else { trf("{} Seiten exportiert: {}", &[&pages, &path.display()]) });
+                        self.last_export = Some(path);
+                    }
+                    Err(e) => self.say(trf("Export fehlgeschlagen: {}", &[&e])),
+                }
+            }
             Message::OpenPath(p) => {
                 let _ = n0te_platform::open_path(p);
             }
@@ -1779,7 +1804,8 @@ impl App {
                 let spec = SheetSpec::a4(Background::Text);
                 match o.nb.add_sheet(parent.as_deref(), index, &spec) {
                     Ok((_, sheet)) => {
-                        let _ = self.lib.save_notebook(&o.nb);
+                        let saved = self.lib.save_notebook(&o.nb);
+                        self.report_save(saved);
                         self.relayout();
                         if let Some(o) = self.pane_mut()
                             && let Some(i) = o.pages.page_of_sheet(&sheet)
@@ -2140,8 +2166,9 @@ impl App {
             for g in &folded {
                 let _ = o.nb.set_collapsed(g, false);
             }
-            let _ = self.lib.save_notebook(&o.nb);
+            let saved = self.lib.save_notebook(&o.nb);
             let id = o.id.clone();
+            self.report_save(saved);
             self.relayout_book(&id);
         }
         let Some(o) = self.pane_mut() else { return };
@@ -2564,7 +2591,8 @@ impl App {
             let Some(o) = self.pane() else { return Task::none() };
             match o.nb.add_side_sheet(&main, n0te_core::notebook::Side::Right, 0, &SheetSpec::a4(Background::Text)) {
                 Ok((_, s)) => {
-                    let _ = self.lib.save_notebook(&o.nb);
+                    let saved = self.lib.save_notebook(&o.nb);
+                    self.report_save(saved);
                     sheet = s;
                     self.relayout();
                 }
@@ -2620,11 +2648,11 @@ impl App {
         let Ok(sheet) = self.lib.load_sheet(&nb, sheet_id) else { return Task::none() };
         let md = sheet.page_text();
         let doc = crate::blocks::Doc::from_markdown(&md);
-        // The cursor goes to the end of the last block.
+        // The cursor goes to the end of the last block (columns count bytes, as in the editor).
         let end = doc.blocks.last().map(|b| {
             let t = b.text();
             let line = t.split('\n').count().saturating_sub(1);
-            let column = t.split('\n').last().map(|l| l.chars().count()).unwrap_or(0);
+            let column = t.split('\n').last().map(str::len).unwrap_or(0);
             (b.id, text_editor::Position { line, column })
         });
         let mut tp = TextPage { sheet_id: sheet_id.to_string(), main_node: None, sheet, doc, docked, saved: md, dirty: false, last_change: Instant::now() };
@@ -2653,7 +2681,8 @@ impl App {
             }
             let Some(main) = t.main_node.clone() else { return };
             let Ok((_, s)) = o.nb.add_side_sheet(&main, n0te_core::notebook::Side::Right, 0, &SheetSpec::a4(Background::Text)) else { return };
-            let _ = self.lib.save_notebook(&o.nb);
+            let saved = self.lib.save_notebook(&o.nb);
+            self.report_save(saved);
             let Ok(sheet) = self.lib.load_sheet(&nb, &s) else { return };
             if let Some(t) = self.text_page_mut() {
                 t.sheet_id = s;
@@ -2772,11 +2801,12 @@ impl App {
         }
         let Some(o) = self.pane() else { return };
         let done = f(&o.nb);
-        let _ = self.lib.save_notebook(&o.nb);
+        let saved = self.lib.save_notebook(&o.nb);
         let id = o.id.clone();
         self.saved_here(&id);
         self.relayout_book(&id);
         self.changed(&id, Some(&[]));
+        self.report_save(saved);
         if let Err(e) = done {
             self.say(trf("Nicht geändert: {}", &[&e]));
         }
@@ -2964,6 +2994,14 @@ impl App {
         }
         self.saved_here(nb);
         self.redraw_sheet(nb, sheet_id, sheet);
+    }
+
+    /// A notebook that could not be stored is told (else the change shows on screen but is gone
+    /// after a restart).
+    fn report_save(&mut self, saved: n0te_core::Result<()>) {
+        if let Err(e) = saved {
+            self.say(trf("Speichern fehlgeschlagen: {}", &[&e]));
+        }
     }
 
     /// Notebook `nb` was just saved by this app: the next look for saves elsewhere doesn't read
@@ -3167,10 +3205,19 @@ impl App {
         }
     }
 
-    /// Writes the PDF to ~/Downloads (a free name) and remembers it for "ÖFFNEN".
-    fn export_pdf(&mut self, what: ExportWhat) {
-        let Some(pdf) = self.pdf.clone() else { return self.say(tr("PDF geht nicht: libpdfium.so fehlt")) };
-        let Screen::Notebook(o) = &self.screen else { return };
+    /// Writes the PDF to ~/Downloads (a free name) and remembers it for "ÖFFNEN". What was just
+    /// typed goes in too; the pages are put together on a worker thread (a long notebook takes a
+    /// while), the window carries on meanwhile.
+    fn export_pdf(&mut self, what: ExportWhat) -> Task<Message> {
+        let Some(pdf) = self.pdf.clone() else {
+            self.say(trf("PDF geht nicht: {} fehlt", &[&pdf::PDFIUM]));
+            return Task::none();
+        };
+        if self.exporting {
+            self.say(tr("Der Export läuft noch …"));
+            return Task::none();
+        }
+        let Screen::Notebook(o) = &self.screen else { return Task::none() };
         let row = |main: &str| -> Vec<String> {
             let mut r: Vec<&n0te_core::layout::Placed> = o.pages.pages.iter().map(|p| &p.placed).filter(|p| p.main_node == main).collect();
             r.sort_by_key(|p| p.side);
@@ -3189,24 +3236,29 @@ impl App {
             }
         };
         if selected.as_ref().is_some_and(|s| s.is_empty()) {
-            return self.say(tr("Keine Seite gewählt"));
+            self.say(tr("Keine Seite gewählt"));
+            return Task::none();
         }
-        let title = o.nb.title();
+        let (id, title) = (o.id.clone(), o.nb.title());
         let order = if self.settings.export_sides_at_end { n0te_pdf::notebook::ExportOrder::SidesAtEnd } else { n0te_pdf::notebook::ExportOrder::Inline };
-        match pdf.export(&self.lib, &o.nb, selected.as_deref(), order) {
-            Ok((bytes, pages)) => {
-                let path = free_path(&self.export_dir, &title, "pdf");
-                match n0te_core::store::write_atomic(&path, &bytes) {
-                    Ok(()) => {
-                        self.export = None;
-                        self.say(trf("{} Seiten exportiert: {}", &[&pages, &path.display()]));
-                        self.last_export = Some(path);
-                    }
-                    Err(e) => self.say(trf("Speichern fehlgeschlagen: {}", &[&e])),
-                }
-            }
-            Err(e) => self.say(trf("Export fehlgeschlagen: {}", &[&e])),
-        }
+        // Typed text and n0te Tablet's pages still on their way to disk go into the PDF too.
+        self.save_all();
+        crate::saver::flush();
+        let path = free_path(&self.export_dir, &title, "pdf");
+        let root = self.lib.root().to_path_buf();
+        self.export = None;
+        self.exporting = true;
+        self.say(tr("Exportiere …"));
+        let (tx, rx) = iced::futures::channel::oneshot::channel();
+        std::thread::spawn(move || {
+            let r = Library::open(&root)
+                .and_then(|lib| lib.load_notebook(&id).map(|nb| (lib, nb)))
+                .map_err(|e| e.to_string())
+                .and_then(|(lib, nb)| pdf.export(&lib, &nb, selected.as_deref(), order))
+                .and_then(|(bytes, pages)| n0te_core::store::write_atomic(&path, &bytes).map(|_| (path, pages)).map_err(|e| trf("Speichern fehlgeschlagen: {}", &[&e])));
+            let _ = tx.send(r);
+        });
+        Task::perform(rx, |r| Message::Exported(r.unwrap_or_else(|_| Err(tr("abgebrochen").into()))))
     }
 
     /// Global shortcuts (keys no focused widget consumed).
@@ -3309,6 +3361,14 @@ impl App {
             if let Some(t) = t {
                 return self.handle(Message::Tablet(t));
             }
+        }
+        // Ctrl+Z, not typing: the page or group just deleted comes back (as "Rückgängig" in
+        // the status bar does; n0te Tablet's ink undo came first above).
+        if m.command() && !m.shift() && self.editing.is_none() && self.pane().is_some_and(|o| o.text_page.is_none()) && let Key::Character("z") = key.as_ref() {
+            if self.undo_delete.as_ref().is_some_and(|nb| matches!(&self.screen, Screen::Notebook(s) if s.shows(nb))) {
+                return self.handle(Message::Outline(sidebar::Msg::Undo));
+            }
+            return Task::none();
         }
         match (m.command(), key.as_ref()) {
             (true, Key::Character("k")) => return self.handle(Message::OpenPalette),
@@ -3653,6 +3713,7 @@ impl App {
             (tr("Touchpad: zwei Finger"), tr("Verschieben, auseinander / zusammen: zoomen")),
             (tr("Strg + Mausrad, Strg + / −"), tr("Zoomen, Strg 0: 100 %")),
             (tr("Strg R"), tr("Seite drehen (hoch ↔ quer)")),
+            (tr("Strg Z"), tr("Gelöschte Seite oder Gruppe zurückholen")),
             (tr("Doppelklick · Strg T"), tr("Textfeld")),
             (tr("Klick auf ein Koordinatensystem"), tr("Funktionen und Bereich ändern (Strg K: einfügen)")),
             (tr("Strg N"), tr("Neue Textseite (Bibliothek: neues Notizbuch)")),

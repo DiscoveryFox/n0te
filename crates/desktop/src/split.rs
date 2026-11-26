@@ -689,11 +689,16 @@ impl App {
         if s.main == key {
             s.main = fresh;
         }
-        if s.active == key {
+        let active = s.active == key;
+        if active {
             s.active = fresh;
         }
         if s.maxed == Some(key) {
             s.maxed = None;
+        }
+        // The toolbar's panels were the old notebook's.
+        if active {
+            self.close_panels();
         }
         self.watch(id);
         if let Some(nb) = old {

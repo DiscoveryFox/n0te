@@ -136,7 +136,9 @@ impl Settings {
         if let Some(dir) = p.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let _ = std::fs::write(p, self.text());
+        // In one piece: n0te Laptop and n0te Tablet share it, and a crash mid-write must not
+        // leave half a file (every setting would be gone).
+        let _ = n0te_core::store::write_atomic(&p, self.text().as_bytes());
     }
 
     /// Notes that notebook `id` was opened now (unix ms `at`): newest first, the oldest beyond
