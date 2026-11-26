@@ -86,6 +86,8 @@ class NotebookView(context: Context) : View(context) {
         var samples = FloatArray(0)
         var path = Path()
         var doneAt = 0L
+        /** When its last samples came (a stroke whose end never comes goes after a while). */
+        var lastAt = 0L
     }
 
     /** A "+" next to the current page row (world position). */
@@ -343,6 +345,13 @@ class NotebookView(context: Context) : View(context) {
     // Laser pointer: screen points (x, y, time) of the trail; fades after the pen lifts.
     /** Laser points: world x, y, time, segment (one segment per pen-down). */
     private val laser = ArrayList<FloatArray>()
+    /**
+     * Times kept as floats count from when this view was made: a float of the uptime itself
+     * (days on a tablet that is never switched off) steps by 64 ms and more, so the laser's
+     * trail faded in jumps and a stroke started beside the page got times before its start.
+     */
+    private val timeBase = SystemClock.uptimeMillis()
+    private fun since(t: Long) = (t - timeBase).toFloat()
     private var laserUpAt = 0L
     private var laserSeg = 0
     private val laserEnded = HashMap<Int, Long>()
@@ -927,7 +936,9 @@ class NotebookView(context: Context) : View(context) {
 
     /** A device left: its frame goes. */
     fun hideRemote(device: String) {
-        if (remotes.remove(device) != null) invalidate()
+        // Its strokes being drawn go with it (a device that left never finishes them).
+        val ink = remoteInk.keys.removeAll { it.startsWith("$device/") }
+        if (remotes.remove(device) != null || ink) invalidate()
     }
 
     /** "Ansicht der Gäste zeigen" turned off: guests' (and the owner's) frames go at once. */
@@ -975,9 +986,12 @@ class NotebookView(context: Context) : View(context) {
         val ri = remoteInk.getOrPut(key) { RemoteInk(sheetId, brush) }
         ri.samples += floatsOf(bytes)
         ri.path = InkStroke.pathOf(floatsOf(strokeOutline(brush, bytesOf(ri.samples))))
-        if (done) ri.doneAt = SystemClock.uptimeMillis()
         val now = SystemClock.uptimeMillis()
-        remoteInk.entries.removeAll { it.value.doneAt > 0 && now - it.value.doneAt > 8000 }
+        ri.lastAt = now
+        if (done) ri.doneAt = now
+        // Unfinished ones too once nothing came for a while (the other device dropped off, its
+        // last packet got lost): they stayed on screen for good.
+        remoteInk.entries.removeAll { (it.value.doneAt > 0 && now - it.value.doneAt > 8000) || (it.value.doneAt == 0L && now - it.value.lastAt > 15_000) }
         invalidate()
     }
 
@@ -1049,7 +1063,7 @@ class NotebookView(context: Context) : View(context) {
         if (!sel.multi) {
             m.copyStrokes(sel.sheetId, sel.ids) { data ->
                 N0te.clip = Clip(data, RectF(sel.bounds))
-                if (cut) deleteSelection()
+                if (cut) deleteSelection(sel)
                 then()
             }
             return
@@ -1065,7 +1079,7 @@ class NotebookView(context: Context) : View(context) {
                 all += data.map { shifted(it, p.rect.left - u.left, p.rect.top - u.top) }
                 if (--left == 0) {
                     N0te.clip = Clip(all, RectF(0f, 0f, u.width(), u.height()))
-                    if (cut) deleteSelection()
+                    if (cut) deleteSelection(sel)
                     then()
                 }
             }
@@ -1407,9 +1421,13 @@ class NotebookView(context: Context) : View(context) {
         invalidate()
     }
 
-    fun deleteSelection() {
-        val sel = selection ?: return
-        clearSelection()
+    /**
+     * Deletes [sel] (the selection now, or the one a cut copied: a lasso drawn while the copy was
+     * on its way is not deleted instead of it).
+     */
+    fun deleteSelection(sel: Selection? = selection) {
+        sel ?: return
+        if (selection === sel) clearSelection()
         for (part in sel.parts) model?.deleteStrokes(part.sheetId, part.ids)
     }
 
@@ -1422,7 +1440,19 @@ class NotebookView(context: Context) : View(context) {
      * The selection rendered as a PNG (white background), for the laptop clipboard: all of it,
      * scaled down to fit when it is big ([SelectionPicture]).
      */
-    fun selectionPng(): ByteArray? {
+    fun selectionPng(done: (ByteArray?) -> Unit) {
+        val bmp = selectionBitmap() ?: return done(null)
+        // Compressed on the I/O thread: PNG at full quality of up to 16 MP held the main thread for long.
+        N0te.background({
+            val out = java.io.ByteArrayOutputStream()
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
+            bmp.recycle()
+            out.toByteArray()
+        }) { r -> done(r.getOrNull()) }
+    }
+
+    /** The selection drawn on white (drawn here: it reads the page's state). */
+    private fun selectionBitmap(): android.graphics.Bitmap? {
         val sel = selection ?: return null
         val m = model ?: return null
         // What is there now (the selection's box can lag behind a move or resize), in world points.
@@ -1462,16 +1492,17 @@ class NotebookView(context: Context) : View(context) {
             for (s in st.strokes) if (s.id in part.ids) drawStroke(c, s)
             c.restore()
         }
-        val out = java.io.ByteArrayOutputStream()
-        bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, out)
-        bmp.recycle()
-        return out.toByteArray()
+        return bmp
     }
 
     /** The first page as a small picture (library preview), [w] pixels wide; null if empty. */
     fun renderThumbnail(w: Int): android.graphics.Bitmap? {
         val m = model ?: return null
         val p = m.placed.firstOrNull { it.side == 0 } ?: return null
+        // Its ink not held (never in view, or let go long out of view): no picture rather than
+        // blank paper over the cover kept from before.
+        val st = m.sheets[p.sheetId]
+        if (st?.handle == null || st.trimmed || st.loading) return null
         return renderPage(m, p, w)
     }
 
@@ -1820,7 +1851,7 @@ class NotebookView(context: Context) : View(context) {
             // Over the new strip (or the line), a little above where the pen is.
             val mid = if (dx > 0f) line + dx / 2f else line
             val h = spaceText.textSize * 1.5f
-            val top = (r.top + sd.y - 40f * density / scale - h).coerceIn(r.top + pad, r.bottom - h - pad)
+            val top = clampTo(r.top + sd.y - 40f * density / scale - h, r.top + pad, r.bottom - h - pad)
             val box = RectF(mid - tw / 2f - pad, top, mid + tw / 2f + pad, top + h)
             spaceFill.color = accent
             c.drawRoundRect(box, pad, pad, spaceFill)
@@ -1920,14 +1951,14 @@ class NotebookView(context: Context) : View(context) {
      */
     private fun drawLaser(c: Canvas) {
         if (laser.isEmpty()) return
-        val now = SystemClock.uptimeMillis().toFloat()
+        val now = since(SystemClock.uptimeMillis())
         val (trail, fadeMs) = when (Settings.laserTrail) {
             "long" -> 4000f to 1500f
             "keep" -> Float.MAX_VALUE to 2000f
             else -> LASER_TRAIL_MS to LASER_FADE_MS
         }
         val active = if (action == Action.LASER) laserSeg else -1
-        fun alphaOf(seg: Int): Float = if (seg == active) 1f else laserEnded[seg]?.let { (1f - (now - it) / fadeMs).coerceIn(0f, 1f) } ?: 0f
+        fun alphaOf(seg: Int): Float = if (seg == active) 1f else laserEnded[seg]?.let { (1f - (now - since(it)) / fadeMs).coerceIn(0f, 1f) } ?: 0f
         laser.removeAll { now - it[2] > trail || alphaOf(it[3].toInt()) <= 0f }
         laserEnded.keys.retainAll(laser.map { it[3].toInt() }.toSet())
         if (laser.isEmpty()) return
@@ -2006,13 +2037,17 @@ class NotebookView(context: Context) : View(context) {
         val step = b.spec.spacing.takeIf { it >= 4f } ?: 24f
         drawPattern(c, FfiBackground.DOTS, RectF(0f, 0f, 0f, 0f), vis, step)
         m.ensureLoaded(b.sheetId)
-        m.sheets[b.sheetId]?.let { drawInk(c, b, it, vis) }
+        // Pictures and graphs under the ink, as in the column (a board shown alone had none: they
+        // showed only while selected, and touches on the invisible graphs were taken).
+        m.sheets[b.sheetId]?.let { drawImages(c, b, it); drawInk(c, b, it, vis) }
         if (action == Action.INK && inkLayer?.active != true) {
             drawLive(c)
         }
         drawLassoAndSelection(c, m)
+        drawPlotBox(c)
         drawRuler(c)
         c.restore()
+        drawLaser(c)
         if (Settings.minimap && SystemClock.uptimeMillis() < miniUntil) m.sheets[b.sheetId]?.let { drawMinimap(c, it, vis) }
     }
 
@@ -2538,8 +2573,10 @@ class NotebookView(context: Context) : View(context) {
             val b = RectF()
             for (s in st.strokes) if (s.id in sel.ids) { if (b.isEmpty) b.set(s.bounds) else b.union(s.bounds) }
             for (im in st.images) if (im.id in sel.ids) { val r = RectF(im.x, im.y, im.x + im.w, im.y + im.h); if (b.isEmpty) b.set(r) else b.union(r) }
-            selection = Selection(sel.sheetId, sel.ids, if (b.isEmpty) sel.bounds else b)
-            listener?.onSelectionChanged(selection)
+            if (selection === sel) {
+                selection = Selection(sel.sheetId, sel.ids, if (b.isEmpty) sel.bounds else b)
+                listener?.onSelectionChanged(selection)
+            }
             invalidate()
         }
         val unchanged = when (g) { 8 -> abs(selAng) < 0.5f; else -> abs(selKx - 1f) < 0.005f && abs(selKy - 1f) < 0.005f }
@@ -2974,7 +3011,7 @@ class NotebookView(context: Context) : View(context) {
             action = Action.LASER; target = null
             laserSeg++
             if (Settings.laserTrail == "short") { laser.clear(); laserEnded.clear() }
-            laser += floatArrayOf(wx, wy, SystemClock.uptimeMillis().toFloat(), laserSeg.toFloat())
+            laser += floatArrayOf(wx, wy, since(SystemClock.uptimeMillis()), laserSeg.toFloat())
             invalidate()
             return
         }
@@ -3049,7 +3086,7 @@ class NotebookView(context: Context) : View(context) {
             if (!readOnly && (erasing || tool == Tool.PEN || tool == Tool.MARKER)) {
                 action = Action.PRE_INK
                 preErase = erasing
-                preInk.clear(); preInk += floatArrayOf(wx, wy, pressure, now.toFloat())
+                preInk.clear(); preInk += floatArrayOf(wx, wy, pressure, since(now))
             } else action = Action.NONE
             return
         }
@@ -3081,7 +3118,7 @@ class NotebookView(context: Context) : View(context) {
      * the very edge. The eraser starts erasing there.
      */
     private fun preInkMove(wx: Float, wy: Float, pressure: Float, t: Long, batch: Boolean) {
-        preInk += floatArrayOf(wx, wy, pressure, t.toFloat())
+        preInk += floatArrayOf(wx, wy, pressure, since(t))
         val q = model?.placed?.firstOrNull { it.rect.contains(wx, wy) } ?: return
         target = q
         if (preErase) { preInk.clear(); action = Action.ERASE; beginErase(q, wx - q.rect.left, wy - q.rect.top, t); return }
@@ -3091,7 +3128,7 @@ class NotebookView(context: Context) : View(context) {
         repeat(14) { val mid = (lo + hi) / 2; if (q.rect.contains(out[0] + (cur[0] - out[0]) * mid, out[1] + (cur[1] - out[1]) * mid)) hi = mid else lo = mid }
         val ex = (out[0] + (cur[0] - out[0]) * hi).coerceIn(q.rect.left, q.rect.right)
         val ey = (out[1] + (cur[1] - out[1]) * hi).coerceIn(q.rect.top, q.rect.bottom)
-        startInk(ex - q.rect.left, ey - q.rect.top, cur[2], preInk[0][3].toLong(), actionStylus)
+        startInk(ex - q.rect.left, ey - q.rect.top, cur[2], preInk[0][3].toLong() + timeBase, actionStylus)
         appendInk(cur[0] - q.rect.left, cur[1] - q.rect.top, lastPressure, t)
         preInk.clear()
         stillSince = t; stillX = wx - q.rect.left; stillY = wy - q.rect.top
@@ -3265,12 +3302,14 @@ class NotebookView(context: Context) : View(context) {
                 if (!textMoved && hypot((lx - textDownLx) * scale, (ly - textDownLy) * scale) < touchSlop) return
                 textMoved = true
                 val st = model?.sheets?.get(p.sheetId) ?: return
+                // The texts' recording follows st.texts itself; no version bump per move (that
+                // re-planned the page's ink and redrew its outline picture on every pen sample;
+                // placing the box at the end counts as the change).
                 st.texts = st.texts.map { if (it.id == hit.id) it.copy(x = hit.x + lx - textDownLx, y = hit.y + ly - textDownLy) else it }
-                st.invalidateNode()
                 if (!batch) invalidate()
             }
             Action.LASER -> {
-                laser += floatArrayOf(wx, wy, SystemClock.uptimeMillis().toFloat(), laserSeg.toFloat())
+                laser += floatArrayOf(wx, wy, since(SystemClock.uptimeMillis()), laserSeg.toFloat())
                 if (!batch) { invalidate(); sendPresence(false, PointF(x, y)) }
             }
             Action.SPACE -> space?.let { sd ->
@@ -3350,7 +3389,9 @@ class NotebookView(context: Context) : View(context) {
             }
             Action.SCALE_SEL -> {
                 val sel = selection ?: return
-                val w = sel.bounds.width().coerceAtLeast(4f)
+                // The box around every page's part (it scales about that box; the first part
+                // alone made the handle run ahead of the pen).
+                val w = selUnion(sel).width().coerceAtLeast(4f)
                 selScale = ((w + (x - actionDownX) / scale) / w).coerceIn(0.2f, 6f)
                 if (!batch) invalidate()
             }
@@ -3386,9 +3427,11 @@ class NotebookView(context: Context) : View(context) {
             return
         }
         if (id == loupePinchId) { loupePinchId = -1; return }
-        if (id == loupeGrabId) { endLoupeGrab(); return }
+        // Cancelled (a palm Android took back): no tap in the strip.
+        if (id == loupeGrabId) { if (canceled) { loupeGrabId = -1; loupeGrab = Grab.NONE } else endLoupeGrab(); return }
         val f = fingers.remove(id) ?: return
-        if (!f.rejected && gesture == Gesture.PAN_PENDING && id == panId && now - f.downAt < 400 &&
+        // Nor a tap on the page (it cleared the selection, folded a group, fitted the page).
+        if (!canceled && !f.rejected && gesture == Gesture.PAN_PENDING && id == panId && now - f.downAt < 400 &&
             hypot(f.x - f.downX, f.y - f.downY) < touchSlop
         ) onTap(f.x, f.y)
         if (!f.rejected) {
@@ -3528,7 +3571,8 @@ class NotebookView(context: Context) : View(context) {
         val p = target
         when (action) {
             Action.INK -> if (commit && m != null && p != null && count > 0) commitInk(m, p, now) else cancelInk()
-            Action.ERASE -> if (m != null && p != null) endErase(m, p)
+            // Not committed (a palm found out late): what it erased comes back.
+            Action.ERASE -> if (m != null && p != null) { if (commit) endErase(m, p) else cancelErase(m, p) }
             Action.LASSO -> if (m != null) finishLasso(m)
             Action.SPACE -> finishSpace(m, commit)
             Action.PRE_INK -> preInk.clear()
@@ -3570,6 +3614,11 @@ class NotebookView(context: Context) : View(context) {
         fingers.clear()
         gesture = Gesture.NONE
         afterPinch = false
+        // A magnifier grab or a locked pan cut off (Android cancels a palm): nothing of it left
+        // over, else the next gesture's first pointer (often the pen) slid the magnifier.
+        loupeGrabId = -1; loupeGrab = Grab.NONE; loupePinchId = -1
+        panTracking = false
+        stretch = 0f
         invalidate()
     }
 
@@ -3682,7 +3731,7 @@ class NotebookView(context: Context) : View(context) {
         val glyph = if (more) "→" else if (lineStep(p) != null) "↵" else return
         val y = if (!flowTop.isNaN() && flowSheet == p.sheetId) ((flowTop + flowBottom) / 2f) * scale + ty else band.centerY()
         flowGlyph.color = accent; flowGlyph.alpha = 0xB0; flowGlyph.textSize = 22f * density
-        c.drawText(glyph, band.centerX(), y.coerceIn(band.top + 30f * density, band.bottom - 10f * density), flowGlyph)
+        c.drawText(glyph, band.centerX(), clampTo(y, band.top + 30f * density, band.bottom - 10f * density), flowGlyph)
     }
 
     // --- the writing magnifier ("Schreiblupe") ---------------------------------------------
@@ -3763,7 +3812,7 @@ class NotebookView(context: Context) : View(context) {
     /** The strip's top edge moved by [dy] px (its height handle); the bottom stays. */
     fun resizePad(dy: Float) {
         val s = loupeStrip()
-        val h = (s.height() - dy).coerceIn(140f * density, height * 0.6f)
+        val h = clampTo(s.height() - dy, 140f * density, height * 0.6f)
         padHPx = h; padTopPx = s.bottom - h
         loupePage()?.let { clampFrame(it); snapFrameY(it) }
         invalidate()
@@ -3787,8 +3836,9 @@ class NotebookView(context: Context) : View(context) {
 
     /** The mapping of the running action: through the magnifier or the page view. */
     private val aScale get() = if (mapLoupe) loupeScale() else scale
-    private val aTx get() = loupePage()?.takeIf { mapLoupe }?.let { loupeTx(it) } ?: tx
-    private val aTy get() = loupePage()?.takeIf { mapLoupe }?.let { loupeTy(it) } ?: ty
+    // The magnifier's page looked up only when mapping through it (not for every pen sample of every stroke).
+    private val aTx get() = if (!mapLoupe) tx else loupePage()?.let { loupeTx(it) } ?: tx
+    private val aTy get() = if (!mapLoupe) ty else loupePage()?.let { loupeTy(it) } ?: ty
     private fun aWorldX(sx: Float) = (sx - aTx) / aScale
     private fun aWorldY(sy: Float) = (sy - aTy) / aScale
 
@@ -3797,7 +3847,7 @@ class NotebookView(context: Context) : View(context) {
         val (p, pt) = pageAt(x, y) ?: return false
         if (board != null) return false
         loupeSheet = p.sheetId
-        loupeW = (p.rect.width() * Settings.loupeShare).coerceIn(40f, p.rect.width())
+        loupeW = clampTo(p.rect.width() * Settings.loupeShare, 40f, p.rect.width())
         loupeOpen = true
         moveLoupeTo(p, pt.x, pt.y)
         return true
@@ -3807,7 +3857,7 @@ class NotebookView(context: Context) : View(context) {
     fun openLoupe(): Boolean {
         val p = focusedSheet()?.takeIf { !it.isBoard && board == null } ?: return false
         loupeSheet = p.sheetId
-        loupeW = (p.rect.width() * Settings.loupeShare).coerceIn(40f, p.rect.width())
+        loupeW = clampTo(p.rect.width() * Settings.loupeShare, 40f, p.rect.width())
         loupeX = p.rect.width() * 0.06f
         val strip = loupeStrip()
         loupeY = (toWorldY(min(strip.top, height.toFloat()) * 0.45f) - p.rect.top).coerceIn(0f, max(0f, p.rect.height() - loupeH(strip)))
@@ -4077,7 +4127,12 @@ class NotebookView(context: Context) : View(context) {
     /** The strip: the frame's part of the page, large, its "move on" part shaded. */
     private fun drawLoupe(c: Canvas, m: NotebookModel) {
         if (!loupeOpen) return
-        val p = loupePage() ?: return
+        // Its page went (folded, deleted, changed elsewhere): closed, not an invisible strip that
+        // still takes the touches over a third of the screen.
+        val p = loupePage() ?: run {
+            post { if (loupeOpen && loupePage() == null && model?.placed?.isNotEmpty() == true) closeLoupe() }
+            return
+        }
         val s = loupeStrip()
         val radius = minOf(Ui.theme.style.panel, 18f) * density
         loupeClip.rewind()
@@ -4583,12 +4638,23 @@ class NotebookView(context: Context) : View(context) {
         if (eraseClip != null) {
             val path = erasePath.toFloatArray()
             erasePath.clear()
-            // Keep hiding the erased area until the cut strokes are back.
-            m.eraseArea(p.sheetId, path) { eraseClip = null; eraseSheet = null; invalidate() }
+            // Keep hiding the erased area until the cut strokes are back — unless the next swipe
+            // began meanwhile (the core busy with a dense page): its clip stays, else the rest of
+            // it erased whole strokes and its first dabs were never applied.
+            val mine = eraseClip
+            m.eraseArea(p.sheetId, path) { if (eraseClip === mine) { eraseClip = null; eraseSheet = null }; invalidate() }
         } else {
             m.commitErase(p.sheetId)
             eraseSheet = null
         }
+    }
+
+    /** An eraser gesture taken back: nothing it covered is erased. */
+    private fun cancelErase(m: NotebookModel, p: Placed) {
+        if (eraseClip != null) { eraseClip = null; erasePath.clear() }
+        m.sheets[p.sheetId]?.let { st -> if (st.hidden.isNotEmpty()) { st.hidden.clear(); st.invalidateNode() } }
+        eraseSheet = null
+        invalidate()
     }
 
     private fun eraseAt(p: Placed, lx: Float, ly: Float, r: Float) {
@@ -4613,7 +4679,8 @@ class NotebookView(context: Context) : View(context) {
         // A tap: the image under the pen.
         if (poly.size < 6 || polyExtent(poly) < 4f) {
             val wx = poly.getOrNull(0) ?: return; val wy = poly.getOrNull(1) ?: return
-            val p = pages.firstOrNull { it.rect.contains(wx, wy) } ?: return
+            // A board has no edge: a tap anywhere on it counts (its frame cut off what lay outside).
+            val p = board ?: pages.firstOrNull { it.rect.contains(wx, wy) } ?: return
             val st = m.sheets[p.sheetId] ?: return
             val tx0 = wx - p.rect.left; val ty0 = wy - p.rect.top
             // The stroke under it first (a shape, a line, a label written on a graph: ink lies on
@@ -4738,8 +4805,10 @@ class NotebookView(context: Context) : View(context) {
             m.state(sel.sheetId).floating = emptySet()
             // The selection follows the stroke's new shape (its bounds, its ends).
             val nb = m.sheets[sel.sheetId]?.strokes?.firstOrNull { it.id in sel.ids }?.bounds?.let { RectF(it) } ?: sel.bounds
-            selection = Selection(sel.sheetId, sel.ids, nb)
-            listener?.onSelectionChanged(selection)
+            if (selection === sel) {
+                selection = Selection(sel.sheetId, sel.ids, nb)
+                listener?.onSelectionChanged(selection)
+            }
             invalidate()
         }
     }
@@ -4767,7 +4836,8 @@ class NotebookView(context: Context) : View(context) {
                 m.transform(part.sheetId, part.ids, dx, dy, k, ox, oy) {
                     m.state(part.sheetId).let { it.floating = emptySet(); it.invalidateNode() }
                     moved += Selection(part.sheetId, part.ids, nb)
-                    if (--left == 0) {
+                    // Another selection made meanwhile (the core was busy) stays.
+                    if (--left == 0 && selection === sel) {
                         val order = sel.parts.map { it.sheetId }
                         val parts = moved.sortedBy { order.indexOf(it.sheetId) }
                         selection = Selection(parts[0].sheetId, parts[0].ids, parts[0].bounds, parts.drop(1))
@@ -4798,6 +4868,7 @@ class NotebookView(context: Context) : View(context) {
             return
         }
         m.transform(sel.sheetId, sel.ids, dx, dy, k, sel.bounds.left, sel.bounds.top) {
+            if (selection !== sel) return@transform invalidate()
             val nb = RectF(sel.bounds.left + dx, sel.bounds.top + dy, sel.bounds.left + dx + sel.bounds.width() * k, sel.bounds.top + dy + sel.bounds.height() * k)
             selection = Selection(sel.sheetId, sel.ids, nb)
             selDx = 0f; selDy = 0f; selScale = 1f

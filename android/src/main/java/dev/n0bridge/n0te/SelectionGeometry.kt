@@ -10,6 +10,13 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
+ * [v] held between [lo] and [hi]; when there is no room between them ([hi] < [lo]: a strip of a
+ * page only a few dp high, a short split pane) it goes to [lo] instead of throwing like
+ * coerceIn, which crashed onDraw.
+ */
+fun clampTo(v: Float, lo: Float, hi: Float): Float = if (hi < lo) lo else v.coerceIn(lo, hi)
+
+/**
  * A selection as a picture for the laptop ("An den Laptop", the LaTeX and graph readers): how
  * big it gets. Three pixels per point where that fits, else as many as fit: the whole selection
  * always goes, however long or wide it is (a lasso over three pages, a wide board).

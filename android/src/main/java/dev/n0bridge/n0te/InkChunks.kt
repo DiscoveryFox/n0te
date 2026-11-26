@@ -146,6 +146,10 @@ class InkChunks(private val name: String) {
     private var frame = 0L
     private val m = Matrix()
     private val mv = FloatArray(9)
+    // Reused by every tiled frame (no allocations per frame for these).
+    private val tileArea = RectF()
+    private val tileMatrix = Matrix()
+    private val prevMatrix = Matrix()
 
     /** Chunks (pieces of ink) recorded in the last [draw] (for measuring; tiles only arrange them). */
     var recorded = 0; private set
@@ -279,9 +283,9 @@ class InkChunks(private val name: String) {
         val r = ChunkPlan.tiles(vis.left, vis.top, vis.right, vis.bottom, lv)
         var budget = ChunkPlan.BUDGET
         var missing: ArrayList<Long>? = null
-        val area = RectF()
+        val area = tileArea
         c.save()
-        val tm = Matrix().apply { setScale(k, k); postTranslate(ox, oy) }
+        val tm = tileMatrix.apply { setScale(k, k); postTranslate(ox, oy) }
         c.setMatrix(tm)
         val cols = r[2] - r[0] + 1
         // The chunks over each tile in view, in drawing order (one pass over the chunks, made
@@ -343,7 +347,7 @@ class InkChunks(private val name: String) {
             c.save()
             c.setMatrix(tm)
             val pk = s / prevLevel
-            val pm = Matrix().apply { setScale(pk, pk); postTranslate(mv[Matrix.MTRANS_X], mv[Matrix.MTRANS_Y]) }
+            val pm = prevMatrix.apply { setScale(pk, pk); postTranslate(mv[Matrix.MTRANS_X], mv[Matrix.MTRANS_Y]) }
             for (key in miss) {
                 val i = (key shr 32).toInt(); val j = key.toInt()
                 c.save()
@@ -364,8 +368,8 @@ class InkChunks(private val name: String) {
             c.restore()
         }
         // Tiles out of view go; the zoom before's once nothing stands in any more.
-        val gone = tiles.entries.filter { it.value.used < frame - 1 }
-        for (e in gone) { e.value.node.discardDisplayList(); tiles.remove(e.key) }
+        val iter = tiles.values.iterator()
+        while (iter.hasNext()) { val t = iter.next(); if (t.used < frame - 1) { t.node.discardDisplayList(); iter.remove() } }
         if (miss == null) { old?.values?.forEach { it.node.discardDisplayList() }; prev = null }
         return miss != null
     }
