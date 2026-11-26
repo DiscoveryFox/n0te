@@ -96,6 +96,10 @@ pub enum Msg {
     Ruler(bool),
     /// Fingers moved the ruler (in that pane).
     RulerMoved(PaneKey, tools::Ruler),
+    /// Which instrument the ruler button lays down (0 ruler, 1 Geodreieck, 2 protractor, 3 compass).
+    Instrument(u8),
+    /// The instrument menu open / closed.
+    InstrumentMenu(bool),
     /// The writing magnifier on / off.
     Loupe(bool),
     /// Its frame back or on along the line.
@@ -243,7 +247,26 @@ impl Favourite {
     }
 }
 
+/// The compass on the page: its needle and radius (page points), and the arc being drawn.
+#[derive(Debug, Clone)]
+pub struct CompassState {
+    pub key: PaneKey,
+    /// The notebook and sheet it draws on, and that sheet's top-left (page points).
+    pub on: Option<(String, String, (f32, f32))>,
+    /// 0 no needle yet, 1 the radius being set, 2 ready to draw.
+    pub stage: u8,
+    pub c: tools::Compass,
+    pub moving: bool,
+    /// The arc being drawn: start angle, how far it turned, the last angle, when it began.
+    pub arc: Option<(f32, f32, f32, u32)>,
+}
+
 pub struct Tablet {
+    /// The instrument the ruler button lays down (0 ruler, 1 Geodreieck, 2 protractor, 3 compass).
+    pub instrument: u8,
+    pub instrument_menu: bool,
+    /// The compass, while it is chosen and laid down.
+    pub compass: Option<CompassState>,
     /// The pen's line (core ink DASH_*: solid, dashed, dotted, dash-dot; pencils stay solid).
     pub dash: u8,
     /// Favourite pens, picked with one tap (or keys 1–6).
@@ -319,6 +342,9 @@ impl Default for Tablet {
             write_flow: false,
             favourites: Vec::new(),
             dash: 0,
+            instrument: 0,
+            instrument_menu: false,
+            compass: None,
             flow: None,
             hover: None,
             selection: None,
@@ -407,6 +433,7 @@ impl Tablet {
                 "finger_draws" => t.finger_draws = v == "1",
                 "write_flow" => t.write_flow = v == "1",
                 "dash" => t.dash = v.parse::<u8>().unwrap_or(0).min(3),
+                "instrument" => t.instrument = v.parse::<u8>().unwrap_or(0).min(3),
                 "favourites" => t.favourites = v.split(';').filter_map(Favourite::from_key).take(MAX_FAVOURITES).collect(),
                 _ => {}
             }
@@ -427,7 +454,7 @@ impl Tablet {
         let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
         let f = &self.fountain;
         let text = format!(
-            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\nwrite_flow={}\nfavourites={}\ndash={}\n",
+            "pen={}\ntool={tool}\npalette={}\ncolor={}\nwidth={}\nwidths={widths}\neraser={}\neraser_size={:.1}\nfp_sensitivity={:.2}\nfp_speed={:.2}\nfp_nib={}\nfp_taper={}\npencil_opacity={:.2}\nfinger_draws={}\nwrite_flow={}\nfavourites={}\ndash={}\ninstrument={}\n",
             self.pen.key(),
             self.palette,
             self.color,
@@ -443,6 +470,7 @@ impl Tablet {
             u8::from(self.write_flow),
             self.favourites.iter().map(Favourite::key).collect::<Vec<_>>().join(";"),
             self.dash,
+            self.instrument,
         );
         let path = Self::conf_path();
         if let Some(dir) = path.parent() {
@@ -497,7 +525,7 @@ impl App {
     /// tapping; none while a panel or dialog covers the pages.
     pub(crate) fn ink_areas(&self) -> Vec<Rectangle> {
         let Screen::Notebook(s) = &self.screen else { return Vec::new() };
-        if self.palette.is_some() || self.show_settings || self.show_help || self.history.is_some() || self.share.is_some() || self.page_panel || self.show_pdf_import || self.plot_edit.is_some() || self.tablet.pen_menu {
+        if self.palette.is_some() || self.show_settings || self.show_help || self.history.is_some() || self.share.is_some() || self.page_panel || self.show_pdf_import || self.plot_edit.is_some() || self.tablet.pen_menu || self.tablet.instrument_menu {
             return Vec::new();
         }
         let areas = s.panes.iter().filter(|o| o.text_page.as_ref().is_none_or(|t| t.docked)).map(|o| Rectangle::new(o.camera.origin, o.camera.viewport)).collect();
@@ -506,7 +534,7 @@ impl App {
 
     /// Toolbar actions.
     pub(crate) fn on_tablet(&mut self, m: Msg) -> Task<Message> {
-        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_) | Msg::WriteFlow(_) | Msg::Favourite(_) | Msg::AddFavourite | Msg::RemoveFavourite(_) | Msg::Dash(_));
+        let remember = matches!(m, Msg::Tool(_) | Msg::Pen(_) | Msg::Color(_) | Msg::Width(_) | Msg::Palette(_) | Msg::EraserMode(_) | Msg::FingerDraws(_) | Msg::WriteFlow(_) | Msg::Favourite(_) | Msg::AddFavourite | Msg::RemoveFavourite(_) | Msg::Dash(_) | Msg::Instrument(_));
         if let Msg::Tool(t) = m
             && t != Tool::Space
             && let Some(sp) = self.tablet.space.take()
@@ -620,6 +648,12 @@ impl App {
             Msg::Paste => self.paste_strokes(),
             Msg::Frame => self.tablet_frame(),
             Msg::Ruler(on) => self.set_ruler(on),
+            Msg::Instrument(k) => {
+                self.tablet.instrument = k.min(3);
+                self.tablet.instrument_menu = false;
+                self.set_ruler(true);
+            }
+            Msg::InstrumentMenu(on) => self.tablet.instrument_menu = on,
             Msg::RulerMoved(key, r) => {
                 if self.tablet.ruler.is_some_and(|(k, _)| k == key) {
                     self.tablet.ruler = Some((key, r));
@@ -725,6 +759,11 @@ impl App {
             self.space_down(key, &placed, at);
             return Task::none();
         }
+        // The compass: the pen sets the needle and the radius, then draws round the needle.
+        if tool == Tool::Pen && map.is_none() && self.tablet.compass.as_ref().is_some_and(|c| c.key == key) {
+            self.compass_down(key, &notebook, &placed, at, s.t_ms, cam.zoom);
+            return Task::none();
+        }
         let origin = (placed.rect.x0, placed.rect.y0);
         let mut local = (at.x - origin.0, at.y - origin.1);
         // On the selection: move it (from its bottom-right corner: scale it).
@@ -762,13 +801,13 @@ impl App {
                 let brush = t.brush();
                 // At the ruler's edge: the stroke follows it.
                 let edge = match t.ruler {
-                    Some((k, r)) if k == key && map.is_none() => r.edge_at(at.x, at.y, tools::RULER_EDGE_PX / cam.zoom),
+                    Some((k, r)) if k == key && map.is_none() => tools::edge_at(&r, at.x, at.y, tools::RULER_EDGE_PX / cam.zoom),
                     _ => 0,
                 };
                 if edge != 0
                     && let Some((_, r)) = t.ruler
                 {
-                    let (x, y) = r.snap(at.x, at.y, edge, brush.width);
+                    let (x, y) = tools::snap(&r, at.x, at.y, edge, brush.width);
                     local = (x - origin.0, y - origin.1);
                 }
                 let fountain = (tool == Tool::Pen && t.pen == PenType::Fountain).then(|| Fountain::new(t.fountain));
@@ -814,6 +853,9 @@ impl App {
     }
 
     fn pen_move(&mut self, s: pen::Sample) {
+        if self.compass_move(s) {
+            return;
+        }
         if let Some((p0, t0, far)) = &mut self.tablet.down
             && p0.distance(Point::new(s.x, s.y)) > 4.0
         {
@@ -879,7 +921,7 @@ impl App {
             if d.edge != 0
                 && let Some((_, r)) = self.tablet.ruler
             {
-                let (x, y) = r.snap(at.x, at.y, d.edge, d.brush.width);
+                let (x, y) = tools::snap(&r, at.x, at.y, d.edge, d.brush.width);
                 at = Point::new(x, y);
             }
             let (x, y) = (at.x - d.origin.0, at.y - d.origin.1);
@@ -932,6 +974,9 @@ impl App {
 
     fn pen_up(&mut self, tap: bool) -> Task<Message> {
         if self.extras_up() {
+            return Task::none();
+        }
+        if self.compass_up() {
             return Task::none();
         }
         // The magnifier: a tap in its strip's right part moves its frame on, a tap on a page

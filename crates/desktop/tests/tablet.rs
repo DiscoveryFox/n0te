@@ -681,3 +681,53 @@ fn favourite_pens_are_kept_picked_and_let_go() {
     h.message(Message::Tablet(Msg::RemoveFavourite(0)));
     assert_eq!(h.app.tablet.favourites.len(), 1);
 }
+
+#[test]
+fn the_geodreieck_guides_the_pen_and_the_compass_draws_round_its_needle() {
+    use n0te_desktop::tablet::Msg;
+    let mut h = opened("instruments");
+    let (nb, sheet, a) = first_page(&h, 0.4, 0.5);
+    let ids = |h: &Harness| strokes(h, &nb, &sheet).into_iter().map(|st| st.id).collect::<std::collections::HashSet<_>>();
+    let new_one = |h: &Harness, old: &std::collections::HashSet<String>| strokes(h, &nb, &sheet).into_iter().find(|st| !old.contains(&st.id)).expect("a new stroke");
+    let old = ids(&h);
+    let before = old.len();
+    // The Geodreieck: a line drawn wobbly just below its long side lies straight along it.
+    h.message(Message::Tablet(Msg::Instrument(1)));
+    let (r, cam) = { let o = open(&h); (h.app.tablet.ruler.expect("laid down").1, o.camera) };
+    assert_eq!(r.kind, n0te_core::instruments::Kind::SetSquare);
+    let below = |dx: f32, wob: f32| cam.to_screen(Rectangle::new(cam.origin, cam.viewport), r.cx + dx, r.cy + 4.0 / cam.zoom + wob);
+    h.press_at(below(-60.0, 0.0));
+    for i in 1..=12 {
+        h.move_to(below(-60.0 + i as f32 * 10.0, if i % 2 == 0 { 3.0 } else { -3.0 } / cam.zoom));
+    }
+    h.release();
+    let s = strokes(&h, &nb, &sheet);
+    assert_eq!(s.len(), before + 1);
+    let line = new_one(&h, &old).points;
+    let ys: Vec<f32> = line.iter().map(|p| p.y).collect();
+    let spread = ys.iter().cloned().fold(f32::MIN, f32::max) - ys.iter().cloned().fold(f32::MAX, f32::min);
+    assert!(spread < 0.5, "straight along the edge: {spread}");
+
+    // The compass: needle, radius, then round it.
+    let old = ids(&h);
+    h.message(Message::Tablet(Msg::Instrument(3)));
+    assert!(h.app.tablet.compass.is_some() && h.app.tablet.ruler.is_none());
+    let n = Point::new(a.x, a.y + 150.0);
+    drag(&mut h, n, Point::new(n.x + 80.0, n.y), 6);
+    let c = h.app.tablet.compass.clone().unwrap();
+    assert_eq!(c.stage, 2);
+    assert!(c.c.r > 10.0);
+    // Draw a quarter round it (the pen anywhere outside the needle).
+    h.press_at(Point::new(n.x + 120.0, n.y));
+    for i in 1..=10 {
+        let t = (i as f32 * 9.0).to_radians();
+        h.move_to(Point::new(n.x + 120.0 * t.cos(), n.y + 120.0 * t.sin()));
+    }
+    h.release();
+    let s = strokes(&h, &nb, &sheet);
+    assert_eq!(s.len(), before + 2);
+    let arc = new_one(&h, &old);
+    let origin = { let o = open(&h); o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).unwrap().placed.rect };
+    let off: f32 = arc.points.iter().map(|p| ((p.x + origin.x0 - c.c.cx).hypot(p.y + origin.y0 - c.c.cy) - c.c.r).abs()).fold(0.0, f32::max);
+    assert!(off < 0.5, "on the circle: {off}");
+}

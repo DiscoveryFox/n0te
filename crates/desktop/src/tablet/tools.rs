@@ -10,88 +10,31 @@ use n0te_core::notebook::Background;
 use crate::i18n::{tr, trf};
 use crate::pages::{Camera, Pages};
 
-// --- the ruler -------------------------------------------------------------------------------
+// --- the instruments (core `instruments`) ----------------------------------------------------
 
-/// The ruler's length and width (page points).
-pub const RULER_LEN: f32 = 560.0;
-pub const RULER_W: f32 = 56.0;
+pub use n0te_core::instruments::{Compass, Instrument as Ruler, Kind as InstrumentKind, RULER_LEN, RULER_W};
+
 /// How close (screen px) the pen must go down to an edge for the stroke to follow it.
 pub const RULER_EDGE_PX: f32 = 18.0;
 
-/// A ruler lying on the pages: its middle (page points) and its angle (radians).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Ruler {
-    pub cx: f32,
-    pub cy: f32,
-    pub angle: f32,
+/// The instrument the ruler button lays down: 0 ruler, 1 Geodreieck, 2 protractor (3, the
+/// compass, is no instrument lying on the page).
+pub fn instrument_kind(n: u8) -> InstrumentKind {
+    match n {
+        1 => InstrumentKind::SetSquare,
+        2 => InstrumentKind::Protractor,
+        _ => InstrumentKind::Ruler,
+    }
 }
 
-impl Ruler {
-    /// A page point in the ruler's own coordinates: (along it, across it).
-    pub fn local(&self, x: f32, y: f32) -> (f32, f32) {
-        let (dx, dy) = (x - self.cx, y - self.cy);
-        let (c, s) = ((-self.angle).cos(), (-self.angle).sin());
-        (dx * c - dy * s, dx * s + dy * c)
-    }
+/// The edge a pen at (x, y) is at, within `tol`: its index + 1, 0 none (a stroke keeps it).
+pub fn edge_at(r: &Ruler, x: f32, y: f32, tol: f32) -> i8 {
+    r.edge_at(x, y, tol).map_or(0, |e| e as i8 + 1)
+}
 
-    /// Whether a page point lies on the ruler.
-    pub fn contains(&self, x: f32, y: f32) -> bool {
-        let (a, b) = self.local(x, y);
-        a.abs() <= RULER_LEN / 2.0 && b.abs() <= RULER_W / 2.0
-    }
-
-    /// Which edge a pen at a page point touches (within `tol` page points): -1 the top one, 1
-    /// the bottom one, 0 none.
-    pub fn edge_at(&self, x: f32, y: f32, tol: f32) -> i8 {
-        let (a, b) = self.local(x, y);
-        if a.abs() > RULER_LEN / 2.0 {
-            return 0;
-        }
-        if (b + RULER_W / 2.0).abs() < tol {
-            -1
-        } else if (b - RULER_W / 2.0).abs() < tol {
-            1
-        } else {
-            0
-        }
-    }
-
-    /// A page point moved onto edge `edge`, outside it by half the line `width` (the ink lies
-    /// along the ruler, like a pen against a real one).
-    pub fn snap(&self, x: f32, y: f32, edge: i8, width: f32) -> (f32, f32) {
-        let (a, _) = self.local(x, y);
-        let across = edge as f32 * (RULER_W / 2.0 + width / 2.0);
-        let (c, s) = (self.angle.cos(), self.angle.sin());
-        (self.cx + a * c - across * s, self.cy + a * s + across * c)
-    }
-
-    /// The ruler turned to `raw` radians, snapping to the nearest 45° within 2° (as on the
-    /// tablet).
-    pub fn turned_to(&self, raw: f32) -> Ruler {
-        let deg = raw.to_degrees();
-        let near = (deg / 45.0).round() * 45.0;
-        let angle = if (deg - near).abs() < 2.0 { near.to_radians() } else { raw };
-        Ruler { angle, ..*self }
-    }
-
-    /// The angle shown on the ruler (0–359°).
-    pub fn degrees(&self) -> f32 {
-        (self.angle.to_degrees() % 360.0 + 360.0) % 360.0
-    }
-
-    /// The ruler's four corners (page points), for drawing.
-    pub fn corners(&self) -> [Point; 4] {
-        let (c, s) = (self.angle.cos(), self.angle.sin());
-        let at = |a: f32, b: f32| Point::new(self.cx + a * c - b * s, self.cy + a * s + b * c);
-        let (l, w) = (RULER_LEN / 2.0, RULER_W / 2.0);
-        [at(-l, -w), at(l, -w), at(l, w), at(-l, w)]
-    }
-
-    /// A point `along` and `across` the ruler (page points).
-    pub fn at(&self, along: f32, across: f32) -> Point {
-        let (c, s) = (self.angle.cos(), self.angle.sin());
-        Point::new(self.cx + along * c - across * s, self.cy + along * s + across * c)
-    }
+/// (x, y) moved onto edge `edge` (from [`edge_at`]), half a line `width` outside it.
+pub fn snap(r: &Ruler, x: f32, y: f32, edge: i8, width: f32) -> (f32, f32) {
+    r.snap(x, y, (edge.max(1) - 1) as usize, width)
 }
 
 // --- the "+" beside the current page row -----------------------------------------------------------
@@ -239,26 +182,26 @@ mod tests {
 
     #[test]
     fn the_ruler_takes_the_pen_along_its_edge() {
-        let r = Ruler { cx: 100.0, cy: 100.0, angle: 0.0 };
+        let r = Ruler::new(InstrumentKind::Ruler, 100.0, 100.0);
         assert!(r.contains(100.0 + RULER_LEN / 2.0 - 1.0, 100.0 + RULER_W / 2.0 - 1.0));
         assert!(!r.contains(100.0, 100.0 + RULER_W / 2.0 + 1.0));
         // Near the bottom edge: it; near the top one: that; in the middle: none.
-        assert_eq!(r.edge_at(150.0, 100.0 + RULER_W / 2.0 + 5.0, 18.0), 1);
-        assert_eq!(r.edge_at(150.0, 100.0 - RULER_W / 2.0 - 5.0, 18.0), -1);
-        assert_eq!(r.edge_at(150.0, 100.0, 18.0), 0);
-        assert_eq!(r.edge_at(100.0 + RULER_LEN, 100.0 + RULER_W / 2.0, 18.0), 0, "past its end");
+        assert_eq!(edge_at(&r, 150.0, 100.0 + RULER_W / 2.0 + 5.0, 18.0), 2);
+        assert_eq!(edge_at(&r, 150.0, 100.0 - RULER_W / 2.0 - 5.0, 18.0), 1);
+        assert_eq!(edge_at(&r, 150.0, 100.0, 18.0), 0);
+        assert_eq!(edge_at(&r, 100.0 + RULER_LEN, 100.0 + RULER_W / 2.0, 18.0), 0, "past its end");
         // Snapped: on the line under the edge, half the line width out.
-        let (x, y) = r.snap(150.0, 140.0, 1, 2.0);
+        let (x, y) = snap(&r, 150.0, 140.0, 2, 2.0);
         assert!((x - 150.0).abs() < 1e-4 && (y - (100.0 + RULER_W / 2.0 + 1.0)).abs() < 1e-4);
         // Turned 90°: the bottom edge is now on the left.
         let t = r.turned_to(std::f32::consts::FRAC_PI_2);
-        let (x, y) = t.snap(80.0, 130.0, 1, 0.0);
+        let (x, y) = snap(&t, 80.0, 130.0, 2, 0.0);
         assert!((x - (100.0 - RULER_W / 2.0)).abs() < 1e-3 && (y - 130.0).abs() < 1e-3, "{x} {y}");
     }
 
     #[test]
     fn the_ruler_snaps_to_45_degrees() {
-        let r = Ruler::default();
+        let r = Ruler::new(InstrumentKind::Ruler, 0.0, 0.0);
         assert_eq!(r.turned_to(44.0f32.to_radians()).angle, 45.0f32.to_radians());
         assert_eq!(r.turned_to(91.5f32.to_radians()).angle, 90.0f32.to_radians());
         let free = r.turned_to(40.0f32.to_radians()).angle;

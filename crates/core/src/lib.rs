@@ -10,6 +10,7 @@ pub mod error;
 pub mod format;
 pub mod ids;
 pub mod ink;
+pub mod instruments;
 pub mod inklines;
 pub mod laser;
 pub mod layout;

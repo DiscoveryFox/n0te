@@ -191,6 +191,8 @@ class NotebookActivity : ComponentActivity() {
     private var canPaste by mutableStateOf(N0te.clip != null)
 
     private var rulerOn by mutableStateOf(false)
+    /** Which instrument the ruler button lays down (Settings.instrument). */
+    private var instrument by mutableIntStateOf(Settings.instrument)
 
     /** A picture from the gallery or files: upright, JPEG on white, onto the page in view. */
     private val pickImage = registerForActivityResult(androidx.activity.result.contract.ActivityResultContracts.GetContent()) { uri ->
@@ -441,6 +443,7 @@ class NotebookActivity : ComponentActivity() {
             p.view.freeInk = freeInk
             p.view.freeWidth = freeWidth
             p.view.penOnly = penOnly
+            p.view.instrumentKind = instrument
             p.view.rulerOn = rulerOn
         }
     }
@@ -1958,6 +1961,16 @@ class NotebookActivity : ComponentActivity() {
                 "add" -> Dropdown("add") { AddMenu() }
                 "export" -> ExportDialog()
                 "pen" -> Dropdown("pen") { PenMenu() }
+                "instrument" -> Dropdown("instrument") {
+                    Column(Modifier.width(260.dp)) {
+                        Section("Instrument")
+                        listOf(0 to "Lineal", 1 to "Geodreieck", 2 to "Winkelmesser", 3 to "Zirkel").forEach { (k, label) ->
+                            MenuRow(label, null, { instrument = k; Settings.set("instrument", k.toFloat()); rulerOn = true; applyTools(); menu = null },
+                                trailing = if (instrument == k) { { Text("✓", color = Ui.Red, fontSize = 15.sp) } } else null)
+                        }
+                        Text(if (instrument == 3) "Stift setzen: Nadel · ziehen: Radius · dann rundherum zeichnen" else "Ein Finger schiebt, zwei drehen; der Stift folgt jeder Kante", color = Ui.Muted, fontSize = 11.sp, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp))
+                    }
+                }
                 "zoom" -> Dropdown("zoom") { ZoomMenu() }
                 "page" -> Dropdown("page") { PageMenu() }
                 "select" -> Dropdown("select") { SelectMenu() }
@@ -2867,7 +2880,8 @@ class NotebookActivity : ComponentActivity() {
             Divider()
             // Pen-only (default) vs. finger drawing.
             IconBtn(Glyph.HAND, selected = !penOnly) { penOnly = !penOnly; applyTools() }
-            if (Settings.toolRuler) IconBtn(Glyph.RULER, selected = rulerOn) { rulerOn = !rulerOn; applyTools() }
+            // The instrument: tap lays it down / takes it away, hold picks which one.
+            if (Settings.toolRuler) IconBtn(Glyph.RULER, selected = rulerOn, key = "instrument", onLongClick = { menu = "instrument" }) { rulerOn = !rulerOn; applyTools() }
             if (Settings.toolLoupe && !inBoard) IconBtn(Glyph.LOUPE, selected = loupe) { toggleLoupe() }
             if (inBoard) IconBtn(Glyph.BOARD, selected = true) { view.exitBoard() }
             else if (currentIsBoard) IconBtn(Glyph.BOARD) { view.currentSheet()?.let { view.enterBoard(it) } }

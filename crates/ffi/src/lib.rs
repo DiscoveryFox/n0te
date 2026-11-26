@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 
 mod android;
 mod edit;
+mod instruments;
 mod laser;
 pub mod sync;
 

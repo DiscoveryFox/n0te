@@ -4333,6 +4333,8 @@ impl App {
         };
         let panes: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet && self.tablet.pen_menu {
             stack![split::view(self, s), container(crate::tablet::toolbar::pen_menu(&self.tablet)).padding([4, 10])].into()
+        } else if crate::mode() == crate::Mode::Tablet && self.tablet.instrument_menu {
+            stack![split::view(self, s), container(crate::tablet::toolbar::instrument_menu(&self.tablet)).align_right(Length::Fill).padding([4, 10])].into()
         } else {
             split::view(self, s)
         };

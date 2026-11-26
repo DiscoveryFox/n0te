@@ -20,7 +20,17 @@ import android.view.ViewConfiguration
 import android.widget.OverScroller
 import uniffi.n0te_ffi.FfiBackground
 import uniffi.n0te_ffi.FfiBrush
+import uniffi.n0te_ffi.FfiInstrumentShape
 import uniffi.n0te_ffi.FfiLaserLook
+import uniffi.n0te_ffi.compassArc
+import uniffi.n0te_ffi.compassLabel
+import uniffi.n0te_ffi.compassSnapRadius
+import uniffi.n0te_ffi.instrumentContains
+import uniffi.n0te_ffi.instrumentEdgeAt
+import uniffi.n0te_ffi.instrumentShape
+import uniffi.n0te_ffi.instrumentSnap
+import uniffi.n0te_ffi.instrumentTurned
+import uniffi.n0te_ffi.snapPin
 import uniffi.n0te_ffi.FfiScribbleTarget
 import uniffi.n0te_ffi.LaserReplay
 import uniffi.n0te_ffi.laserColour
@@ -231,9 +241,17 @@ class NotebookView(context: Context) : View(context) {
     var board: Placed? = null; private set
     private var columnTransform = floatArrayOf(1f, 0f, 0f)
 
-    /** Ruler: centre (world), angle (radians). Pen strokes starting at an edge follow it. */
+    /**
+     * The instrument on the page (ruler, Geodreieck, protractor — core instruments — or the
+     * compass): its point (world) and angle (radians). Pen strokes starting at an edge follow it.
+     */
     var rulerOn = false
-        set(v) { field = v; if (v) placeRuler(); invalidate() }
+        set(v) { val was = field; field = v; if (v && !was) placeRuler(); if (!v) compassReset(); invalidate() }
+    /** 0 ruler, 1 Geodreieck, 2 protractor, 3 compass. */
+    var instrumentKind = 0
+        set(v) { if (field != v) { field = v; instrumentShapeCache = null; compassReset(); if (rulerOn) placeRuler(); invalidate() } }
+    private val isCompass get() = instrumentKind == 3
+    private var instrumentShapeCache: FfiInstrumentShape? = null
     private var rulerCx = 0f
     private var rulerCy = 0f
     private var rulerAngle = 0f
@@ -279,7 +297,7 @@ class NotebookView(context: Context) : View(context) {
     private var lastFlingY = 0
 
     /** What the active pointer (pen, or the drawing finger) is doing. */
-    private enum class Action { NONE, PRE_INK, INK, ERASE, LASSO, MOVE_SEL, SCALE_SEL, END_SEL, GRIP_SEL, TAP, HANDLE, LASER, TEXT, SPACE, PLOT_BOX }
+    private enum class Action { NONE, PRE_INK, INK, ERASE, LASSO, MOVE_SEL, SCALE_SEL, END_SEL, GRIP_SEL, TAP, HANDLE, LASER, TEXT, SPACE, PLOT_BOX, COMPASS }
 
     /** The text box being edited (sheet id, box id): the inline editor shows it, the page doesn't. */
     var editingText: Pair<String, String>? = null
@@ -730,6 +748,112 @@ class NotebookView(context: Context) : View(context) {
         rulerAngle = 0f
     }
 
+    // --- the compass ---------------------------------------------------------------------
+    // Pen down sets the needle (snapping to stroke ends and crossings), dragging sets the radius
+    // (half centimetres, or whole squares on squared paper); then the pen draws round the needle.
+    // Starting on the needle moves it.
+
+    private var compassStage = 0 // 0 no needle, 1 setting the radius, 2 ready to draw
+    private var compassX = 0f
+    private var compassY = 0f
+    private var compassR = 0f
+    private var compassPage: Placed? = null
+    private var compassMovingNeedle = false
+    private var compassA0 = 0f
+    private var compassSweep = 0f
+    private var compassLast = 0f
+    private var compassStart = 0L
+    private var compassPreview: Path? = null
+
+    private fun compassReset() { compassStage = 0; compassPreview = null; compassMovingNeedle = false }
+
+    /** Where a pin snaps near (wx, wy): ends and crossings of the page's strokes (world). */
+    private fun pinAt(p: Placed, wx: Float, wy: Float): FloatArray {
+        val st = model?.sheets?.get(p.sheetId) ?: return floatArrayOf(wx, wy)
+        val ends = ArrayList<Float>()
+        for (s in st.strokes) if (s.ends.size >= 9) {
+            ends += s.ends[0] + p.rect.left; ends += s.ends[1] + p.rect.top
+            ends += s.ends[4] + p.rect.left; ends += s.ends[5] + p.rect.top
+            ends += s.ends[8]
+        }
+        val hit = snapPin(ends, wx, wy, 10f * density / scale)
+        return if (hit.size == 2) floatArrayOf(hit[0], hit[1]) else floatArrayOf(wx, wy)
+    }
+
+    private fun compassDown(p: Placed, wx: Float, wy: Float, now: Long) {
+        action = Action.COMPASS
+        compassStart = now
+        when {
+            compassStage != 2 -> {
+                val pin = pinAt(p, wx, wy)
+                compassX = pin[0]; compassY = pin[1]; compassR = 0f; compassPage = p; compassStage = 1
+            }
+            hypot(wx - compassX, wy - compassY) < 16f * density / scale -> compassMovingNeedle = true
+            else -> {
+                compassA0 = kotlin.math.atan2(wy - compassY, wx - compassX); compassLast = compassA0; compassSweep = 0f
+            }
+        }
+        invalidate()
+    }
+
+    private fun compassMove(wx: Float, wy: Float) {
+        val p = compassPage ?: return
+        when {
+            compassStage == 1 -> {
+                val square = if (p.spec.background == FfiBackground.GRID) p.spec.spacing else 0f
+                compassR = compassSnapRadius(hypot(wx - compassX, wy - compassY), square)
+            }
+            compassMovingNeedle -> { val pin = pinAt(p, wx, wy); compassX = pin[0]; compassY = pin[1] }
+            else -> {
+                val a = kotlin.math.atan2(wy - compassY, wx - compassX)
+                var d = a - compassLast
+                while (d > Math.PI) d -= (2 * Math.PI).toFloat()
+                while (d < -Math.PI) d += (2 * Math.PI).toFloat()
+                compassSweep = (compassSweep + d).coerceIn(-(2 * Math.PI).toFloat(), (2 * Math.PI).toFloat())
+                compassLast = a
+                val samples = compassArc(compassX, compassY, compassR, compassA0, compassSweep, 0.5f, 0u, 1u)
+                compassPreview = InkStroke.pathOf(floatsOf(strokeOutline(brush, samples)))
+            }
+        }
+        invalidate()
+    }
+
+    private fun compassUp(m: NotebookModel, now: Long) {
+        val p = compassPage
+        when {
+            compassStage == 1 -> compassStage = if (compassR > 2f) 2 else 0
+            compassMovingNeedle -> compassMovingNeedle = false
+            p != null && abs(compassSweep) > 0.05f -> {
+                // Nearly round: the whole circle.
+                val sweep = if (abs(compassSweep) > 2 * Math.PI - 0.15) (if (compassSweep > 0) 1 else -1) * (2 * Math.PI).toFloat() else compassSweep
+                val world = floatsOf(compassArc(compassX, compassY, compassR, compassA0, sweep, 0.5f, 0u, (now - compassStart).toUInt()))
+                for (i in 0 until world.size / 4) { world[i * 4] -= p.rect.left; world[i * 4 + 1] -= p.rect.top }
+                val bytes = bytesOf(world)
+                val b = brush
+                m.addStroke(p.sheetId, b, bytes, floatsOf(strokeOutline(b, bytes)))
+            }
+        }
+        compassPreview = null
+        action = Action.NONE
+        invalidate()
+    }
+
+    private fun drawCompass(c: Canvas) {
+        if (compassStage == 0) return
+        rulerEdge.strokeWidth = 1.5f / scale
+        c.drawCircle(compassX, compassY, 3f / scale, rulerEdge)
+        c.drawLine(compassX - 6f / scale, compassY, compassX + 6f / scale, compassY, rulerEdge)
+        c.drawLine(compassX, compassY - 6f / scale, compassX, compassY + 6f / scale, rulerEdge)
+        if (compassR > 0f) {
+            rulerEdge.alpha = 90; c.drawCircle(compassX, compassY, compassR, rulerEdge); rulerEdge.alpha = 0xCC
+            labelPaint.textSize = 11f / scale
+            labelPaint.color = 0xFF1E1E22.toInt()
+            c.drawText(compassLabel(compassR), compassX + 8f / scale, compassY - 8f / scale, labelPaint)
+            labelPaint.color = 0xFF787880.toInt()
+        }
+        compassPreview?.let { remoteInkPaint.color = brush.color.toInt(); c.drawPath(it, remoteInkPaint) }
+    }
+
     /** World point in ruler coordinates (along, across). */
     private fun rulerLocal(wx: Float, wy: Float): FloatArray {
         val dx = wx - rulerCx; val dy = wy - rulerCy
@@ -737,32 +861,18 @@ class NotebookView(context: Context) : View(context) {
         return floatArrayOf(dx * c - dy * sn, dx * sn + dy * c)
     }
 
-    private fun rulerContains(wx: Float, wy: Float): Boolean {
-        if (!rulerOn) return false
-        val l = rulerLocal(wx, wy)
-        return abs(l[0]) <= RULER_LEN / 2 && abs(l[1]) <= RULER_W / 2
-    }
+    private fun rulerContains(wx: Float, wy: Float): Boolean =
+        rulerOn && !isCompass && instrumentContains(instrumentKind.toUByte(), rulerCx, rulerCy, rulerAngle, wx, wy)
 
-    /** Which ruler edge a pen at (wx, wy) is touching: -1 top, 1 bottom, 0 none. */
+    /** Which instrument edge a pen at (wx, wy) is touching: its index + 1, 0 none. */
     private fun rulerEdgeAt(wx: Float, wy: Float): Int {
-        if (!rulerOn) return 0
-        val l = rulerLocal(wx, wy)
-        if (abs(l[0]) > RULER_LEN / 2) return 0
-        val tol = 18f * density / scale
-        return when {
-            abs(l[1] + RULER_W / 2) < tol -> -1
-            abs(l[1] - RULER_W / 2) < tol -> 1
-            else -> 0
-        }
+        if (!rulerOn || isCompass) return 0
+        return instrumentEdgeAt(instrumentKind.toUByte(), rulerCx, rulerCy, rulerAngle, wx, wy, 18f * density / scale) + 1
     }
 
-    /** Projects a world point onto the chosen ruler edge (ink lies along the outside of it). */
-    private fun snapToRuler(wx: Float, wy: Float, edge: Int): FloatArray {
-        val l = rulerLocal(wx, wy)
-        val across = edge * (RULER_W / 2 + brush.width / 2)
-        val c = kotlin.math.cos(rulerAngle); val sn = kotlin.math.sin(rulerAngle)
-        return floatArrayOf(rulerCx + l[0] * c - across * sn, rulerCy + l[0] * sn + across * c)
-    }
+    /** Projects a world point onto the chosen edge (ink lies along the outside of it). */
+    private fun snapToRuler(wx: Float, wy: Float, edge: Int): FloatArray =
+        instrumentSnap(instrumentKind.toUByte(), rulerCx, rulerCy, rulerAngle, wx, wy, (edge - 1).coerceAtLeast(0).toUInt(), brush.width).toFloatArray()
 
     /**
      * Where the view is, relative to the page in focus: "sheet|scale|x|y|width" (x, y: the
@@ -2192,28 +2302,41 @@ class NotebookView(context: Context) : View(context) {
 
     private fun drawRuler(c: Canvas) {
         if (!rulerOn) return
+        if (isCompass) { drawCompass(c); return }
+        val shape = instrumentShapeCache ?: instrumentShape(instrumentKind.toUByte()).also { instrumentShapeCache = it }
         c.save()
         c.translate(rulerCx, rulerCy)
         c.rotate(Math.toDegrees(rulerAngle.toDouble()).toFloat())
-        c.drawRect(-RULER_LEN / 2, -RULER_W / 2, RULER_LEN / 2, RULER_W / 2, rulerPaint)
+        val o = shape.outline
+        val path = Path()
+        for (i in 0 until o.size / 2) if (i == 0) path.moveTo(o[0], o[1]) else path.lineTo(o[2 * i], o[2 * i + 1])
+        path.close()
+        c.drawPath(path, rulerPaint)
         rulerEdge.strokeWidth = 1.5f / scale
-        c.drawRect(-RULER_LEN / 2, -RULER_W / 2, RULER_LEN / 2, RULER_W / 2, rulerEdge)
-        // Ticks every 1 mm (2.835 pt), longer at 5 mm and 1 cm.
-        rulerTick.strokeWidth = max(0.5f, 1f / scale)
-        val mm = 72f / 25.4f
+        c.drawPath(path, rulerEdge)
+        // The scale: millimetres and degrees (small marks only when there is room for them).
+        val mk = shape.marks
+        val small = (72f / 25.4f) * scale >= 3f
         var i = 0
-        var x = -RULER_LEN / 2
-        while (x <= RULER_LEN / 2) {
-            val len = when { i % 10 == 0 -> 14f; i % 5 == 0 -> 9f; else -> 5f }
-            if (mm * scale >= 3f || i % 10 == 0) {
-                c.drawLine(x, -RULER_W / 2, x, -RULER_W / 2 + len, rulerTick)
-                c.drawLine(x, RULER_W / 2, x, RULER_W / 2 - len, rulerTick)
+        while (i + 4 < mk.size) {
+            val level = mk[i + 4].toInt()
+            if (level > 0 || small) {
+                rulerTick.strokeWidth = max(0.5f, (if (level == 2) 1.4f else 1f) / scale)
+                c.drawLine(mk[i], mk[i + 1], mk[i + 2], mk[i + 3], rulerTick)
             }
-            x += mm; i++
+            i += 5
+        }
+        labelPaint.color = 0xE6F2F2F4.toInt()
+        for (l in shape.labels) {
+            labelPaint.textSize = l.size
+            c.save(); c.translate(l.x, l.y); c.rotate(Math.toDegrees(l.turn.toDouble()).toFloat())
+            c.drawText(l.text, -labelPaint.measureText(l.text) / 2, l.size / 3, labelPaint)
+            c.restore()
         }
         labelPaint.textSize = 9f
-        labelPaint.color = 0xE6F2F2F4.toInt()
-        c.drawText("%.0f°".format(((Math.toDegrees(rulerAngle.toDouble()) % 360 + 360) % 360)), -10f, 4f, labelPaint)
+        val deg = "%.0f°".format(((Math.toDegrees(rulerAngle.toDouble()) % 360 + 360) % 360))
+        val dy = if (instrumentKind == 0) 4f else -60f
+        c.drawText(deg, -labelPaint.measureText(deg) / 2, dy, labelPaint)
         labelPaint.color = 0xFF787880.toInt()
         c.restore()
     }
@@ -3194,6 +3317,11 @@ class NotebookView(context: Context) : View(context) {
             textDownLx = lx; textDownLy = ly; textMoved = false
             return
         }
+        // The compass: the pen sets the needle and the radius, then draws round it.
+        if (rulerOn && isCompass && tool == Tool.PEN && !erasing && (stylus || !penOnly)) {
+            compassDown(p, wx, wy, now)
+            return
+        }
         snapEdge = if (stylus || !penOnly) rulerEdgeAt(wx, wy) else 0
         if (snapEdge != 0 && !erasing && tool != Tool.LASSO) {
             val q = snapToRuler(wx, wy, snapEdge); lx = q[0] - p.rect.left; ly = q[1] - p.rect.top
@@ -3340,10 +3468,8 @@ class NotebookView(context: Context) : View(context) {
                     val ang = kotlin.math.atan2(b.y - a.y, b.x - a.x)
                     val cx = (a.x + b.x) / 2; val cy = (a.y + b.y) / 2
                     rulerAngle += ang - lastRulerAngle
-                    // Snap to 0/45/90… within 2°.
-                    val deg = Math.toDegrees(rulerAngle.toDouble())
-                    val near = Math.round(deg / 45.0) * 45.0
-                    val shown = if (abs(deg - near) < 2.0) Math.toRadians(near).toFloat() else rulerAngle
+                    // Snap within 2° (ruler 45°, the others 15°).
+                    val shown = instrumentTurned(instrumentKind.toUByte(), rulerAngle)
                     rulerCx += (cx - lastRulerX) / scale; rulerCy += (cy - lastRulerY) / scale
                     lastRulerAngle = ang; lastRulerX = cx; lastRulerY = cy
                     if (shown != rulerAngle) { rulerAngle = shown; lastRulerAngle = ang }
@@ -3404,6 +3530,7 @@ class NotebookView(context: Context) : View(context) {
                 st.texts = st.texts.map { if (it.id == hit.id) it.copy(x = hit.x + lx - textDownLx, y = hit.y + ly - textDownLy) else it }
                 if (!batch) invalidate()
             }
+            Action.COMPASS -> compassMove(wx, wy)
             Action.LASER -> {
                 val t = since(SystemClock.uptimeMillis())
                 laser += floatArrayOf(wx, wy, t, laserSeg.toFloat())
@@ -3755,6 +3882,7 @@ class NotebookView(context: Context) : View(context) {
                 if (Settings.handleHoldMs <= 0 && h != null && commit && handleDrag > -40f * density) listener?.onAddPage(h.dir, h.mainNode)
             }
             Action.LASER -> { laserUpAt = SystemClock.uptimeMillis(); laserEnded[laserSeg] = laserUpAt; laserLift(); postInvalidateOnAnimation() }
+            Action.COMPASS -> model?.let { compassUp(it, SystemClock.uptimeMillis()) }
             Action.TEXT -> if (m != null && p != null) {
                 val hit = textHit
                 if (textMoved && hit != null) {

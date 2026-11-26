@@ -169,16 +169,115 @@ impl App {
 
     // --- the ruler -------------------------------------------------------------------------
 
-    /// The ruler on (in the middle of the active pane's view, level) or off.
+    /// The instrument on (the ruler, Geodreieck or protractor in the middle of the active pane's
+    /// view, level; or the compass, waiting for its needle) or off.
     pub(crate) fn set_ruler(&mut self, on: bool) {
+        let keep = self.tablet.ruler.map(|(k, r)| (k, r.cx, r.cy, r.angle));
         self.tablet.ruler = None;
+        self.tablet.compass = None;
         if !on {
             return;
         }
         let Some(key) = self.active_key() else { return };
+        if self.tablet.instrument == 3 {
+            self.tablet.compass = Some(super::CompassState { key, on: None, stage: 0, c: tools::Compass { cx: 0.0, cy: 0.0, r: 0.0 }, moving: false, arc: None });
+            return;
+        }
         let Some(o) = self.pane_ref(key) else { return };
         let v = o.camera.view_rect();
-        self.tablet.ruler = Some((key, tools::Ruler { cx: (v.x0 + v.x1) / 2.0, cy: (v.y0 + v.y1) / 2.0, angle: 0.0 }));
+        // Another instrument where the last one lay (and as it was turned).
+        let (cx, cy, angle) = keep.filter(|k| k.0 == key).map_or(((v.x0 + v.x1) / 2.0, (v.y0 + v.y1) / 2.0, 0.0), |k| (k.1, k.2, k.3));
+        self.tablet.ruler = Some((key, tools::Ruler { angle, ..tools::Ruler::new(tools::instrument_kind(self.tablet.instrument), cx, cy) }));
+    }
+
+    // --- the compass ---------------------------------------------------------------------------
+
+    /// Where a pin snaps near `at` on `sheet`: its strokes' ends and crossings (page points).
+    fn pin_at(&mut self, nb: &str, sheet: &str, origin: (f32, f32), at: Point, zoom: f32) -> (f32, f32) {
+        let Some(s) = self.tablet_sheet(nb, sheet) else { return (at.x, at.y) };
+        let strokes: Vec<Vec<InkPoint>> = s.strokes().into_iter().map(|st| st.points.iter().map(|p| InkPoint { x: p.x + origin.0, y: p.y + origin.1, ..*p }).collect()).collect();
+        let refs: Vec<&[InkPoint]> = strokes.iter().map(Vec::as_slice).collect();
+        n0te_core::instruments::snap_point(&refs, at.x, at.y, 10.0 / zoom).unwrap_or((at.x, at.y))
+    }
+
+    /// The pen down with the compass: the needle (first), on the needle: move it, else an arc.
+    pub(super) fn compass_down(&mut self, key: PaneKey, nb: &str, placed: &n0te_core::layout::Placed, at: Point, t: u32, zoom: f32) {
+        let origin = (placed.rect.x0, placed.rect.y0);
+        let Some(c) = self.tablet.compass.clone() else { return };
+        if c.stage != 2 {
+            let (x, y) = self.pin_at(nb, &placed.sheet_id, origin, at, zoom);
+            self.tablet.compass = Some(super::CompassState { key, on: Some((nb.to_string(), placed.sheet_id.clone(), origin)), stage: 1, c: tools::Compass { cx: x, cy: y, r: 0.0 }, moving: false, arc: None });
+        } else if (at.x - c.c.cx).hypot(at.y - c.c.cy) < 14.0 / zoom {
+            if let Some(cs) = &mut self.tablet.compass {
+                cs.moving = true;
+            }
+        } else if let Some(cs) = &mut self.tablet.compass {
+            let a = cs.c.angle_of(at.x, at.y);
+            cs.arc = Some((a, 0.0, a, t));
+        }
+    }
+
+    /// The pen moving with the compass: the radius, the needle or the arc follow. Whether the
+    /// compass took the sample.
+    pub(super) fn compass_move(&mut self, s: super::pen::Sample) -> bool {
+        let Some(cs) = self.tablet.compass.clone() else { return false };
+        if cs.stage == 0 || (cs.stage == 2 && !cs.moving && cs.arc.is_none()) {
+            return false;
+        }
+        let Some(cam) = super::pane_camera(&self.screen, cs.key) else { return false };
+        let at = cam.to_page(Rectangle::new(cam.origin, cam.viewport), Point::new(s.x, s.y));
+        if cs.stage == 1 {
+            // On squared paper whole squares, else half centimetres.
+            let square = cs.on.as_ref().and_then(|(_, sheet, _)| self.pane_ref(cs.key).and_then(|o| o.pages.pages.iter().find(|p| p.placed.sheet_id == *sheet).map(|p| p.placed.spec.clone()))).filter(|sp| sp.background == Background::Grid).map(|sp| sp.spacing);
+            let r = n0te_core::instruments::snap_radius((at.x - cs.c.cx).hypot(at.y - cs.c.cy), square);
+            if let Some(c) = &mut self.tablet.compass {
+                c.c.r = r;
+            }
+        } else if cs.moving {
+            let (nb, sheet, origin) = cs.on.clone().unwrap_or_default();
+            let (x, y) = self.pin_at(&nb, &sheet, origin, at, cam.zoom);
+            if let Some(c) = &mut self.tablet.compass {
+                (c.c.cx, c.c.cy) = (x, y);
+            }
+        } else if let (Some(c), Some((a0, sweep, last, t0))) = (&mut self.tablet.compass, cs.arc) {
+            let a = c.c.angle_of(at.x, at.y);
+            let sweep = (sweep + n0te_core::instruments::turned(last, a)).clamp(-std::f32::consts::TAU, std::f32::consts::TAU);
+            c.arc = Some((a0, sweep, a, t0));
+        }
+        true
+    }
+
+    /// The pen up with the compass: the radius is set, the needle put down, or the arc becomes a
+    /// stroke (nearly round: the whole circle). Whether the compass took it.
+    pub(super) fn compass_up(&mut self) -> bool {
+        let Some(cs) = self.tablet.compass.clone() else { return false };
+        match cs.stage {
+            0 => return false,
+            1 => {
+                if let Some(c) = &mut self.tablet.compass {
+                    c.stage = if c.c.r > 2.0 { 2 } else { 0 };
+                }
+            }
+            _ if cs.moving => {
+                if let Some(c) = &mut self.tablet.compass {
+                    c.moving = false;
+                }
+            }
+            _ => {
+                let Some((a0, sweep, _, _)) = cs.arc else { return false };
+                if let Some(c) = &mut self.tablet.compass {
+                    c.arc = None;
+                }
+                let Some((nb, sheet, origin)) = cs.on.clone() else { return true };
+                if sweep.abs() > 0.05 {
+                    let sweep = if sweep.abs() > std::f32::consts::TAU - 0.15 { std::f32::consts::TAU.copysign(sweep) } else { sweep };
+                    let pts: Vec<InkPoint> = cs.c.arc(a0, sweep, 0.5, 0, 600).into_iter().map(|p| InkPoint { x: p.x - origin.0, y: p.y - origin.1, ..p }).collect();
+                    let brush = self.tablet.brush();
+                    self.edit_tracked(&nb, &sheet, |s| s.add_stroke(brush, &pts).map(|_| ()));
+                }
+            }
+        }
+        true
     }
 
     // --- boards on their own ----------------------------------------------------------------

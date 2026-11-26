@@ -8,7 +8,7 @@ use iced::widget::{button, container, pin, row};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme, mouse};
 use n0te_core::ink::Rect;
 
-use super::tools::{self, HandleDir, LOUPE_ADVANCE, RULER_LEN, RULER_W};
+use super::tools::{self, HandleDir, LOUPE_ADVANCE};
 use super::{Msg, Tablet};
 use crate::app::{App, Message, Open};
 use crate::i18n::tr;
@@ -39,6 +39,8 @@ struct Overlay {
     /// The pen hovering: where (page coordinates) and the ring's radius in px.
     hover: Option<(Point, f32)>,
     ruler: Option<tools::Ruler>,
+    compass: Option<super::CompassState>,
+    ink: Color,
     /// The "+" (page points), the one held, and the page it adds (with how sure: 0.25–1).
     handles: Vec<(HandleDir, Point)>,
     held: Option<HandleDir>,
@@ -65,6 +67,9 @@ impl canvas::Program<Message> for Overlay {
         let accent = theme::p().accent;
         if let Some(r) = self.ruler {
             draw_ruler(&mut frame, &r, &at, cam.zoom);
+        }
+        if let Some(c) = &self.compass {
+            draw_compass(&mut frame, c, &at, self.ink);
         }
         if let Some(l) = &self.loupe {
             let (a, b) = (at(l.rect.x0, l.rect.y0), at(l.rect.x1, l.rect.y1));
@@ -143,42 +148,49 @@ impl canvas::Program<Message> for Overlay {
     }
 }
 
-/// The ruler: dark and see-through, millimetre ticks on both edges (longer at 5 mm and 1 cm),
-/// its angle in the middle (as on the tablet).
+/// An instrument (ruler, Geodreieck, protractor; core `instruments`): dark and see-through,
+/// its scale (millimetres, degrees; the small marks only when there is room), its angle.
 fn draw_ruler(frame: &mut canvas::Frame, r: &tools::Ruler, at: &dyn Fn(f32, f32) -> Point, zoom: f32) {
-    let corners = r.corners();
+    let on_page = |lx: f32, ly: f32| {
+        let (x, y) = r.page(lx, ly);
+        at(x, y)
+    };
+    let outline = r.outline();
     let body = Path::new(|b| {
-        let c: Vec<Point> = corners.iter().map(|p| at(p.x, p.y)).collect();
-        b.move_to(c[0]);
-        for p in &c[1..] {
-            b.line_to(*p);
+        b.move_to(on_page(outline[0].0, outline[0].1));
+        for p in &outline[1..] {
+            b.line_to(on_page(p.0, p.1));
         }
         b.close();
     });
     frame.fill(&body, Color::from_rgba8(0x1E, 0x1E, 0x22, 0.36));
     frame.stroke(&body, Stroke::default().with_color(Color::from_rgba8(0x1E, 0x1E, 0x22, 0.8)).with_width(1.5));
-    let mm = tools::MM;
     let tick = Color::from_rgba8(0xF2, 0xF2, 0xF4, 0.9);
+    let (marks, labels) = r.scale();
+    let small = tools::MM * zoom >= 3.0;
     let ticks = Path::new(|b| {
-        let n = (RULER_LEN / mm) as i32;
-        for i in 0..=n {
-            if mm * zoom < 3.0 && i % 10 != 0 {
-                continue;
-            }
-            let len = if i % 10 == 0 { 14.0 } else if i % 5 == 0 { 9.0 } else { 5.0 };
-            let a = -RULER_LEN / 2.0 + i as f32 * mm;
-            for (edge, inward) in [(-RULER_W / 2.0, len), (RULER_W / 2.0, -len)] {
-                let (p, q) = (r.at(a, edge), r.at(a, edge + inward));
-                b.move_to(at(p.x, p.y));
-                b.line_to(at(q.x, q.y));
-            }
+        for m in marks.iter().filter(|m| m.level > 0 || small) {
+            b.move_to(on_page(m.a.0, m.a.1));
+            b.line_to(on_page(m.b.0, m.b.1));
         }
     });
     frame.stroke(&ticks, Stroke::default().with_color(tick).with_width(1.0));
-    let c = at(r.cx, r.cy);
+    for l in &labels {
+        frame.fill_text(canvas::Text {
+            content: l.text.clone(),
+            position: on_page(l.x, l.y),
+            color: tick,
+            size: (l.size * zoom).clamp(7.0, 14.0).into(),
+            font: theme::MONO,
+            align_x: iced::advanced::text::Alignment::Center,
+            align_y: iced::alignment::Vertical::Center,
+            ..canvas::Text::default()
+        });
+    }
+    let mid = if r.kind == tools::InstrumentKind::Ruler { on_page(0.0, 0.0) } else { on_page(0.0, -60.0) };
     frame.fill_text(canvas::Text {
         content: format!("{:.0}°", r.degrees()),
-        position: c,
+        position: mid,
         color: tick,
         size: (9.0 * zoom).clamp(9.0, 14.0).into(),
         font: theme::MONO,
@@ -186,6 +198,35 @@ fn draw_ruler(frame: &mut canvas::Frame, r: &tools::Ruler, at: &dyn Fn(f32, f32)
         align_y: iced::alignment::Vertical::Center,
         ..canvas::Text::default()
     });
+}
+
+/// The compass: its needle, its circle faint with the radius in cm, the arc being drawn.
+fn draw_compass(frame: &mut canvas::Frame, c: &super::CompassState, at: &dyn Fn(f32, f32) -> Point, ink: Color) {
+    if c.stage == 0 {
+        return;
+    }
+    let dark = Color::from_rgba8(0x1E, 0x1E, 0x22, 0.8);
+    let n = at(c.c.cx, c.c.cy);
+    frame.stroke(&Path::new(|b| {
+        b.move_to(Point::new(n.x - 6.0, n.y));
+        b.line_to(Point::new(n.x + 6.0, n.y));
+        b.move_to(Point::new(n.x, n.y - 6.0));
+        b.line_to(Point::new(n.x, n.y + 6.0));
+    }), Stroke::default().with_color(dark).with_width(1.5));
+    if c.c.r > 0.0 {
+        let e = at(c.c.cx + c.c.r, c.c.cy);
+        frame.stroke(&Path::circle(n, e.x - n.x), Stroke::default().with_color(Color { a: 0.35, ..dark }).with_width(1.0));
+        frame.fill_text(canvas::Text { content: c.c.label(crate::i18n::lang() == crate::i18n::Lang::En), position: Point::new(n.x + 8.0, n.y - 14.0), color: dark, size: 12.0.into(), font: theme::MONO, ..canvas::Text::default() });
+    }
+    if let Some((a0, sweep, _, _)) = c.arc {
+        let pts = c.c.arc(a0, sweep, 0.5, 0, 1);
+        frame.stroke(&Path::new(|b| {
+            b.move_to(at(pts[0].x, pts[0].y));
+            for p in &pts[1..] {
+                b.line_to(at(p.x, p.y));
+            }
+        }), Stroke::default().with_color(ink).with_width(2.0));
+    }
 }
 
 /// Space going into a page: the line (a small cross while it isn't clear which way), the new
@@ -266,6 +307,7 @@ fn view<'a>(app: &'a App, t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Mess
         (p, r)
     });
     let ruler = t.ruler.filter(|(k, _)| *k == o.key).map(|(_, r)| r);
+    let compass = t.compass.clone().filter(|c| c.key == o.key && c.stage > 0);
     let held = t.handle.as_ref().filter(|h| h.pane == o.key);
     let handles: Vec<(HandleDir, Point)> = app.handles_in(o.key).into_iter().map(|h| (h.dir, h.at)).collect();
     let ghost = held.map(|h| (h.handle.ghost, (h.drag / 60.0).clamp(0.25, 1.0)));
@@ -293,11 +335,11 @@ fn view<'a>(app: &'a App, t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Mess
         let line = t.flow.as_ref().filter(|f| f.sheet == p.sheet_id).map(|f| (f.top + f.bottom) / 2.0);
         Some((Rectangle::new(Point::new(band.x - o.camera.origin.x, band.y - o.camera.origin.y), band.size()), glyph, line))
     });
-    if lasso.is_none() && frame.is_none() && hover.is_none() && ruler.is_none() && handles.is_empty() && ghost.is_none() && space.is_none() && loupe.is_none() && flow.is_none() {
+    if lasso.is_none() && frame.is_none() && hover.is_none() && ruler.is_none() && compass.is_none() && handles.is_empty() && ghost.is_none() && space.is_none() && loupe.is_none() && flow.is_none() {
         return None;
     }
     let held = held.map(|h| h.handle.dir);
-    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, hover, ruler, handles, held, ghost, space, loupe, flow }).width(Length::Fill).height(Length::Fill).into())
+    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, hover, ruler, compass, ink: crate::pages::argb(t.ink() | 0xFF00_0000), handles, held, ghost, space, loupe, flow }).width(Length::Fill).height(Length::Fill).into())
 }
 
 /// The writing magnifier's strip over its pane: the frame's part of the page, large (its own

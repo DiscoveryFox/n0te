@@ -198,7 +198,14 @@ pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
         actions = actions.push(button(theme::btn_small(tr("Einfügen"))).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost)).push(Space::new().width(8));
     }
     // The ruler, the writing magnifier and a board on its own (like the tablet's right group).
-    let mut extras = row![tool_button(tr("Lineal"), t.ruler.is_some(), Msg::Ruler(t.ruler.is_none()))].spacing(4).align_y(Alignment::Center);
+    // The instrument: a click lays it down / takes it away, "▾" picks which one.
+    let laid = t.ruler.is_some() || t.compass.is_some();
+    let mut extras = row![
+        tool_button(instrument_label(t.instrument), laid, Msg::Ruler(!laid)),
+        button(text("▾").size(theme::label_size())).padding([2, 6]).on_press(msg(Msg::InstrumentMenu(!t.instrument_menu))).style(theme::ghost)
+    ]
+    .spacing(0)
+    .align_y(Alignment::Center);
     let extras_w = label_w(tr("Lineal"), big, 24.0) + label_w(tr("Lupe"), big, 24.0) + label_w(tr("Board"), big, 24.0);
     if extra.board != Some(true) {
         extras = extras.push(tool_button(tr("Lupe"), t.loupe.is_some(), Msg::Loupe(t.loupe.is_none())));
@@ -246,6 +253,27 @@ pub fn selection_bar_size(t: &Tablet) -> Option<iced::Size> {
 }
 
 /// The pen-type menu (under the bar, left).
+/// The instrument's name in the bar.
+fn instrument_label(k: u8) -> &'static str {
+    match k {
+        1 => tr("Geodreieck"),
+        2 => tr("Winkelmesser"),
+        3 => tr("Zirkel"),
+        _ => tr("Lineal"),
+    }
+}
+
+/// Which instrument the ruler button lays down.
+pub fn instrument_menu(t: &Tablet) -> Element<'_, Message> {
+    let mut col = column![].spacing(2);
+    for k in 0..4u8 {
+        col = col.push(button(text(instrument_label(k)).size(15).color(theme::p().text)).padding([8, 12]).width(Length::Fixed(220.0)).on_press(msg(Msg::Instrument(k))).style(theme::row(k == t.instrument)));
+    }
+    let hint = if t.instrument == 3 { tr("Stift setzen: Nadel · ziehen: Radius · dann rundherum zeichnen") } else { tr("Ein Finger schiebt, zwei drehen; der Stift folgt jeder Kante") };
+    col = col.push(text(hint).size(11.5).color(theme::p().muted).width(Length::Fixed(220.0)));
+    container(col).padding(8).style(theme::menu).into()
+}
+
 pub fn pen_menu(t: &Tablet) -> Element<'_, Message> {
     let mut col = column![].spacing(2);
     for p in PenType::ALL {
