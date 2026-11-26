@@ -29,7 +29,9 @@ fn taking_back_a_delete_takes_back_only_the_delete() {
 #[test]
 fn a_tree_nested_absurdly_deep_does_not_overflow_the_stack() {
     // Groups nested hundreds deep (a hostile or broken peer): the outline stops at a sane
-    // depth instead of recursing until the stack runs out (on a small thread, like the app's).
+    // depth instead of recursing until the stack runs out. On a 512 KB thread, half of an
+    // Android worker's: enough for the capped walk even in an unoptimised build (CI), where
+    // 64 KB was not.
     let nb = Notebook::create(1, "tief").unwrap();
     let mut parent: Option<String> = None;
     for _ in 0..800 {
@@ -38,7 +40,7 @@ fn a_tree_nested_absurdly_deep_does_not_overflow_the_stack() {
     nb.add_sheet(parent.as_deref(), 0, &SheetSpec::a4(Background::Blank)).unwrap();
     let bytes = nb.snapshot().unwrap();
     std::thread::Builder::new()
-        .stack_size(64 << 10)
+        .stack_size(512 << 10)
         .spawn(move || {
             let nb = Notebook::load(2, &bytes).unwrap();
             let rows = nb.outline(true);

@@ -171,8 +171,12 @@ fn deep_nesting_is_refused_not_a_stack_overflow() {
         format!("f{}(x)", "'".repeat(300)),
         format!("x{}", "²".repeat(20_000)),
     ];
+    // 512 KB, half of an Android worker thread's stack, in optimised builds (what ships). An
+    // unoptimised build (CI's `cargo test`) has frames several times larger, so it gets more:
+    // the nesting limits are what's under test, not the debug build's frame sizes.
+    let stack = if cfg!(debug_assertions) { 4 << 20 } else { 512 << 10 };
     let t = std::thread::Builder::new()
-        .stack_size(512 << 10)
+        .stack_size(stack)
         .spawn(move || {
             for input in &cases {
                 let p = base();
