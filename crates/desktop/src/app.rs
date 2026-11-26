@@ -3862,12 +3862,19 @@ impl App {
             (tr("Strg ,"), tr("Einstellungen")),
             ("F1", tr("Diese Übersicht")),
         ];
-        let mut col = column![theme::heading(tr("Tastenkürzel"), 22.0)].spacing(9);
+        // The keys wrap in their column (the long German ones ran into the text beside them), and
+        // the list scrolls in a low window.
+        let mut list = column![].spacing(9);
         for (k, what) in keys {
-            col = col.push(row![text(k).font(theme::MONO_BOLD).size(12).width(Length::Fixed(230.0)), text(what).size(14)].align_y(Alignment::Center));
+            list = list.push(row![text(k).font(theme::MONO_BOLD).size(12).width(Length::Fixed(250.0)), Space::new().width(14), text(what).size(14).width(Length::Fill)].align_y(Alignment::Center));
         }
-        col = col.push(button(theme::btn(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowHelp(false)).style(theme::ghost));
-        container(container(col).padding(20).width(Length::Fixed(640.0)).style(theme::panel)).padding(Padding { top: 70.0, ..Padding::ZERO }).center_x(Length::Fill).into()
+        let col = column![
+            theme::heading(tr("Tastenkürzel"), 22.0),
+            scrollable(list).spacing(8).style(theme::scroll_dark).height(Length::Shrink),
+            button(theme::btn(tr("Schließen"))).padding(theme::pad()).on_press(Message::ShowHelp(false)).style(theme::ghost),
+        ]
+        .spacing(12);
+        container(container(col).padding(20).width(Length::Fixed(720.0)).style(theme::panel)).padding(Padding { top: 40.0, bottom: 30.0, ..Padding::ZERO }).center_x(Length::Fill).into()
     }
 
     fn devices_view(&self) -> Element<'_, Message> {
