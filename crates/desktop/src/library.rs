@@ -102,6 +102,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else if app.show_pdf_import {
         content = content.push(pdf_panel(&app.pdfs, tr("PDF importieren: wird ein neues Notizbuch")));
     }
+    if let Some(report) = &app.crash {
+        content = content.push(crash_banner(report));
+    }
     if app.entries.is_empty() && rows.is_empty() {
         content = content.push(
             container(
@@ -145,7 +148,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         content = content.push(notebooks(app, shown, show_folder));
     }
 
-    let main = column![shelf::toolbar(app), container(App::scroll(content)).height(Length::Fill).style(theme::surface)];
+    // The design's decorations (snow, stars, …) behind the shelf, under the scrolling content.
+    let shelf: Element<'_, Message> = match crate::decor::layer(app.settings.decor, app.settings.decor_motion) {
+        Some(decor) => iced::widget::Stack::new().push(App::scroll(content)).push_under(decor).into(),
+        None => App::scroll(content).into(),
+    };
+    let main = column![shelf::toolbar(app), container(shelf).height(Length::Fill).style(theme::surface)];
     column![
         top,
         container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),
@@ -177,6 +185,28 @@ fn sync_chip(app: &App) -> Element<'_, Message> {
     )
     .padding([5, 11])
     .style(theme::chip)
+    .into()
+}
+
+/// n0te crashed last time: what went wrong, and buttons to copy or report it.
+fn crash_banner(report: &str) -> Element<'_, Message> {
+    container(
+        column![
+            text(tr("n0te ist beim letzten Mal abgestürzt")).font(theme::title_font()).size(15).color(theme::p().text),
+            text(trf("Fehler: {}", &[&crate::crash::summary(report)])).font(theme::meta_font()).size(12).color(theme::p().muted),
+            text(tr("Hilf beim Beheben: kopiere den Bericht und schick ihn mit, was du gerade getan hast. Er enthält keine Notizen.")).size(12.5).color(theme::p().muted),
+            row![
+                button(theme::btn_small(tr("Auf GitHub melden"))).padding(theme::pad()).on_press(Message::CrashReport).style(theme::accent_button),
+                button(theme::btn_small(tr("Bericht kopieren"))).padding(theme::pad()).on_press(Message::CrashCopy).style(theme::secondary),
+                button(theme::btn_small(tr("Schließen"))).padding(theme::pad()).on_press(Message::CrashDismiss).style(theme::ghost),
+            ]
+            .spacing(8),
+        ]
+        .spacing(6),
+    )
+    .padding(16)
+    .max_width(720)
+    .style(theme::panel)
     .into()
 }
 

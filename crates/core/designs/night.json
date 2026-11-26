@@ -1,0 +1,28 @@
+{
+  "n0te_style": 1,
+  "id": "night",
+  "name": "Sternennacht",
+  "name_en": "Starry night",
+  "description": "Tiefes Indigo, Violett und funkelnde Sterne",
+  "description_en": "Deep indigo, violet and twinkling stars",
+  "dark": true,
+  "colors": {
+    "background": "#0a0b1e",
+    "surface": "#121430",
+    "surface_2": "#1b1e40",
+    "border": "#2a2e57",
+    "text": "#ecebff",
+    "muted": "#9396c4",
+    "accent": "#a78bfa",
+    "on_accent": "#120f2e",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 18, "cards": 20, "panels": 24 },
+  "labels": "sans",
+  "headings": "sans",
+  "fill": "tonal",
+  "shadows": true,
+  "decorations": [
+    { "kind": "stars", "colors": ["#ffffff", "#fde68a", "#c4b5fd"], "amount": 0.6 }
+  ]
+}

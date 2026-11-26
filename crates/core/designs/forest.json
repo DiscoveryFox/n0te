@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "forest",
+  "name": "Wald",
+  "name_en": "Forest",
+  "description": "Ruhig und organisch: Serifen-Titel, viel Luft",
+  "description_en": "Calm and organic: serif titles, lots of air",
+  "dark": true,
+  "colors": {
+    "background": "#0a100c",
+    "surface": "#121a15",
+    "surface_2": "#1a241e",
+    "border": "#25312a",
+    "text": "#eaf2ec",
+    "muted": "#7f9486",
+    "accent": "#22c55e",
+    "on_accent": "#052e16",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 14, "cards": 22, "panels": 26 },
+  "labels": "sans",
+  "headings": "serif",
+  "fill": "tonal",
+  "shadows": false
+}

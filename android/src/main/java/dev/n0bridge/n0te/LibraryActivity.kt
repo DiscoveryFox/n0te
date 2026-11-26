@@ -107,6 +107,8 @@ class LibraryActivity : ComponentActivity() {
     private var joining by mutableStateOf<String?>(null)
     /** What's new in this version: shown once after an install or update. */
     private var news by mutableStateOf<Changelog.Entry?>(null)
+    /** The report of a crash since the last start (CrashLog), shown once. */
+    private var crash by mutableStateOf<String?>(null)
     private val syncListener: (uniffi.n0te_ffi.FfiSyncEvent) -> Unit = { e ->
         if (e is uniffi.n0te_ffi.FfiSyncEvent.RemoteChanged || e is uniffi.n0te_ffi.FfiSyncEvent.Paired) reloadSoon()
         // Joining an invite with approval: the owner lets us in by hand.
@@ -198,6 +200,7 @@ class LibraryActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         Themes.applyWindow(this)
         news = Changelog.unseen(this)
+        crash = CrashLog.unseen(CrashLog.dir(this))
         // Only a fresh start: rebuilt (a new design, the system ended the app), the link was
         // dealt with already and the join dialog came back.
         if (savedInstanceState == null) inviteFrom(intent)
@@ -423,6 +426,8 @@ class LibraryActivity : ComponentActivity() {
             Row(Modifier.fillMaxSize()) {
                 if (!list.isNullOrEmpty()) Sidebar(list)
                 Box(Modifier.weight(1f).fillMaxSize()) {
+                    // The design's decorations (snow, stars, …) behind the notebooks.
+                    if (Settings.decorShow) DecorLayer(Ui.theme, Modifier.matchParentSize())
                     Main(list) { creating = true }
                     picked?.let { p -> SelectBar(p, list.orEmpty(), Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)) }
                 }
@@ -448,6 +453,7 @@ class LibraryActivity : ComponentActivity() {
         newFolderIn?.let { NewFolderDialog(it) }
         tagFor?.let { TagDialog(it, list.orEmpty()) }
         news?.let { NewsDialog(it) }
+        crash?.takeIf { news == null }?.let { CrashDialog(it) { crash = null } }
         // A downloaded update: asked once when the app comes up; later the button at the top.
         (Updater.state as? Updater.State.Ready)?.takeIf { news == null && Updater.asked != it.release.version }?.let { UpdateDialog(it.release) }
         pinFor?.let { PinDialog(it) }

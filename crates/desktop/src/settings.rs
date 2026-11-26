@@ -42,6 +42,10 @@ pub struct Settings {
     pub update_repo: String,
     /// PDF export: side pages all at the end (else right after their page).
     pub export_sides_at_end: bool,
+    /// The design's decorations behind the library (snow, stars, …).
+    pub decor: bool,
+    /// Decorations move (off: they hold still).
+    pub decor_motion: bool,
 }
 
 /// How many open times the settings keep.
@@ -80,6 +84,8 @@ impl Default for Settings {
             auto_update: true,
             update_repo: crate::updater::DEFAULT_REPO.into(),
             export_sides_at_end: false,
+            decor: true,
+            decor_motion: true,
         }
     }
 }
@@ -121,6 +127,8 @@ impl Settings {
                 "auto_update" => s.auto_update = v != "0",
                 "update_repo" if v.contains('/') => s.update_repo = v.trim().trim_start_matches("https://github.com/").trim_end_matches('/').to_string(),
                 "export_sides" => s.export_sides_at_end = v == "end",
+                "decor" => s.decor = v != "0",
+                "decor_motion" => s.decor_motion = v != "0",
                 _ => {}
             }
         }
@@ -155,7 +163,7 @@ impl Settings {
         let folders: Vec<&str> = self.lib_folders.iter().map(String::as_str).collect();
         let opened: Vec<String> = self.lib_opened.iter().map(|(id, t)| format!("{id}:{t}")).collect();
         format!(
-            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\nexport_sides={}\n",
+            "theme={}\nrow_gap={}\nside_gap={}\nremote_frame={}\nformula_center={}\nguest_frames={}\nshare_view={}\nmomentum={}\nnew_w={}\nnew_h={}\nlib_view={}\nlib_folders={}\nlib_opened={}\noutline_view={}\nsplit_seen={}\nlanguage={}\nauto_update={}\nupdate_repo={}\nexport_sides={}\ndecor={}\ndecor_motion={}\n",
             self.theme,
             self.row_gap,
             self.side_gap,
@@ -175,6 +183,8 @@ impl Settings {
             u8::from(self.auto_update),
             self.update_repo,
             if self.export_sides_at_end { "end" } else { "inline" },
+            u8::from(self.decor),
+            u8::from(self.decor_motion),
         )
     }
 

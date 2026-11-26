@@ -1,0 +1,28 @@
+{
+  "n0te_style": 1,
+  "id": "autumn",
+  "name": "Herbst",
+  "name_en": "Autumn",
+  "description": "Warmes Papier, Rostrot und fallende Blätter",
+  "description_en": "Warm paper, rust red and falling leaves",
+  "dark": false,
+  "colors": {
+    "background": "#f5ebdd",
+    "surface": "#fff9f0",
+    "surface_2": "#efdfc9",
+    "border": "#e2c9a8",
+    "text": "#2f1d10",
+    "muted": "#82644a",
+    "accent": "#c2410c",
+    "on_accent": "#ffffff",
+    "paper": "#fffbf4"
+  },
+  "corners": { "buttons": 10, "cards": 14, "panels": 18 },
+  "labels": "sans",
+  "headings": "serif",
+  "fill": "tonal",
+  "shadows": true,
+  "decorations": [
+    { "kind": "leaves", "colors": ["#c2410c", "#d97706", "#a16207", "#b91c1c"], "amount": 0.4 }
+  ]
+}

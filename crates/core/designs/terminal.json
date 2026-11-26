@@ -1,0 +1,28 @@
+{
+  "n0te_style": 1,
+  "id": "terminal",
+  "name": "Terminal",
+  "name_en": "Terminal",
+  "description": "Grüner Phosphor, Monospace und Bildschirmzeilen",
+  "description_en": "Green phosphor, monospace and scanlines",
+  "dark": true,
+  "colors": {
+    "background": "#050805",
+    "surface": "#0a110a",
+    "surface_2": "#102010",
+    "border": "#1f3a1f",
+    "text": "#b6f5b0",
+    "muted": "#6fa86a",
+    "accent": "#39ff6a",
+    "on_accent": "#021a07",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 0, "cards": 0, "panels": 0 },
+  "labels": "mono_caps",
+  "headings": "mono",
+  "fill": "rule",
+  "shadows": false,
+  "decorations": [
+    { "kind": "scanlines", "colors": ["#39ff6a"], "amount": 0.35 }
+  ]
+}

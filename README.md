@@ -52,6 +52,7 @@ Legend: ● available · ◐ partly / built but not yet tried on real hardware (
 | [Graphs](#graphs) | ● | ● | ● | ● |
 | [Search](#search) | ● | ● | ● | ◐ reads handwriting with Windows' recognizer |
 | [Library](#library) | ● | ● | ● | ● |
+| [Designs](#designs) | ● | ● | ● | ● |
 | [Two notebooks side by side](#two-notebooks-side-by-side) | ● | ● | ● | ● |
 | [Sync and pairing](#sync-and-pairing) | ● | ● | ◐ | ◐ |
 | [Live sessions](#live-sessions) | ● | ● | ◐ | ◐ |
@@ -163,8 +164,28 @@ the spot up. Lasso a handwritten line and mark it as a heading: it shows up in t
 
 Folders inside folders, coloured tags, pinned notebooks, covers, search and sorting, a start page
 with what you opened last. *Example:* drag a notebook onto "Uni › WS26" in the sidebar to file it;
-select several to tag or move them at once. Six themes (Nothing, Light, OLED, Ocean, Forest, Sepia)
-with their own shapes and fonts.
+select several to tag or move them at once.
+
+### Designs
+
+Fourteen designs, each with its own colours, shapes and fonts, the same on the tablet and on the
+laptop:
+
+- **Classic:** Nothing, Light, OLED, Ocean, Forest and Sepia.
+- **Special:** Christmas (snowfall and fairy lights), Blueprint (a drafting grid), Chalkboard,
+  Starry night (twinkling stars), Cherry blossom (falling petals), Autumn (falling leaves),
+  Terminal (scanlines) and High contrast.
+
+You can also **make your own design with an AI:**
+
+1. Copy n0te's instructions (Settings › Design).
+2. Paste them into ChatGPT, Claude or Gemini together with your idea.
+3. Paste the answer back into n0te.
+
+n0te checks the design and shows a preview. If something doesn't fit, it lists what the AI should
+fix. A design file imports the same way on Android, Windows and Linux. The format and the rules
+are in [docs/styles.md](docs/styles.md). Decorations only move behind the library, never while you
+write, and can be switched off.
 
 ### Two notebooks side by side
 
