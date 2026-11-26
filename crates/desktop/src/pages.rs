@@ -2213,10 +2213,15 @@ pub fn thumb(pages: &Pages, index: usize, width: f32, current: bool) -> Thumb<'_
 
 impl Thumb<'_> {
     fn height(&self) -> f32 {
-        let r = self.pages.pages[self.index].rect();
-        let aspect = if self.pages.pages[self.index].placed.is_board() { 0.75 } else { (r.height() / r.width().max(1.0)).clamp(0.3, 1.8) };
-        (self.width * aspect).round()
+        thumb_height(self.pages, self.index, self.width)
     }
+}
+
+/// How tall the small picture of page `index` is at `width` (its shape; boards 4:3).
+pub fn thumb_height(pages: &Pages, index: usize, width: f32) -> f32 {
+    let r = pages.pages[index].rect();
+    let aspect = if pages.pages[index].placed.is_board() { 0.75 } else { (r.height() / r.width().max(1.0)).clamp(0.3, 1.8) };
+    (width * aspect).round()
 }
 
 impl<Message> Widget<Message, Theme, iced::Renderer> for Thumb<'_> {

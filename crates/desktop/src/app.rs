@@ -421,6 +421,10 @@ pub struct App {
     /// Without a service connection (tests): don't try to connect.
     pub offline: bool,
     pub entries: Vec<Entry>,
+    /// What the library list read of each notebook, with the notebook's change stamp and the
+    /// time of its folder then: read again only once one of them changed (a sync change on the
+    /// library screen read every notebook of the library again).
+    entry_cache: HashMap<String, (u64, Option<SystemTime>, Entry)>,
     pub bundles: Vec<Bundle>,
     pub screen: Screen,
     pub status: Option<String>,
@@ -550,6 +554,7 @@ impl App {
             stamps: HashMap::new(),
             offline: true,
             entries: Vec::new(),
+            entry_cache: HashMap::new(),
             bundles: Vec::new(),
             screen: Screen::Library,
             status: None,
@@ -649,17 +654,23 @@ impl App {
     }
 
     pub(crate) fn refresh(&mut self) {
-        let lib = &self.lib;
-        let mut entries: Vec<Entry> = lib
-            .notebook_ids()
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|id| {
-                let nb = lib.load_notebook(&id).ok()?;
-                let modified = std::fs::metadata(lib.root().join("notebooks").join(&id)).and_then(|m| m.modified()).ok();
-                Some(Entry { title: nb.title(), folder: nb.folder(), sheets: nb.sheet_count(), cover: nb.cover(), modified, tags: nb.tags(), pinned: nb.pinned(), id })
-            })
-            .collect();
+        let lib = self.lib.clone();
+        let mut cache = std::mem::take(&mut self.entry_cache);
+        let mut entries: Vec<Entry> = Vec::new();
+        for id in lib.notebook_ids().unwrap_or_default() {
+            let modified = std::fs::metadata(lib.root().join("notebooks").join(&id)).and_then(|m| m.modified()).ok();
+            // Every save counts up the stamp (organising also puts the folder's time back).
+            let stamp = lib.change_stamp(&id);
+            let entry = match cache.remove(&id) {
+                Some((s, m, e)) if stamp != 0 && s == stamp && m == modified => e,
+                _ => {
+                    let Ok(nb) = lib.load_notebook(&id) else { continue };
+                    Entry { title: nb.title(), folder: nb.folder(), sheets: nb.sheet_count(), cover: nb.cover(), modified, tags: nb.tags(), pinned: nb.pinned(), id: id.clone() }
+                }
+            };
+            self.entry_cache.insert(id, (stamp, modified, entry.clone()));
+            entries.push(entry);
+        }
         entries.sort_by(|a, b| (a.folder.to_lowercase(), a.title.to_lowercase()).cmp(&(b.folder.to_lowercase(), b.title.to_lowercase())));
         self.entries = entries;
         self.bundles = find_bundles(&bundle_dirs());

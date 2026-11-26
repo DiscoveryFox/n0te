@@ -14,6 +14,17 @@
 //!
 //! saves screenshots of the same pages instead (dark and light design, several zooms), to
 //! compare the look before and after a change.
+//!
+//!   cargo run --profile fast -p n0te-desktop --example perf -- library [notebooks]
+//!
+//! times the library screen instead: reading the list of a library with that many notebooks
+//! (default 300, each with a few pages), once and again after one of them changed (what every
+//! sync change on the library screen costs).
+//!
+//!   cargo run --profile fast -p n0te-desktop --example perf -- long [pages]
+//!
+//! times a long notebook (default 400 pages of handwriting, in groups): opening it, frames with
+//! the outline as a list and as pictures, scrolling the pages and the outline, adding a page.
 
 #[path = "../tests/harness/mod.rs"]
 mod harness;
@@ -38,6 +49,14 @@ fn main() {
     let words: usize = args.iter().find_map(|a| a.parse().ok()).unwrap_or(12_000);
     let look = args.iter().position(|a| a == "look").and_then(|i| args.get(i + 1)).map(std::path::PathBuf::from);
     assert!(n0te_desktop::set_mode(mode));
+    if args.iter().any(|a| a == "library") {
+        library(args.iter().find_map(|a| a.parse().ok()).unwrap_or(300));
+        return;
+    }
+    if args.iter().any(|a| a == "long") {
+        long(args.iter().find_map(|a| a.parse().ok()).unwrap_or(400));
+        return;
+    }
     let root = std::env::temp_dir().join(format!("n0te-perf-{}", std::process::id()));
     let lib = Library::open(&root).unwrap();
     let t = Instant::now();
@@ -177,6 +196,128 @@ fn main() {
     }
     let (rss, peak) = rss_mib();
     println!("memory: {rss:.0} MiB now, {peak:.0} MiB peak");
+}
+
+/// The library screen with `n` notebooks: reading the list, again unchanged, again after one
+/// notebook changed (a sync change while the library shows), and a frame.
+fn library(n: usize) {
+    let root = std::env::temp_dir().join(format!("n0te-perf-lib-{}", std::process::id()));
+    let lib = Library::open(&root).unwrap();
+    let t = Instant::now();
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let nb = lib.create_notebook(&format!("Notizbuch {i}")).unwrap();
+        for p in 0..6 {
+            nb.add_sheet(None, p, &SheetSpec::a4(Background::Grid)).unwrap();
+        }
+        nb.set_folder(&format!("Ordner {}", i % 7)).unwrap();
+        lib.save_notebook(&nb).unwrap();
+        ids.push(nb.id());
+    }
+    println!("{n} notebooks built in {:.1} s", t.elapsed().as_secs_f32());
+    let t = Instant::now();
+    let backend = std::env::var("N0TE_BACKEND").unwrap_or_else(|_| "wgpu".into());
+    let size = Size::new(1400.0, 900.0);
+    let mut h = Harness::new(App::new(&root), &backend, size, 1.0).or_else(|| Harness::new(App::new(&root), "tiny-skia", size, 1.0)).expect("renderer");
+    println!("  app start (reads the list): {:.0} ms, backend {}", t.elapsed().as_secs_f32() * 1000.0, h.backend());
+    let mut again = Vec::new();
+    for _ in 0..5 {
+        let t = Instant::now();
+        h.message(Message::Refresh);
+        again.push(t.elapsed().as_secs_f32() * 1000.0);
+    }
+    report("list read again, nothing changed", &mut again);
+    let mut changed = Vec::new();
+    for (k, id) in ids.iter().take(5).enumerate() {
+        let nb = lib.load_notebook(id).unwrap();
+        nb.set_title(&format!("Umbenannt {k}")).unwrap();
+        lib.save_notebook(&nb).unwrap();
+        let t = Instant::now();
+        h.message(Message::Live(n0te_desktop::live::LiveEvent::Changed { notebook: id.clone(), index: true, sheets: Vec::new() }));
+        changed.push(t.elapsed().as_secs_f32() * 1000.0);
+        assert!(h.app.entries.iter().any(|e| e.title == format!("Umbenannt {k}")), "the new title shows");
+    }
+    report("a sync change on the library screen", &mut changed);
+    let frames: Vec<FrameTimes> = (0..10).map(|_| h.step(&[])).collect();
+    report("library frames", &mut frames.iter().map(FrameTimes::total).collect::<Vec<_>>());
+    split(&frames);
+    h.message(Message::Shelf(n0te_desktop::shelf::Msg::Pick(n0te_desktop::shelf::Pick::All)));
+    let frames: Vec<FrameTimes> = (0..10).map(|_| h.step(&[])).collect();
+    report("all notebooks as cards", &mut frames.iter().map(FrameTimes::total).collect::<Vec<_>>());
+    split(&frames);
+    drop(h);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A notebook of `n` pages with handwriting, in groups of 20: opening, idle frames with the
+/// outline as a list and as pictures, scrolling the pages and the outline, adding a page.
+fn long(n: usize) {
+    let root = std::env::temp_dir().join(format!("n0te-perf-long-{}", std::process::id()));
+    let lib = Library::open(&root).unwrap();
+    let t = Instant::now();
+    let nb = lib.create_notebook("Lang").unwrap();
+    let mut rng = Rng::new(7);
+    let mut group = None;
+    for i in 0..n {
+        if i % 20 == 0 {
+            group = Some(nb.add_group(None, i / 20, &format!("Woche {}", i / 20 + 1)).unwrap());
+        }
+        let spec = SheetSpec::a4(Background::Lines);
+        let (_, sheet_id) = nb.add_sheet(group.as_deref(), i % 20, &spec).unwrap();
+        let sheet = n0te_core::sheet::Sheet::create(1).unwrap();
+        for s in demo::page_strokes(&mut rng, &spec, 120, false) {
+            sheet.add_stroke(s.brush, &s.points).unwrap();
+        }
+        lib.save_sheet(&nb.id(), &sheet_id, &sheet).unwrap();
+    }
+    lib.save_notebook(&nb).unwrap();
+    println!("{n} pages built in {:.1} s", t.elapsed().as_secs_f32());
+    let size = Size::new(1400.0, 900.0);
+    let backend = std::env::var("N0TE_BACKEND").unwrap_or_else(|_| "wgpu".into());
+    let mut h = Harness::new(App::new(&root), &backend, size, 1.0).or_else(|| Harness::new(App::new(&root), "tiny-skia", size, 1.0)).expect("renderer");
+    println!("backend: {}", h.backend());
+    let t = Instant::now();
+    h.message(Message::Open(nb.id()));
+    let opening = [h.step(&[]), h.step(&[]), h.step(&[])];
+    println!("  open: {:.0} ms (3 frames {:.0} ms)", t.elapsed().as_secs_f32() * 1000.0, opening.iter().map(FrameTimes::total).sum::<f32>());
+    let mid = Point::new(size.width / 2.0 + 140.0, size.height / 2.0);
+    let side = Point::new(120.0, size.height / 2.0);
+    // Where the time of a frame goes: building the widgets (App::view) alone, a whole frame with
+    // the outline and without it.
+    let t = Instant::now();
+    for _ in 0..20 {
+        drop(h.app.view());
+    }
+    println!("  App::view alone: {:.1} ms", t.elapsed().as_secs_f32() * 1000.0 / 20.0);
+    h.message(Message::ToggleSidebar);
+    let mut bare: Vec<FrameTimes> = (0..10).map(|_| h.step(&[])).collect();
+    report("idle, outline hidden", &mut bare.iter().map(FrameTimes::total).collect::<Vec<_>>());
+    split(&bare);
+    bare.clear();
+    h.message(Message::ToggleSidebar);
+    for pictures in [false, true] {
+        h.message(Message::Outline(n0te_desktop::sidebar::Msg::Pictures(pictures)));
+        let what = if pictures { "pictures" } else { "list" };
+        let mut idle: Vec<FrameTimes> = (0..10).map(|_| h.step(&[])).collect();
+        report(&format!("idle, outline as {what}"), &mut idle.iter().map(FrameTimes::total).collect::<Vec<_>>());
+        split(&idle);
+        idle.clear();
+        let mut frames: Vec<FrameTimes> = (0..40).map(|i| h.scroll(mid, 0.0, if i < 20 { -120.0 } else { 120.0 })).collect();
+        report(&format!("pages scroll ({what})"), &mut frames.iter().map(FrameTimes::total).collect::<Vec<_>>());
+        split(&frames);
+        frames = (0..40).map(|i| h.scroll(side, 0.0, if i < 20 { -120.0 } else { 120.0 })).collect();
+        report(&format!("outline scroll ({what})"), &mut frames.iter().map(FrameTimes::total).collect::<Vec<_>>());
+        split(&frames);
+    }
+    let t = Instant::now();
+    h.message(Message::Outline(n0te_desktop::sidebar::Msg::AddPage));
+    let add = t.elapsed().as_secs_f32() * 1000.0;
+    let f = h.step(&[]);
+    println!("  add a page: {add:.0} ms, next frame {:.0} ms", f.total());
+    let (rss, peak) = rss_mib();
+    println!("memory: {rss:.0} MiB now, {peak:.0} MiB peak");
+    drop(h);
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Screenshots of the big pages, the board and a page with its edges, dark and light.

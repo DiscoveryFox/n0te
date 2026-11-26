@@ -302,7 +302,7 @@ fn outline_screens(g: &mut Harness, out: &std::path::Path, theme: &str) {
     };
     g.message(Message::Jump(sheet));
     g.events(&[]);
-    let reveal = sidebar::reveal_current(&g.app);
+    let reveal = sidebar::reveal_current(&mut g.app);
     g.task(reveal);
     shot(g, "-outline-list");
     g.message(Message::Outline(Msg::Pictures(true)));
@@ -317,7 +317,7 @@ fn outline_screens(g: &mut Harness, out: &std::path::Path, theme: &str) {
     };
     if let Some(node) = node {
         g.events(&[]);
-        let reveal = sidebar::reveal_current(&g.app);
+        let reveal = sidebar::reveal_current(&mut g.app);
         g.task(reveal);
         // Where a right click on the page's row would be: the row sits a third down the list.
         if let Some(list) = g.bounds_of(sidebar::list_id()) {

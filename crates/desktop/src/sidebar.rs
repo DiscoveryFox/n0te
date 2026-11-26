@@ -121,6 +121,148 @@ pub struct Outline {
     pub asked: Option<String>,
     /// Renaming a page or group: (node, the name typed).
     pub renaming: Option<(String, String)>,
+    /// Where the list is scrolled to and how tall it shows (px): a long outline makes only the
+    /// rows there (see [`Window`]).
+    pub scroll: Option<(f32, f32)>,
+}
+
+/// Outlines longer than this many rows are made only around what shows: building, laying out
+/// and updating a thousand rows' widgets took most of every frame in a long notebook.
+const VIRTUAL_ROWS: usize = 120;
+/// Rows made above and below what shows (px), so a scroll never meets a gap.
+const VIRTUAL_MARGIN: f32 = 600.0;
+/// Fixed heights of the list's rows (px), so the rows not made can be counted in: a group, a
+/// heading under a page; a page's row is as tall as its picture or its text ([`page_row_h`]).
+const GROUP_H: f32 = 32.0;
+const HEADING_H: f32 = 23.0;
+const LIST_SPACING: f32 = 1.0;
+/// The pictures view: a group's row, the room under a picture for its name, the spacing.
+const PICTURE_GROUP_H: f32 = 28.0;
+const PICTURE_LABEL_H: f32 = 22.0;
+const PICTURES_SPACING: f32 = 12.0;
+
+/// The part of a long list to make: rows ending above `top` or starting below `bottom` (px in
+/// the list) stand in as empty room.
+#[derive(Debug, Clone, Copy)]
+struct Window {
+    top: f32,
+    bottom: f32,
+}
+
+impl Window {
+    /// For `rows` rows scrolled as `scroll` says (None: everything, a short list).
+    fn of(rows: usize, scroll: Option<(f32, f32)>) -> Option<Window> {
+        if rows <= VIRTUAL_ROWS {
+            return None;
+        }
+        let (y, h) = scroll.unwrap_or((0.0, 1000.0));
+        Some(Window { top: y - VIRTUAL_MARGIN, bottom: y + h.max(400.0) + VIRTUAL_MARGIN })
+    }
+}
+
+/// Builds a column row by row, making only the rows a [`Window`] shows; the others are empty
+/// room of the same height (so the list scrolls as if they were there).
+struct Rows<'a> {
+    list: Column<'a, Message>,
+    window: Option<Window>,
+    spacing: f32,
+    /// Where the next row starts (px in the list) and the room skipped since the last row made.
+    y: f32,
+    skipped: f32,
+}
+
+impl<'a> Rows<'a> {
+    fn new(spacing: f32, window: Option<Window>) -> Self {
+        Rows { list: column![].spacing(spacing), window, spacing, y: 0.0, skipped: 0.0 }
+    }
+
+    /// A row `h` tall: made by `make` when it shows.
+    fn push(&mut self, h: f32, make: impl FnOnce() -> Element<'a, Message>) {
+        let shows = self.window.is_none_or(|w| self.y + h >= w.top && self.y <= w.bottom);
+        if shows {
+            self.flush();
+            let list = std::mem::replace(&mut self.list, column![]);
+            self.list = list.push(make());
+        } else {
+            self.skipped += h + self.spacing;
+        }
+        self.y += h + self.spacing;
+    }
+
+    fn flush(&mut self) {
+        if self.skipped > 0.0 {
+            let list = std::mem::replace(&mut self.list, column![]);
+            self.list = list.push(Space::new().height(self.skipped - self.spacing));
+            self.skipped = 0.0;
+        }
+    }
+
+    fn finish(mut self) -> Column<'a, Message> {
+        self.flush();
+        self.list
+    }
+}
+
+/// How tall a page's row in the list is: its small picture or its text, whichever is taller.
+fn page_row_h(pages: &pages::Pages, index: Option<usize>) -> f32 {
+    8.0 + index.map_or(0.0, |i| pages::thumb_height(pages, i, ROW_PICTURE_W)).max(17.0)
+}
+
+/// The rows of the list before the page `sheet` (its top, px in the list), for scrolling there
+/// in a long outline whose row may not be made.
+fn list_offset(o: &Open, headings: &HashMap<String, Vec<Heading>>, sheet: &str) -> Option<f32> {
+    let index: HashMap<&str, usize> = o.pages.pages.iter().enumerate().map(|(i, p)| (p.placed.sheet_id.as_str(), i)).collect();
+    let mut y = 0.0;
+    for r in &o.rows {
+        match r {
+            OutlineRow::Group { .. } => y += GROUP_H + LIST_SPACING,
+            OutlineRow::Sheet { sheet_id, title, .. } => {
+                if sheet_id == sheet {
+                    return Some(y);
+                }
+                y += page_row_h(&o.pages, index.get(sheet_id.as_str()).copied()) + LIST_SPACING;
+                let heads = headings.get(sheet_id).map(Vec::len).unwrap_or(0);
+                let named = title.trim().is_empty() && headings.get(sheet_id).is_some_and(|h| h.iter().any(|h| !h.text.trim().is_empty()));
+                y += (heads - usize::from(named)) as f32 * (HEADING_H + LIST_SPACING);
+            }
+        }
+    }
+    None
+}
+
+/// Like [`list_offset`] for the pictures view (two to a row).
+fn pictures_offset(o: &Open, sheet: &str) -> Option<f32> {
+    let index: HashMap<&str, usize> = o.pages.pages.iter().enumerate().map(|(i, p)| (p.placed.sheet_id.as_str(), i)).collect();
+    let mut y = 0.0;
+    let mut pair: Vec<f32> = Vec::new();
+    for r in &o.rows {
+        match r {
+            OutlineRow::Group { .. } => {
+                if !pair.is_empty() {
+                    y += pair.iter().copied().fold(0.0, f32::max) + PICTURES_SPACING;
+                    pair.clear();
+                }
+                y += PICTURE_GROUP_H + PICTURES_SPACING;
+            }
+            OutlineRow::Sheet { sheet_id, .. } => {
+                let Some(&i) = index.get(sheet_id.as_str()) else { continue };
+                if sheet_id == sheet {
+                    return Some(y);
+                }
+                pair.push(picture_h(&o.pages, i));
+                if pair.len() == 2 {
+                    y += pair.iter().copied().fold(0.0, f32::max) + PICTURES_SPACING;
+                    pair.clear();
+                }
+            }
+        }
+    }
+    None
+}
+
+/// How tall a page's picture with its name is in the pictures view.
+fn picture_h(pages: &pages::Pages, index: usize) -> f32 {
+    6.0 + pages::thumb_height(pages, index, PICTURE_W) + 5.0 + PICTURE_LABEL_H
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +292,8 @@ pub enum Msg {
     AddGroup,
     /// Every group shown: folded (true) or open.
     FoldAll(bool),
+    /// The list scrolled: to (y, px), showing (height, px).
+    Scrolled(f32, f32),
 }
 
 fn om(m: Msg) -> Message {
@@ -199,7 +343,7 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Element<'a
     } else {
         outline(app, o, current, ids)
     };
-    body = body.push(scrollable(list.padding(pad)).id(ids.list()).style(theme::scroll_dark).height(Length::Fill));
+    body = body.push(scrollable(list.padding(pad)).id(ids.list()).on_scroll(|v| om(Msg::Scrolled(v.absolute_offset().y, v.bounds().height))).style(theme::scroll_dark).height(Length::Fill));
     if !app.read_only_nb(&o.id) {
         body = body.push(footer(o, ids));
     }
@@ -286,11 +430,15 @@ fn page_row<'a>(content: impl Into<Element<'a, Message>>, node: &str, sheet: &st
 fn outline<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Column<'a, Message> {
     let (rows, pages, headings) = (&o.rows, &o.pages, &app.headings);
     let numbers: HashMap<&str, u32> = pages.pages.iter().filter(|p| p.placed.side == 0).map(|p| (p.placed.node.as_str(), p.placed.number)).collect();
+    // Where each sheet is laid out (looking it up row by row went through every page each time).
+    let index: HashMap<&str, usize> = pages.pages.iter().enumerate().map(|(i, p)| (p.placed.sheet_id.as_str(), i)).collect();
     let marked: HashSet<&str> = o.marked.iter().map(String::as_str).collect();
-    let mut list = column![].spacing(1);
+    let lines = rows.len() + rows.iter().map(|r| if let OutlineRow::Sheet { sheet_id, .. } = r { headings.get(sheet_id).map_or(0, Vec::len) } else { 0 }).sum::<usize>();
+    // Scrolled past the list's padding: the window counts from the first row.
+    let mut list = Rows::new(LIST_SPACING, Window::of(lines, o.outline.scroll.map(|(y, h)| (y - 6.0, h))));
     for r in rows {
         match r {
-            OutlineRow::Group { node, depth, title, collapsed, count } => {
+            OutlineRow::Group { node, depth, title, collapsed, count } => list.push(GROUP_H, || {
                 let content = row![
                     text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::p().accent).width(18),
                     text(fit(if title.trim().is_empty() { tr("Gruppe") } else { title }, 24)).font(theme::SANS_MEDIUM).size(13.5).wrapping(text::Wrapping::None),
@@ -302,17 +450,21 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Column<'a, 
                     .on_press(Message::Fold(node.clone()))
                     .padding(Padding { top: 7.0, bottom: 7.0, left: 10.0 + *depth as f32 * 14.0, right: 10.0 })
                     .width(Length::Fill)
+                    .height(GROUP_H)
                     .style(theme::row(false));
-                list = list.push(with_menu(b, node, ids));
-            }
+                with_menu(b, node, ids)
+            }),
             OutlineRow::Sheet { node, depth, sheet_id, title, spec, left, right } => {
                 let n = numbers.get(node.as_str()).copied().unwrap_or(0);
                 let heads: &[Heading] = headings.get(sheet_id).map(Vec::as_slice).unwrap_or(&[]);
                 // Untitled: the first heading names the page (and isn't listed again under it).
                 let named_by = (title.trim().is_empty()).then(|| heads.iter().position(|h| !h.text.trim().is_empty())).flatten();
+                let at = index.get(sheet_id.as_str()).copied();
+                let indent = 10.0 + *depth as f32 * 14.0;
+                list.push(page_row_h(pages, at), || {
                 let name = name_of(o, headings, title, sheet_id, spec);
                 let sides = format!("{}{}", if left.is_empty() { String::new() } else { format!("‹{} ", left.len()) }, if right.is_empty() { String::new() } else { format!("{}›", right.len()) });
-                let picture: Element<'a, Message> = match pages.page_of_sheet(sheet_id) {
+                let picture: Element<'a, Message> = match at {
                     Some(i) => pages::thumb(pages, i, ROW_PICTURE_W, false).into(),
                     None => Space::new().width(ROW_PICTURE_W).into(),
                 };
@@ -332,54 +484,85 @@ fn outline<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Column<'a, 
                 content = content.push(Space::new().width(6));
                 // Only a page that differs from the usual A4 says its format ("A4 quer", "A5 hoch").
                 content = content.push(text(format_tag(spec)).font(theme::meta_font()).size(11).color(theme::p().muted));
-                let indent = 10.0 + *depth as f32 * 14.0;
                 let b = button(content)
                     .on_press(Message::Jump(sheet_id.clone()))
                     .padding(Padding { top: 4.0, bottom: 4.0, left: indent, right: 10.0 })
                     .width(Length::Fill)
+                    .height(page_row_h(pages, at))
                     .style(theme::row(n == current));
-                list = list.push(page_row(b, node, sheet_id, &name, ids));
+                page_row(b, node, sheet_id, &name, ids)
+                });
                 // The page's headings, under its name: a click shows the heading on the page.
                 for (_, h) in heads.iter().enumerate().filter(|(i, _)| Some(*i) != named_by) {
-                    let label = if h.text.trim().is_empty() { tr("Überschrift") } else { h.text.trim() };
-                    let content = row![
-                        text("—").size(11).color(theme::p().muted).width(16),
-                        text(fit(label, 24)).size(12).color(theme::alpha(theme::p().text, 0.78)).wrapping(text::Wrapping::None),
-                    ]
-                    .align_y(Alignment::Center);
-                    list = list.push(
+                    list.push(HEADING_H, || {
+                        let label = if h.text.trim().is_empty() { tr("Überschrift") } else { h.text.trim() };
+                        let content = row![
+                            text("—").size(11).color(theme::p().muted).width(16),
+                            text(fit(label, 24)).size(12).color(theme::alpha(theme::p().text, 0.78)).wrapping(text::Wrapping::None),
+                        ]
+                        .align_y(Alignment::Center);
                         container(
                             button(content)
                                 .on_press(Message::Reveal(sheet_id.clone(), [h.x0, h.y0, h.x1, h.y1]))
                                 .padding(Padding { top: 3.0, bottom: 4.0, left: indent + 46.0, right: 10.0 })
                                 .width(Length::Fill)
+                                .height(HEADING_H)
                                 .style(theme::row(false)),
                         )
-                        .id(ids.heading(&h.id)),
-                    );
+                        .id(ids.heading(&h.id))
+                        .into()
+                    });
                 }
             }
         }
     }
-    list
+    list.finish()
 }
 
 /// The outline as page pictures, two to a row, "01 Name" under each; groups as headings
 /// across that fold; the page in view outlined in the accent, marked ones with a ribbon.
 fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, current: u32, ids: Ids) -> Column<'a, Message> {
     let marked: HashSet<&str> = o.marked.iter().map(String::as_str).collect();
-    let mut list = column![].spacing(12);
-    let mut pair: Vec<Element<'a, Message>> = Vec::new();
-    let flush = |list: Column<'a, Message>, pair: &mut Vec<Element<'a, Message>>| {
+    let index: HashMap<&str, usize> = o.pages.pages.iter().enumerate().map(|(i, p)| (p.placed.sheet_id.as_str(), i)).collect();
+    let mut list = Rows::new(PICTURES_SPACING, Window::of(o.rows.len(), o.outline.scroll.map(|(y, h)| (y - 6.0, h))));
+    // The pair of pictures being filled: (sheet's row, index), made when the pair is complete.
+    let mut pair: Vec<(&'a OutlineRow, usize)> = Vec::new();
+    let flush = |list: &mut Rows<'a>, pair: &mut Vec<(&'a OutlineRow, usize)>| {
         if pair.is_empty() {
-            return list;
+            return;
         }
-        list.push(iced::widget::Row::with_children(std::mem::take(pair)).spacing(10))
+        let h = pair.iter().map(|(_, i)| picture_h(&o.pages, *i)).fold(0.0, f32::max);
+        let items = std::mem::take(pair);
+        list.push(h, || {
+            let cells: Vec<Element<'a, Message>> = items
+                .into_iter()
+                .filter_map(|(r, i)| {
+                    let OutlineRow::Sheet { node, sheet_id, title, spec, .. } = r else { return None };
+                    let n = o.pages.pages[i].placed.number;
+                    let mut picture = stack![pages::thumb(&o.pages, i, PICTURE_W, n == current)];
+                    if marked.contains(node.as_str()) {
+                        picture = picture.push(container(shelf::icon(shelf::RIBBON, 16.0, theme::p().accent)).padding(Padding { top: 3.0, right: 4.0, ..Padding::ZERO }).align_right(Length::Fill));
+                    }
+                    let name = name_of(o, headings, title, sheet_id, spec);
+                    let label = row![
+                        text(format!("{n:02}")).font(theme::meta_font()).size(11).color(if n == current { theme::p().accent } else { theme::p().muted }),
+                        text(fit(&name, 14)).size(12).color(theme::p().text).wrapping(text::Wrapping::None),
+                    ]
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .height(PICTURE_LABEL_H);
+                    let b = button(column![picture, label].spacing(5)).on_press(Message::Jump(sheet_id.clone())).padding(3).style(theme::row(false));
+                    Some(page_row(b, node, sheet_id, &name, ids))
+                })
+                .collect();
+            iced::widget::Row::with_children(cells).spacing(10).height(h).into()
+        });
     };
     for r in &o.rows {
         match r {
             OutlineRow::Group { node, depth, title, collapsed, count } => {
-                list = flush(list, &mut pair);
+                flush(&mut list, &mut pair);
+                list.push(PICTURE_GROUP_H, || {
                 let content = row![
                     text(if *collapsed { "▸" } else { "▾" }).font(theme::SANS_BOLD).size(12).color(theme::p().accent).width(18),
                     text(fit(if title.trim().is_empty() { tr("Gruppe") } else { title }, 26)).font(theme::SANS_BOLD).size(13.5).wrapping(text::Wrapping::None),
@@ -387,32 +570,21 @@ fn pictures_view<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, curr
                     text(count.to_string()).font(theme::meta_font()).size(11).color(theme::p().muted),
                 ]
                 .align_y(Alignment::Center);
-                let b = button(content).on_press(Message::Fold(node.clone())).padding(Padding { top: 6.0, bottom: 4.0, left: 4.0 + *depth as f32 * 12.0, right: 6.0 }).width(Length::Fill).style(theme::row(false));
-                list = list.push(with_menu(b, node, ids));
+                let b = button(content).on_press(Message::Fold(node.clone())).padding(Padding { top: 6.0, bottom: 4.0, left: 4.0 + *depth as f32 * 12.0, right: 6.0 }).width(Length::Fill).height(PICTURE_GROUP_H).style(theme::row(false));
+                with_menu(b, node, ids)
+                });
             }
-            OutlineRow::Sheet { node, sheet_id, title, spec, .. } => {
-                let Some(i) = o.pages.page_of_sheet(sheet_id) else { continue };
-                let n = o.pages.pages[i].placed.number;
-                let mut picture = stack![pages::thumb(&o.pages, i, PICTURE_W, n == current)];
-                if marked.contains(node.as_str()) {
-                    picture = picture.push(container(shelf::icon(shelf::RIBBON, 16.0, theme::p().accent)).padding(Padding { top: 3.0, right: 4.0, ..Padding::ZERO }).align_right(Length::Fill));
-                }
-                let name = name_of(o, headings, title, sheet_id, spec);
-                let label = row![
-                    text(format!("{n:02}")).font(theme::meta_font()).size(11).color(if n == current { theme::p().accent } else { theme::p().muted }),
-                    text(fit(&name, 14)).size(12).color(theme::p().text).wrapping(text::Wrapping::None),
-                ]
-                .spacing(6)
-                .align_y(Alignment::Center);
-                let b = button(column![picture, label].spacing(5)).on_press(Message::Jump(sheet_id.clone())).padding(3).style(theme::row(false));
-                pair.push(page_row(b, node, sheet_id, &name, ids));
+            OutlineRow::Sheet { sheet_id, .. } => {
+                let Some(i) = index.get(sheet_id.as_str()).copied() else { continue };
+                pair.push((r, i));
                 if pair.len() == 2 {
-                    list = flush(list, &mut pair);
+                    flush(&mut list, &mut pair);
                 }
             }
         }
     }
-    flush(list, &mut pair)
+    flush(&mut list, &mut pair);
+    list.finish()
 }
 
 /// The marked pages wherever they are (in folded groups they don't show): picture, number,
@@ -515,11 +687,27 @@ fn menu_rows(o: &Open, node: &str) -> Vec<MenuRow> {
 
 /// Brings the page in view into view in the active pane's outline too (opening, switching list
 /// and pictures): its row about a third down the list.
-pub fn reveal_current(app: &App) -> Task<Message> {
+pub fn reveal_current(app: &mut App) -> Task<Message> {
     let Screen::Notebook(s) = &app.screen else { return Task::none() };
     let o = s.active_pane();
     let current = o.pages.current_number(&o.camera);
     let Some(i) = o.pages.index_of_number(current) else { return Task::none() };
+    // A long outline makes only the rows around what shows: its rows are counted instead.
+    let rows = o.rows.len() + o.rows.iter().map(|r| if let OutlineRow::Sheet { sheet_id, .. } = r { app.headings.get(sheet_id).map_or(0, Vec::len) } else { 0 }).sum::<usize>();
+    let pictures = app.settings.outline_pictures;
+    if Window::of(if pictures { o.rows.len() } else { rows }, None).is_some() && !o.outline.only_marked {
+        let sheet = &o.pages.pages[i].placed.sheet_id;
+        let at = if pictures { pictures_offset(o, sheet) } else { list_offset(o, &app.headings, sheet) };
+        let Some(at) = at else { return Task::none() };
+        let h = o.outline.scroll.map_or(600.0, |s| s.1);
+        let y = (at + 6.0 - h / 3.0).max(0.0);
+        // The rows there are made right away (the list tells where it is only once scrolled by hand).
+        if let Some(o) = app.pane_mut() {
+            o.outline.scroll = Some((y, h));
+        }
+        use iced::advanced::widget::operation::scrollable::AbsoluteOffset;
+        return iced::widget::operation::scroll_to(list_id(), AbsoluteOffset { x: None, y: Some(y) });
+    }
     iced::advanced::widget::operate(Reveal { list: list_id(), target: page_id(&o.pages.pages[i].placed.node), scroll: None, found: None })
 }
 
@@ -687,6 +875,11 @@ impl App {
                 self.edit_notebook(|nb| groups.iter().try_for_each(|g| nb.set_collapsed(g, fold)));
             }
             Msg::AddPage => return self.add_page(),
+            Msg::Scrolled(y, h) => {
+                if let Some(s) = self.outline_mut() {
+                    s.scroll = Some((y, h));
+                }
+            }
             Msg::AddGroup => {
                 let Some(o) = self.pane() else { return Task::none() };
                 let current = o.pages.current_number(&o.camera);
