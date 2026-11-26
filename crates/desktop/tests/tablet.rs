@@ -184,6 +184,136 @@ fn a_selection_moves_copies_and_pastes() {
     assert!((x_back - x_before).abs() < 0.5, "undo moves it back: {x_back} vs {x_before}");
 }
 
+/// Lassos the strokes in the box (window points) around `a`.
+fn lasso_around(h: &mut Harness, a: Point, w: f32) {
+    h.message(Message::Tablet(Msg::Tool(Tool::Lasso)));
+    let pts = [(-15.0, -15.0), (w + 15.0, -15.0), (w + 15.0, 15.0), (-15.0, 15.0), (-15.0, -14.0)];
+    h.press_at(Point::new(a.x + pts[0].0, a.y + pts[0].1));
+    for (x, y) in &pts[1..] {
+        h.move_to(Point::new(a.x + x, a.y + y));
+    }
+    h.release();
+}
+
+#[test]
+fn a_move_the_system_cancels_leaves_the_selection_and_the_next_stroke_is_stored() {
+    let mut h = opened("cancelmove");
+    let (nb, sheet, a) = first_page(&h, 0.3, 0.8);
+    drag(&mut h, a, Point::new(a.x + 60.0, a.y), 6);
+    lasso_around(&mut h, a, 60.0);
+    assert!(h.app.tablet.selection.is_some());
+    let before = strokes(&h, &nb, &sheet);
+    // The pen goes down on the selection and moves it, then Windows takes the pen away.
+    let ev = |phase, x: f32, y: f32, t: u32| Message::Pen(PenEvent { phase, samples: vec![Sample { x, y, pressure: 0.5, tilt: (0.0, 0.0), t_ms: t }], eraser: false, barrel: false, real: true });
+    h.message(ev(Phase::Down, a.x + 30.0, a.y, 100));
+    h.message(ev(Phase::Move, a.x + 60.0, a.y + 20.0, 120));
+    h.message(Message::Pen(PenEvent { phase: Phase::Cancel, samples: Vec::new(), eraser: false, barrel: false, real: true }));
+    assert!(!h.app.tablet.busy(), "nothing under way after the cancel");
+    assert!(open(&h).pages.erasing.borrow().is_empty() && open(&h).pages.live.borrow().is_empty(), "the selection shows where it was");
+    let unchanged = strokes(&h, &nb, &sheet);
+    assert_eq!(unchanged.iter().map(|s| (s.id.clone(), s.bounds.x0)).collect::<Vec<_>>(), before.iter().map(|s| (s.id.clone(), s.bounds.x0)).collect::<Vec<_>>(), "nothing moved");
+    // The next stroke (elsewhere) is written as usual.
+    h.message(Message::Tablet(Msg::Tool(Tool::Pen)));
+    let b = Point::new(a.x, a.y - 120.0);
+    drag(&mut h, b, Point::new(b.x + 80.0, b.y), 6);
+    assert_eq!(strokes(&h, &nb, &sheet).len(), before.len() + 1, "the new stroke is stored");
+}
+
+#[test]
+fn undo_and_a_selection_stay_with_their_notebook() {
+    let mut h = opened("forget");
+    let (nb, sheet, a) = first_page(&h, 0.3, 0.8);
+    drag(&mut h, a, Point::new(a.x + 60.0, a.y), 6);
+    lasso_around(&mut h, a, 60.0);
+    assert!(h.app.tablet.selection.is_some());
+    let n = strokes(&h, &nb, &sheet).len();
+    // Another notebook: Delete and undo there must not touch the first one.
+    let other = {
+        let lib = &h.app.lib;
+        let o = lib.create_notebook("Zweites").unwrap();
+        o.add_sheet(None, 0, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+        lib.save_notebook(&o).unwrap();
+        o.id()
+    };
+    h.message(Message::Back);
+    h.message(Message::Open(other));
+    h.events(&[]);
+    let delete = match h.key_event(iced::keyboard::Key::Named(iced::keyboard::key::Named::Delete), None)[0].clone() {
+        iced::Event::Keyboard(e) => e,
+        _ => unreachable!(),
+    };
+    h.message(Message::Key(delete));
+    h.message(Message::Tablet(Msg::Undo));
+    h.message(Message::Tablet(Msg::Undo));
+    assert_eq!(strokes(&h, &nb, &sheet).len(), n, "the first notebook is as it was");
+    assert!(h.app.tablet.selection.is_none() && !h.app.tablet.can_undo());
+}
+
+#[test]
+fn a_graph_inserted_and_changed_on_the_tablet_is_undone_step_by_step() {
+    let mut h = opened("plotundo");
+    let (nb, sheet, _) = first_page(&h, 0.5, 0.5);
+    let plots = |h: &Harness| {
+        assert!(n0te_desktop::saver::flush());
+        h.app.lib.load_sheet(&nb, &sheet).unwrap().plots()
+    };
+    let before = plots(&h).len();
+    h.message(Message::InsertPlot);
+    assert!(h.app.plot_edit.is_some(), "its panel opened");
+    h.message(Message::Plot(n0te_desktop::plots::Msg::Cancel));
+    assert_eq!(plots(&h).len(), before + 1, "stored at once");
+    // The new graph opens again from the page at once (its file may still be on its way).
+    let id = plots(&h).last().unwrap().id.clone();
+    h.message(Message::EditPlot(sheet.clone(), id));
+    assert!(h.app.plot_edit.is_some());
+    h.message(Message::Plot(n0te_desktop::plots::Msg::Cancel));
+    h.message(Message::Tablet(Msg::Undo));
+    assert_eq!(plots(&h).len(), before, "undo takes the graph away again");
+    h.message(Message::Tablet(Msg::Redo));
+    assert_eq!(plots(&h).len(), before + 1);
+}
+
+#[test]
+fn a_selection_shows_its_actions_beside_it_and_they_act() {
+    let mut h = opened("selbar");
+    let (nb, sheet, a) = first_page(&h, 0.3, 0.6);
+    drag(&mut h, a, Point::new(a.x + 60.0, a.y), 6);
+    let n = strokes(&h, &nb, &sheet).len();
+    lasso_around(&mut h, a, 60.0);
+    let (_, bar) = h.app.selection_bar().expect("the selection's bar");
+    assert!(bar.y + bar.height < a.y, "above the selection: {bar:?} vs {a:?}");
+    let delete = n0te_desktop::theme::cased(n0te_desktop::i18n::tr("Löschen"));
+    let at = h.find(delete.as_str()).expect("Löschen in the bar");
+    assert!(bar.contains(at.center()), "it is the bar's");
+    h.click(at.center());
+    assert_eq!(strokes(&h, &nb, &sheet).len(), n - 1, "deleted");
+    assert!(h.app.tablet.selection.is_none() && h.app.selection_bar().is_none());
+}
+
+#[test]
+fn the_tool_bar_fits_a_small_pen_laptop() {
+    use n0te_desktop::i18n::tr;
+    use n0te_desktop::theme::cased;
+    let mut h = opened("narrowbar");
+    let width = 1200.0;
+    h.size = Size::new(width, 800.0);
+    h.events(&[]);
+    h.events(&[]);
+    for (tool, labels) in [(Tool::Pen, &["Laser", "Lineal", "Lupe"][..]), (Tool::Eraser, &["Laser", "Fläche", "Lineal", "Lupe"][..])] {
+        h.message(Message::Tablet(Msg::Tool(tool)));
+        h.events(&[]);
+        for l in labels {
+            let r = h.find(cased(tr(l)).as_str()).unwrap_or_else(|| panic!("{l} shows"));
+            assert!(r.x + r.width <= width, "{l} fits: {r:?}");
+        }
+    }
+    // The bar keeps its height whatever the tool: the pages don't jump.
+    let top = open(&h).camera.origin.y;
+    h.message(Message::Tablet(Msg::Tool(Tool::Pen)));
+    h.events(&[]);
+    assert_eq!(open(&h).camera.origin.y, top);
+}
+
 #[test]
 fn the_text_tool_makes_a_text_box_where_tapped() {
     let mut h = opened("text");

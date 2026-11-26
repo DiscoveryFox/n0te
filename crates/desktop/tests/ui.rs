@@ -197,7 +197,7 @@ fn a_single_side_page_can_be_exported_on_its_own() {
     assert!(std::fs::read(&path).unwrap().starts_with(b"%PDF"));
     // The exporter counts what it wrote: just the side page, without its page.
     let status = h.app.status.clone().unwrap_or_default();
-    assert!(status.starts_with("1 Seiten exportiert"), "{status}");
+    assert!(status.starts_with("1 Seite exportiert"), "{status}");
 }
 
 /// A one-page PDF of 595 × 842 pt with a full-width blue band at page y 200..400.
@@ -397,6 +397,280 @@ fn notes_column_creates_a_side_text_page_and_follows_the_page() {
     h.message(Message::ToggleNotes);
     assert!(open(&h).text_page.is_none());
     assert_eq!(stored_body(&root, &nb, &sheet), "Frage: gilt das für komplexe Zahlen?");
+}
+
+#[test]
+fn closing_the_window_stores_what_was_just_typed() {
+    let (mut h, root, nb) = blank_notebook("close");
+    let sheet = open(&h).pages.pages[0].placed.sheet_id.clone();
+    // Notes typed a moment ago (stored after a pause otherwise).
+    h.message(Message::ToggleNotes);
+    let notes = open(&h).text_page.as_ref().expect("notes open").sheet_id.clone();
+    h.type_text("Notiz für später");
+    // A text box typed into, its text not stored yet.
+    h.message(Message::NewText(sheet, 60.0, 100.0));
+    h.type_text("Gerade getippt");
+    assert_eq!(stored_texts(&root, &nb)[0].text, "", "not stored yet");
+    h.message(Message::CloseRequested(iced::window::Id::unique()));
+    assert_eq!(stored_texts(&root, &nb)[0].text, "Gerade getippt");
+    assert_eq!(stored_body(&root, &nb, &notes), "Notiz für später");
+}
+
+#[test]
+fn deleting_a_page_closes_the_notes_docked_beside_it_and_undo_brings_them_back() {
+    use n0te_desktop::sidebar::Msg;
+    let (mut h, root, nb) = blank_notebook("delnotes");
+    h.message(Message::Outline(Msg::AddPage));
+    h.message(Message::Jump(open(&h).pages.pages[0].placed.sheet_id.clone()));
+    h.message(Message::ToggleNotes);
+    let notes = open(&h).text_page.as_ref().expect("notes open").sheet_id.clone();
+    h.type_text("Zur ersten Seite");
+    let first = open(&h).pages.pages.iter().find(|p| p.placed.side == 0).unwrap().placed.node.clone();
+    h.message(Message::Outline(Msg::Delete(first.clone())));
+    h.message(Message::Outline(Msg::Delete(first)));
+    assert!(open(&h).text_page.is_none(), "the notes of the deleted page close");
+    assert!(open(&h).pages.page_of_sheet(&notes).is_none());
+    h.message(Message::Outline(Msg::Undo));
+    assert!(open(&h).pages.page_of_sheet(&notes).is_some(), "back with its page");
+    assert_eq!(stored_body(&root, &nb, &notes), "Zur ersten Seite", "what was typed was kept");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_notebook_that_cannot_be_stored_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    use n0te_desktop::sidebar::Msg;
+    let (mut h, root, nb) = blank_notebook("readonly");
+    let dir = root.join("notebooks").join(&nb);
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // Someone who may write anyway (root) can't run this.
+    let writable = std::fs::write(dir.join("probe"), b"x").is_ok();
+    if !writable {
+        h.message(Message::Outline(Msg::AddPage));
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(mode)).unwrap();
+    if writable {
+        return;
+    }
+    let status = h.app.status.clone().unwrap_or_default();
+    assert!(status.starts_with("Speichern fehlgeschlagen"), "told: {status:?}");
+}
+
+#[test]
+fn a_text_page_opens_with_the_cursor_at_its_very_end_also_after_umlauts() {
+    let (mut h, _root, _nb) = blank_notebook("cursorend");
+    h.message(Message::NewTextPage);
+    h.type_text("Größe");
+    h.message(Message::CloseTextPage);
+    let sheet = open(&h).pages.pages.iter().find(|p| p.placed.spec.background == n0te_core::notebook::Background::Text).unwrap().placed.sheet_id.clone();
+    h.message(Message::OpenTextPage(sheet, false));
+    let t = open(&h).text_page.as_ref().unwrap();
+    let c = t.doc.blocks.last().unwrap().content.cursor();
+    assert_eq!((c.position.line, c.position.column), (0, "Größe".len()), "at the end");
+    // Typing goes on at the end.
+    h.type_text("n");
+    assert_eq!(open(&h).text_page.as_ref().unwrap().doc.to_markdown(), "Größen");
+}
+
+#[test]
+fn ctrl_z_brings_back_the_page_just_deleted() {
+    use n0te_desktop::sidebar::Msg;
+    let (mut h, _root, _nb) = blank_notebook("ctrlz");
+    h.message(Message::Outline(Msg::AddPage));
+    assert_eq!(open(&h).pages.total_pages, 2);
+    let last = open(&h).pages.pages.iter().rfind(|p| p.placed.side == 0).unwrap().placed.node.clone();
+    h.message(Message::Outline(Msg::Delete(last.clone())));
+    h.message(Message::Outline(Msg::Delete(last)));
+    assert_eq!(open(&h).pages.total_pages, 1);
+    h.message(ctrl_key(&h, "z"));
+    assert_eq!(open(&h).pages.total_pages, 2, "back");
+    // Nothing left to bring back: Ctrl+Z does nothing.
+    h.message(ctrl_key(&h, "z"));
+    assert_eq!(open(&h).pages.total_pages, 2);
+}
+
+#[test]
+fn the_import_panel_lists_the_pdfs_there_now() {
+    let root = temp_root("importpanel");
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::ShowImports(true));
+    let names = |v: &[(std::path::PathBuf, std::time::SystemTime)]| v.iter().map(|p| p.0.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&h.app.pdfs), names(&n0te_desktop::pdf::recent_pdfs()), "the PDFs beside the bundles are read when it opens");
+}
+
+#[test]
+fn panels_of_one_notebook_close_when_another_takes_its_place() {
+    let (mut h, root, _nb) = blank_notebook("panels");
+    let lib = Library::open(&root).unwrap();
+    let other = lib.create_notebook("Andere").unwrap();
+    other.add_sheet(None, 0, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+    lib.save_notebook(&other).unwrap();
+    // The history and share panels list this notebook's checkpoints and invites.
+    h.app.history = Some(vec![(1_700_000_000, "Stand".into())]);
+    h.app.share = Some(Vec::new());
+    h.app.export = Some(std::collections::HashSet::from([open(&h).pages.pages[0].placed.node.clone()]));
+    // The tablet opens another one live here: restoring or revoking must not act on it.
+    h.message(Message::Live(n0te_desktop::live::LiveEvent::Open { device: "tab".into(), notebook: other.id() }));
+    assert_eq!(open(&h).id, other.id());
+    assert!(h.app.history.is_none() && h.app.share.is_none() && h.app.export.is_none(), "the old notebook's panels closed");
+}
+
+#[test]
+fn creating_a_notebook_takes_its_title_paper_and_size() {
+    use n0te_core::notebook::Background;
+    let root = temp_root("create");
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::StartCreate);
+    h.message(Message::NewTitle("  Lineare Algebra ".into()));
+    h.message(Message::NewPaper(Background::Dots));
+    h.message(Message::NewSize(842.0, 595.0));
+    h.message(Message::Create);
+    assert_eq!(h.app.entries.len(), 1);
+    assert_eq!(h.app.entries[0].title, "Lineare Algebra", "trimmed");
+    let p = &open(&h).pages.pages[0].placed.spec;
+    assert_eq!((p.background, p.width, p.height), (Background::Dots, 842.0, 595.0));
+    assert!(h.app.creating.is_none());
+    // Without a title it still gets a name; Esc leaves the dialog without making one.
+    h.message(Message::Back);
+    h.message(Message::StartCreate);
+    h.message(Message::Create);
+    assert!(h.app.entries.iter().any(|e| e.title == "Neues Notizbuch"));
+    h.message(Message::Back);
+    h.message(Message::StartCreate);
+    h.message(key(&h, Named::Escape));
+    assert!(h.app.creating.is_none());
+    assert_eq!(h.app.entries.len(), 2);
+}
+
+#[test]
+fn ctrl_plus_minus_and_zero_zoom_around_the_middle_and_stay_in_bounds() {
+    let (mut h, _root, _nb) = blank_notebook("zoomkeys");
+    let mid = |h: &Harness| {
+        let c = open(h).camera;
+        (c.x + c.viewport.width / c.zoom / 2.0, c.y + c.viewport.height / c.zoom / 2.0)
+    };
+    h.message(ctrl_key(&h, "0"));
+    assert!((open(&h).camera.zoom - 1.0).abs() < 1e-4);
+    let before = mid(&h);
+    h.message(ctrl_key(&h, "+"));
+    assert!((open(&h).camera.zoom - 1.25).abs() < 1e-3);
+    let after = mid(&h);
+    assert!((before.0 - after.0).abs() < 1.0 && (before.1 - after.1).abs() < 1.0, "the middle stays: {before:?} → {after:?}");
+    for _ in 0..40 {
+        h.message(ctrl_key(&h, "+"));
+    }
+    assert_eq!(open(&h).camera.zoom, n0te_desktop::pages::MAX_ZOOM);
+    for _ in 0..60 {
+        h.message(ctrl_key(&h, "-"));
+    }
+    assert_eq!(open(&h).camera.zoom, n0te_desktop::pages::MIN_ZOOM);
+}
+
+#[test]
+fn the_outline_hides_and_ctrl_f_brings_it_back_with_the_search() {
+    let (mut h, _root, _nb) = blank_notebook("outlinekeys");
+    assert!(open(&h).sidebar);
+    h.message(ctrl_key(&h, "b"));
+    assert!(!open(&h).sidebar && !h.app.sidebar, "hidden, and remembered for the next notebook");
+    h.message(ctrl_key(&h, "f"));
+    assert!(open(&h).sidebar, "the search needs the outline");
+    h.message(Message::SearchQuery("Satz".into()));
+    assert!(open(&h).search.active());
+    h.message(key(&h, Named::Escape));
+    assert!(!open(&h).search.active(), "Esc empties the search first");
+    assert!(matches!(h.app.screen, Screen::Notebook(_)), "and stays in the notebook");
+}
+
+#[test]
+fn the_library_list_follows_changes_from_elsewhere_and_its_own() {
+    let root = temp_root("listcache");
+    let lib = Library::open(&root).unwrap();
+    let a = lib.create_notebook("Alpha").unwrap();
+    lib.save_notebook(&a).unwrap();
+    let b = lib.create_notebook("Beta").unwrap();
+    lib.save_notebook(&b).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    let titles = |h: &Harness| h.app.entries.iter().map(|e| e.title.clone()).collect::<Vec<_>>();
+    assert_eq!(titles(&h), ["Alpha", "Beta"]);
+    // Another process (the sync service) renames one and adds a page to it.
+    let other = Library::open(&root).unwrap();
+    let nb = other.load_notebook(&a.id()).unwrap();
+    nb.set_title("Analysis").unwrap();
+    nb.add_sheet(None, 0, &n0te_core::notebook::SheetSpec::a4(n0te_core::notebook::Background::Grid)).unwrap();
+    other.save_notebook(&nb).unwrap();
+    h.message(Message::Live(n0te_desktop::live::LiveEvent::Changed { notebook: a.id(), index: true, sheets: Vec::new() }));
+    assert_eq!(titles(&h), ["Analysis", "Beta"]);
+    assert_eq!(h.app.entries[0].sheets, 1);
+    // Pinned here (organising puts the folder's time back): the list shows it too.
+    h.message(Message::Shelf(n0te_desktop::shelf::Msg::Act(n0te_desktop::shelf::Target::Notebooks(vec![b.id()]), n0te_desktop::shelf::Action::Pin)));
+    assert!(h.app.entries.iter().any(|e| e.id == b.id() && e.pinned));
+    // Gone from the library: gone from the list.
+    std::fs::remove_dir_all(root.join("notebooks").join(a.id())).unwrap();
+    h.message(Message::Refresh);
+    assert_eq!(titles(&h), ["Beta"]);
+}
+
+#[test]
+fn an_empty_notebook_says_so_and_offers_a_page() {
+    let root = temp_root("emptynb");
+    let lib = Library::open(&root).unwrap();
+    let nb = lib.create_notebook("Leer").unwrap();
+    lib.save_notebook(&nb).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::Open(nb.id()));
+    h.events(&[]);
+    // Headings are cased by the design ("noch keine seite" in the dot designs).
+    let shows = |h: &mut Harness| ["Noch keine Seite".to_string(), "Noch keine Seite".to_lowercase(), "Noch keine Seite".to_uppercase()].iter().any(|t| h.find(t.as_str()).is_some());
+    assert!(shows(&mut h), "the empty state shows");
+    let add = n0te_desktop::theme::cased(n0te_desktop::i18n::tr("+ Seite"));
+    // The first "+ Seite" is the outline's footer; the empty state's is the last: either adds one.
+    let at = h.find(add.as_str()).expect("+ Seite");
+    h.click(at.center());
+    assert_eq!(open(&h).pages.total_pages, 1, "a first page");
+    assert!(!shows(&mut h));
+}
+
+#[test]
+fn a_long_outline_makes_only_the_rows_in_view_and_still_reaches_every_page() {
+    use n0te_core::notebook::{Background, SheetSpec};
+    use n0te_desktop::sidebar;
+    let root = temp_root("longoutline");
+    let lib = Library::open(&root).unwrap();
+    let nb = lib.create_notebook("Lang").unwrap();
+    for i in 0..300 {
+        nb.add_sheet(None, i, &SheetSpec::a4(if i % 50 == 7 { Background::Text } else { Background::Grid })).unwrap();
+    }
+    lib.save_notebook(&nb).unwrap();
+    let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1600.0, 900.0), 1.0).unwrap();
+    h.message(Message::Open(nb.id()));
+    h.events(&[]);
+    h.events(&[]);
+    let pages = sheet_nodes(&h);
+    for pictures in [false, true] {
+        h.message(Message::Outline(sidebar::Msg::Pictures(pictures)));
+        h.message(Message::Jump(pages[0].1.clone()));
+        h.message(Message::ToggleSidebar);
+        h.message(Message::ToggleSidebar);
+        h.events(&[]);
+        assert!(h.bounds_of(sidebar::page_id(&pages[0].0)).is_some(), "the first rows are made");
+        assert!(h.bounds_of(sidebar::page_id(&pages[250].0)).is_none(), "far down: not made");
+        // A page far down: showing the outline again scrolls there, and its row is made and shows.
+        h.message(Message::Jump(pages[250].1.clone()));
+        h.message(Message::ToggleSidebar);
+        h.message(Message::ToggleSidebar);
+        h.events(&[]);
+        h.events(&[]);
+        let row = h.bounds_of(sidebar::page_id(&pages[250].0)).unwrap_or_else(|| panic!("row 251 made (pictures: {pictures})"));
+        // Bounds are where the row lies in the list; the list is scrolled by its offset.
+        let (offset, _) = open(&h).outline.scroll.expect("scrolled");
+        let y = row.y - offset;
+        assert!(y > 60.0 && y + row.height < 880.0, "and in view: {row:?} at {y} (pictures: {pictures})");
+        // A click on it shows its page.
+        h.message(Message::Jump(pages[0].1.clone()));
+        h.click(iced::Point::new(row.center_x(), y + row.height / 2.0));
+        assert_eq!(open(&h).pages.current_number(&open(&h).camera), 251);
+    }
 }
 
 #[test]

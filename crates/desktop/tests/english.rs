@@ -153,7 +153,8 @@ fn the_settings_speak_english() {
     h.message(Message::ShowSettings(true));
     h.frame();
     assert_shows(&mut h, &["Settings", "Theme", "Spacing", "Between pages", "Text", "Language", "Automatic", "Deutsch", "English", "Devices", "Light", "Ocean", "Forest", "Close"]);
-    assert_shows(&mut h, &["Saved in ~/.config/n0te/laptop.conf", "Soft and calm: surfaces, not lines"]);
+    let footer = format!("{} {} · Saved in {}", n0te_desktop::app_name(), n0te_desktop::updater::VERSION, n0te_desktop::settings::path().display());
+    assert_shows(&mut h, &[footer.as_str(), "Soft and calm: surfaces, not lines"]);
     assert_hidden(&mut h, &["Abstände", "Sprache", "Geräte", "Hell", "Ozean"]);
     h.message(Message::ShowSettings(false));
     h.frame();
