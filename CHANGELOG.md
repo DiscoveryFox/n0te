@@ -6,6 +6,32 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [Unreleased]
+
+### Added
+
+- Designs: write your own with an AI. Settings › Design copies instructions for ChatGPT, Claude
+  or Gemini; paste the AI's answer back (or open/drop its `.json` file). n0te checks it, shows a
+  preview to apply or save, and otherwise lists exactly what the AI should fix. The same file
+  imports on Android, Windows and Linux; share a design from its card. Format:
+  [docs/styles.md](docs/styles.md).
+- Eight new designs: Christmas (snowfall and fairy lights), Blueprint (drafting grid),
+  Chalkboard, Starry night (twinkling stars), Cherry blossom (falling petals), Autumn (falling
+  leaves), Terminal (scanlines) and High contrast.
+- Decorations behind the library (only there, never while writing), with switches to turn them
+  off or hold them still.
+- Crash reports: after a crash, n0te (tablet, laptop, n0te Tablet) offers to copy or share a
+  report of what went wrong, or to open a GitHub issue for it. Reports contain no notes. On
+  Windows a crash used to vanish without a trace.
+- `scripts/test.sh`: the whole test suite (Rust and the Android JVM tests) in one fast run.
+
+### Changed
+
+- The designs now come from one shared set of files, so tablet and laptop look exactly alike;
+  the design picker groups them into Classic, Special and Your own.
+- Text on the accent colour follows the design (Forest's green buttons now carry dark text and
+  read better).
+
 ## [0.34.1] - 2026-11-26
 
 ### Fixed

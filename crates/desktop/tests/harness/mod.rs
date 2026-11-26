@@ -203,6 +203,11 @@ impl Harness {
         let mut t = FrameTimes::default();
         let s = Instant::now();
         let mut ui = UserInterface::build(self.app.view(), self.size, self.cache.take().unwrap_or_default(), &mut self.renderer);
+        // Like the event loop before every draw: widgets take their state from the redraw
+        // event (iced 0.14 buttons draw as disabled until they have seen one). What it asks
+        // for is left out, so a frame never changes the app.
+        let mut ignored = Vec::new();
+        let _ = ui.update(&[Event::Window(window::Event::RedrawRequested(Instant::now()))], self.cursor, &mut self.renderer, &mut self.clipboard, &mut ignored);
         t.view = s.elapsed().as_secs_f32() * 1000.0;
         let s = Instant::now();
         ui.draw(&mut self.renderer, &self.theme, &core::renderer::Style { text_color: theme::p().text }, self.cursor);

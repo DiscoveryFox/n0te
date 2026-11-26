@@ -94,9 +94,7 @@ class SettingsActivity : ComponentActivity() {
                     when (section) {
                         // The designs are tiles themselves: no box around them.
                         "design" -> Card("Design", "Farben, Formen und Schrift. Exportierte PDFs bleiben weiß.", boxed = false) {
-                            androidx.compose.foundation.layout.FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                                Themes.all.forEach { t -> StyleCard(t) }
-                            }
+                            DesignPicker { t -> Settings.set("theme", t.id); Ui.theme = t; recreate() }
                         }
                         "laptop" -> Card("Laptop", "Sync direkt zwischen Tablet und Laptop, ohne Server und ohne n0bridge.") { SyncCard() }
                         "input" -> {
@@ -407,41 +405,6 @@ class SettingsActivity : ComponentActivity() {
                 .addOnSuccessListener { b -> b.rawValue?.trim()?.let(done) }
                 .addOnFailureListener { e -> pairStatus = "QR-Scanner: ${e.message} — Code stattdessen unten einfügen" }
         }.onFailure { pairStatus = "QR-Scanner nicht verfügbar — Code unten einfügen" }
-    }
-
-    /** A design as a card: a miniature (its chrome, heading face, button shapes, paper), name, one line. */
-    @Composable
-    private fun StyleCard(t: Theme) {
-        val on = Ui.theme.id == t.id
-        val st = t.style
-        Column(Modifier.width(210.dp).option(on).clickable {
-            if (!on) { Settings.set("theme", t.id); Ui.theme = t; recreate() }
-        }.padding(10.dp)) {
-            val mini = RoundedCornerShape(minOf(st.card, 10f).dp)
-            Row(
-                Modifier.fillMaxWidth().height(86.dp).clip(mini).background(Color(t.bg)).border(1.dp, Color(t.border), mini).padding(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    val face = when (st.heading) { HeadingFace.DOT -> Type.Dot; HeadingFace.MONO -> Type.Mono; HeadingFace.SANS -> Type.Sans; HeadingFace.SERIF -> Type.Serif }
-                    Text(if (st.heading == HeadingFace.DOT) "aa" else "Aa", color = Color(t.fg), fontFamily = face,
-                        fontWeight = if (st.heading == HeadingFace.DOT) FontWeight.Black else FontWeight.Bold, fontSize = if (st.heading == HeadingFace.DOT) 28.sp else 24.sp)
-                    Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        val r = RoundedCornerShape(minOf(st.button, 7f).dp)
-                        Box(Modifier.size(width = 34.dp, height = 12.dp).clip(r).background(Color(t.accent)))
-                        val (bg, line) = when (st.fill) {
-                            Fill.OUTLINE -> Color.Transparent to Color(t.border)
-                            Fill.TONAL -> (if (t.dark) Color(t.accent).copy(alpha = 0.22f) else Color(t.elevated)) to Color.Transparent
-                            Fill.RULE -> Color.Transparent to Color(t.fg).copy(alpha = 0.6f)
-                        }
-                        Box(Modifier.size(width = 28.dp, height = 12.dp).clip(r).background(bg).then(if (line.alpha > 0f) Modifier.border(1.dp, line, r) else Modifier))
-                    }
-                }
-                Box(Modifier.size(width = 34.dp, height = 46.dp).clip(RoundedCornerShape(minOf(st.card, 3f).dp)).background(Color(t.paper)))
-            }
-            Text(t.name, color = Ui.Chalk, fontSize = 15.sp, fontFamily = Voice.titleFont, fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 8.dp))
-            Text(st.desc, color = Ui.Muted, fontSize = 12.sp, lineHeight = 15.sp)
-        }
     }
 
     /** A titled group of settings. */

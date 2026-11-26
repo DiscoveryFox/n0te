@@ -15,6 +15,7 @@ import java.util.concurrent.Executors
 class N0teApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        CrashLog.install(this)
         N0te.init(this)
     }
 }
@@ -44,6 +45,7 @@ object N0te {
 
     fun init(app: Application) {
         Settings.load(app)
+        Themes.load(app)
         Ui.theme = Themes.byId(Settings.theme)
         Tools.load(app)
         Pencil.refresh()
@@ -145,7 +147,7 @@ object Tools {
 /** Nothing look: black chrome, white paper, one red accent. All colours live here. */
 object Ui {
     /** The current theme (settings); activities re-create when it changes. */
-    var theme: Theme = Themes.all[0]
+    var theme: Theme = Themes.fallback
     /** Background. */
     val Black: Color get() = Color(theme.bg)
     val Surface: Color get() = Color(theme.surface)
@@ -157,7 +159,7 @@ object Ui {
     /** The accent. */
     val Red: Color get() = Color(theme.accent)
     /** Text/icons on the accent. */
-    val OnAccent: Color get() = Color.White
+    val OnAccent: Color get() = Color(theme.onAccent)
     val Paper: Color get() = Color(theme.paper)
     /** Floating bars and menus: opaque, so nothing on the page shows through them. */
     val Bar: Color get() = Color(theme.surface)

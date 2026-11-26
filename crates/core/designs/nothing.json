@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "nothing",
+  "name": "Nothing",
+  "name_en": "Nothing",
+  "description": "Punktmatrix, Pillen, ein rotes Signal",
+  "description_en": "Dot matrix, pills, one red signal",
+  "dark": true,
+  "colors": {
+    "background": "#000000",
+    "surface": "#141416",
+    "surface_2": "#1e1e22",
+    "border": "#262629",
+    "text": "#f2f2f4",
+    "muted": "#787880",
+    "accent": "#d71921",
+    "on_accent": "#ffffff",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 20, "cards": 18, "panels": 22 },
+  "labels": "mono_caps",
+  "headings": "dot",
+  "fill": "outline",
+  "shadows": false
+}

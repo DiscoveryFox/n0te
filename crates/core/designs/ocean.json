@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "ocean",
+  "name": "Ozean",
+  "name_en": "Ocean",
+  "description": "Kühl und rund: getönte Pillen",
+  "description_en": "Cool and round: tinted pills",
+  "dark": true,
+  "colors": {
+    "background": "#080d17",
+    "surface": "#0f1626",
+    "surface_2": "#182235",
+    "border": "#233048",
+    "text": "#e8eef8",
+    "muted": "#7c8aa3",
+    "accent": "#3b82f6",
+    "on_accent": "#ffffff",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 22, "cards": 20, "panels": 24 },
+  "labels": "sans",
+  "headings": "sans",
+  "fill": "tonal",
+  "shadows": true
+}

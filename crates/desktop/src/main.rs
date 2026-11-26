@@ -2,6 +2,7 @@
 //! and opened. On Windows this binary ships as n0te-laptop.exe.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 fn main() -> iced::Result {
+    n0te_desktop::crash::install("n0te Laptop");
     // A downloaded update installs before the window opens (the installer starts us again).
     if n0te_desktop::updater::apply_pending("laptop") {
         return Ok(());

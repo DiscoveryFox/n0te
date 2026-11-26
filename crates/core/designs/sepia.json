@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "sepia",
+  "name": "Sepia",
+  "name_en": "Sepia",
+  "description": "Papier und Druck: Serifen, feine Rahmen",
+  "description_en": "Paper and print: serifs, fine frames",
+  "dark": false,
+  "colors": {
+    "background": "#ede3d1",
+    "surface": "#f7f0e3",
+    "surface_2": "#e6d9c2",
+    "border": "#d5c4a6",
+    "text": "#2b2118",
+    "muted": "#7a6a55",
+    "accent": "#b45309",
+    "on_accent": "#ffffff",
+    "paper": "#fbf6ea"
+  },
+  "corners": { "buttons": 4, "cards": 4, "panels": 8 },
+  "labels": "serif",
+  "headings": "serif",
+  "fill": "outline",
+  "shadows": false
+}

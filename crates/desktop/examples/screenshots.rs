@@ -247,10 +247,40 @@ fn main() {
     h.app.history = Some(list);
     shot(&mut h, "history");
 
+    // 14. Designs: the library in the Christmas design (snow and fairy lights, held still), and
+    // the design picker in the settings with an AI-written design waiting to be applied.
+    h.message(Message::Back);
+    h.message(Message::SetTheme("christmas"));
+    h.app.settings.decor_motion = false;
+    shot(&mut h, "christmas");
+    h.message(Message::DesignText(Some(TEA_HOUSE.into())));
+    settle(&mut h);
+    h.scroll(iced::Point::new(W / 2.0, H / 2.0), 0.0, -360.0);
+    shot(&mut h, "designs");
+    h.message(Message::DesignDiscard);
+    h.message(Message::ShowSettings(false));
+    h.message(Message::SetTheme("nothing"));
+
     println!("screenshots in {}", out.display());
     drop(h);
     let _ = std::fs::remove_dir_all(scratch);
 }
+
+/// A design as an AI writes it (README picture of the import).
+const TEA_HOUSE: &str = r##"Gern! Hier ist dein Design:
+```json
+{
+  "n0te_style": 1,
+  "name": "Teehaus",
+  "name_en": "Tea house",
+  "description": "Reispapier, Matcha und Tusche",
+  "description_en": "Rice paper, matcha and ink",
+  "colors": { "background": "#efe8db", "surface": "#faf6ee", "text": "#26221c", "muted": "#7a7062", "accent": "#5b7f4a", "paper": "#fffdf8" },
+  "corners": { "buttons": 6, "cards": 10, "panels": 12 },
+  "labels": "serif", "headings": "serif", "fill": "outline", "shadows": false,
+  "decorations": [{ "kind": "leaves", "colors": ["#7d9b5f", "#a7b98a"], "amount": 0.25 }]
+}
+```"##;
 
 /// Stands in for n0te-sync on the run's own socket, so the app shows its connected panels: GUI
 /// sessions stay open (nothing is sent), every one-shot request gets "not here".

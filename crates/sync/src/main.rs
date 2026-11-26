@@ -122,6 +122,13 @@ fn device_name() -> String {
 }
 
 fn main() {
+    // A panic goes to the log file too (on Windows the service has no console; elsewhere the
+    // usual panic output reaches the journal).
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_file(&format!("n0te-sync {} panicked: {info}\n{}", env!("CARGO_PKG_VERSION"), std::backtrace::Backtrace::force_capture()));
+        previous(info);
+    }));
     let args: Vec<String> = std::env::args().skip(1).collect();
     // `n0te-sync run` too: its log then shows in the terminal it was typed in.
     if !args.is_empty() {
@@ -149,13 +156,19 @@ type Res<T> = std::result::Result<T, String>;
 
 fn log(msg: &str) {
     eprintln!("{msg}");
-    // Windows: the service has no console, so it also keeps a log file.
+    log_file(msg);
+}
+
+/// Windows: the service has no console, so it also keeps a log file.
+fn log_file(msg: &str) {
     #[cfg(windows)]
     if let Some(f) = LOG_FILE.get()
         && let Ok(mut f) = f.lock()
     {
         let _ = writeln!(f, "{msg}");
     }
+    #[cfg(not(windows))]
+    let _ = msg;
 }
 
 /// The service's log on Windows: `n0te-sync.log` in its scratch folder, new at every start.

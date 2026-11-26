@@ -1,0 +1,28 @@
+{
+  "n0te_style": 1,
+  "id": "sakura",
+  "name": "Kirschblüte",
+  "name_en": "Cherry blossom",
+  "description": "Zartrosa und rund, fallende Blütenblätter",
+  "description_en": "Soft pink and round, falling petals",
+  "dark": false,
+  "colors": {
+    "background": "#fff1f4",
+    "surface": "#ffffff",
+    "surface_2": "#fce3ea",
+    "border": "#f1c9d5",
+    "text": "#3b1e2b",
+    "muted": "#8c6474",
+    "accent": "#d6336c",
+    "on_accent": "#ffffff",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 20, "cards": 22, "panels": 26 },
+  "labels": "sans",
+  "headings": "serif",
+  "fill": "tonal",
+  "shadows": true,
+  "decorations": [
+    { "kind": "petals", "colors": ["#f9a8c2", "#fbcfe0", "#f472a6"], "amount": 0.45 }
+  ]
+}
