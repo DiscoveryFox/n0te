@@ -775,6 +775,11 @@ impl App {
         self.stamps.remove(nb);
         self.headings_due.remove(nb);
         self.presence_at.remove(nb);
+        self.tablet_forget(nb);
+        // Following its owner (as a guest) ends with it.
+        if self.joined.iter().any(|j| j.notebook == nb && self.follow_host.as_deref() == Some(j.owner.as_str())) {
+            self.follow_host = None;
+        }
         if self.watched(nb)
             && let Some(sync) = &self.sync
         {
@@ -893,9 +898,14 @@ impl App {
                 }
                 self.plot_edit = None;
                 self.live_session = None;
-                self.share = None;
-                self.history = None;
+                self.follow_host = None;
+                self.close_panels();
                 self.undo_delete = None;
+                if let Screen::Notebook(s) = &self.screen {
+                    for nb in s.notebooks() {
+                        self.tablet_forget(&nb);
+                    }
+                }
                 self.screen = Screen::Library;
                 self.stamps.clear();
                 self.headings_due.clear();
@@ -1917,7 +1927,9 @@ impl App {
         }
         self.finish_text();
         let Some(nb) = self.notebook_id() else { return Task::none() };
-        let Some(plot) = self.lib.load_sheet(&nb, sheet_id).ok().and_then(|s| s.plots().into_iter().find(|p| p.id == plot_id)) else { return Task::none() };
+        // n0te Tablet: as kept open here (its file may still be on its way).
+        let plots = if crate::mode() == crate::Mode::Tablet { self.tablet_sheet(&nb, sheet_id).map(|s| s.plots()) } else { self.lib.load_sheet(&nb, sheet_id).ok().map(|s| s.plots()) };
+        let Some(plot) = plots.and_then(|p| p.into_iter().find(|p| p.id == plot_id)) else { return Task::none() };
         let paper = self.paper_of(sheet_id);
         self.plot_edit = Some(crate::plots::Editor::new(sheet_id, plot, paper));
         self.plot_pane = self.pane().map(|o| o.key).unwrap_or_default();
@@ -1966,6 +1978,15 @@ impl App {
             return false;
         }
         let Some(nb) = self.notebook_id() else { return false };
+        // n0te Tablet changes its pages through the copies it keeps open: the edit is one step
+        // of its undo, and the page's background saves stay in order.
+        if crate::mode() == crate::Mode::Tablet {
+            let changed = self.edit_kept(&nb, sheet_id, f);
+            if changed {
+                self.remember(crate::tablet::Edit::Sheet(nb, sheet_id.to_string()));
+            }
+            return changed;
+        }
         let sheet = match self.lib.load_sheet(&nb, sheet_id) {
             Ok(s) => s,
             Err(e) => {
@@ -2332,6 +2353,17 @@ impl App {
     fn refresh_open(&mut self, nb: &str, index: bool, sheets: &[String]) {
         let lib = self.lib.clone();
         let layout = self.settings.layout();
+        // n0te Tablet's pages kept open take in what came, and the view shows them from memory:
+        // the file may still lack the last strokes (their save is on its way), and reading it
+        // made them blink away until then.
+        let kept = self.tablet.kept_of(nb);
+        let stamp = lib.change_stamp(nb);
+        for (id, sheet) in &kept {
+            if sheets.is_empty() || sheets.contains(id) {
+                let _ = lib.refresh_sheet(nb, id, sheet);
+                self.tablet.caught_up(nb, id, stamp);
+            }
+        }
         let Screen::Notebook(s) = &mut self.screen else { return };
         let Some(first) = s.panes.iter().find(|o| o.id == nb) else { return };
         if index || sheets.is_empty() {
@@ -2346,7 +2378,10 @@ impl App {
             }
             let all: Vec<String> = if sheets.is_empty() { o.pages.pages.iter().map(|p| p.placed.sheet_id.clone()).collect() } else { sheets.to_vec() };
             for s in &all {
-                o.pages.reload_sheet(s);
+                match kept.get(s) {
+                    Some(k) => o.pages.reload_sheet_from(s, k),
+                    None => o.pages.reload_sheet(s),
+                }
             }
             // An open text page that hasn't been typed in since: show the new text.
             if let Some(t) = &mut o.text_page

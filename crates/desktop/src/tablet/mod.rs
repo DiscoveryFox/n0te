@@ -186,6 +186,15 @@ pub(crate) enum Edit {
     Space(String, String, bool, String, extras::Shape, extras::Shape),
 }
 
+impl Edit {
+    /// The notebook the edit was made in.
+    fn notebook(&self) -> &str {
+        match self {
+            Edit::Sheet(nb, _) | Edit::Space(nb, ..) => nb,
+        }
+    }
+}
+
 /// Selected strokes on one sheet.
 #[derive(Debug, Clone)]
 pub struct Selection {
@@ -294,6 +303,19 @@ impl Default for Tablet {
 }
 
 impl Tablet {
+    /// The sheets of notebook `nb` kept open here (they may hold edits still on their way to
+    /// disk): sheet id → sheet.
+    pub(crate) fn kept_of(&self, nb: &str) -> HashMap<String, std::sync::Arc<Sheet>> {
+        self.sheets.iter().filter(|((n, _), _)| n == nb).map(|((_, s), (sheet, _))| (s.clone(), sheet.clone())).collect()
+    }
+
+    /// Kept sheet `sheet` of `nb` caught up with the notebook's files at change stamp `stamp`.
+    pub(crate) fn caught_up(&mut self, nb: &str, sheet: &str, stamp: u64) {
+        if let Some(k) = self.sheets.get_mut(&(nb.to_string(), sheet.to_string())) {
+            k.1 = stamp;
+        }
+    }
+
     /// Where the tool choice is kept: tablet.conf next to the app's settings.
     fn conf_path() -> std::path::PathBuf {
         crate::settings::path().with_file_name("tablet.conf")
@@ -532,6 +554,10 @@ impl App {
                     && s.set_index(&put, &drop).is_ok()
                 {
                     self.store_kept(&nb, &sheet);
+                }
+                // Read for a notebook that left the screen meanwhile: let go of its page.
+                if !matches!(&self.screen, Screen::Notebook(s) if s.shows(&nb)) && !self.tablet.index_due.contains_key(&(nb.clone(), sheet.clone())) {
+                    self.tablet.sheets.remove(&(nb, sheet));
                 }
             }
         }
@@ -833,17 +859,13 @@ impl App {
             return Task::none();
         }
         if let Some(m) = self.tablet.moving.take() {
-            let Some(sel) = self.tablet.selection.clone() else { return Task::none() };
-            if let Screen::Notebook(split) = &mut self.screen
-                && let Some(o) = split.pane_mut(m.pane)
-            {
-                let mut live = o.pages.live.borrow_mut();
-                for (id, _, _) in &m.strokes {
-                    live.remove(&(LOCAL.to_string(), hash_id(&format!("sel:{id}"))));
+            self.end_move_preview(&m);
+            let Some(sel) = self.tablet.selection.clone() else {
+                if let Some(nb) = self.pane_notebook(m.pane) {
+                    self.reload_kept(m.pane, &nb, &m.sheet);
                 }
-                drop(live);
-                o.pages.erasing.borrow_mut().remove(&m.sheet);
-            }
+                return Task::none();
+            };
             if m.dx != 0.0 || m.dy != 0.0 || m.scale != 1.0 {
                 let (dx, dy, k, ox, oy) = (m.dx, m.dy, m.scale, m.bounds.x0, m.bounds.y0);
                 self.edit_tracked(&sel.notebook, &sel.sheet, |s| s.transform(&sel.ids, dx, dy, k, ox, oy));
@@ -977,9 +999,56 @@ impl App {
             }
             self.reload_kept(er.pane, &er.notebook, &er.sheet);
         }
+        // A selection being moved stays where it was (its previews go, its strokes show again).
+        if let Some(m) = self.tablet.moving.take() {
+            self.end_move_preview(&m);
+            if let Some(nb) = self.pane_notebook(m.pane) {
+                self.reload_kept(m.pane, &nb, &m.sheet);
+            }
+        }
         self.tablet.lassoing = None;
         self.tablet.lasso_outline = None;
         self.extras_cancel();
+    }
+
+    /// The previews of a selection being moved go, its strokes show again where they are.
+    fn end_move_preview(&mut self, m: &Moving) {
+        if let Screen::Notebook(split) = &mut self.screen
+            && let Some(o) = split.pane_mut(m.pane)
+        {
+            let mut live = o.pages.live.borrow_mut();
+            for (id, _, _) in &m.strokes {
+                live.remove(&(LOCAL.to_string(), hash_id(&format!("sel:{id}"))));
+            }
+            drop(live);
+            o.pages.erasing.borrow_mut().remove(&m.sheet);
+        }
+    }
+
+    fn pane_notebook(&self, key: PaneKey) -> Option<String> {
+        match &self.screen {
+            Screen::Notebook(s) => s.pane(key).map(|o| o.id.clone()),
+            Screen::Library => None,
+        }
+    }
+
+    /// Notebook `nb` left the screen: this app's undo steps, the selection and the sheets kept
+    /// open for it go (an undo, or Delete on a selection, must never change a notebook nobody
+    /// sees; and its pages no longer stay in memory).
+    pub(crate) fn tablet_forget(&mut self, nb: &str) {
+        let t = &mut self.tablet;
+        t.undo.retain(|e| e.notebook() != nb);
+        t.redo.retain(|e| e.notebook() != nb);
+        if t.selection.as_ref().is_some_and(|s| s.notebook == nb) {
+            t.selection = None;
+        }
+        // Handwriting still to be read keeps its sheet (it is read once, then let go).
+        let due: std::collections::HashSet<&(String, String)> = t.index_due.keys().collect();
+        t.sheets.retain(|k, _| k.0 != nb || due.contains(k));
+        if t.loupe.as_ref().is_some_and(|l| l.notebook == nb) {
+            t.loupe = None;
+        }
+        t.flow = None;
     }
 
     /// Shows what the eraser takes so far (hidden strokes / cut area) before it is stored.
@@ -1039,7 +1108,7 @@ impl App {
     }
 
     /// The sheet kept open for edits (and undo), loaded on first use.
-    fn tablet_sheet(&mut self, nb: &str, sheet: &str) -> Option<&Sheet> {
+    pub(crate) fn tablet_sheet(&mut self, nb: &str, sheet: &str) -> Option<&Sheet> {
         let k = (nb.to_string(), sheet.to_string());
         let stamp = self.lib.change_stamp(nb);
         if !self.tablet.sheets.contains_key(&k) {
