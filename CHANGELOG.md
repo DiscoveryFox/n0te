@@ -6,6 +6,37 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [0.36.0] - unreleased
+
+### Added
+
+- Laser pointer: a new look, the same on every device: a soft glowing dot and a smooth trail
+  that thins and fades towards its end (it used to be a jagged line, and a red dot jumping ten
+  times a second on the other devices). Guests now see it, also when they are connected to the
+  laptop and the tablet points, and guests can point too, each in their own colour. On n0te
+  Laptop hold L and the mouse is a laser pointer.
+- Links in PDFs work: tap (tablet, where fingers don't write) or click (laptop) a link to jump
+  to the page it points to (back with the back gesture or Alt+←), or to open a web address in
+  the browser.
+- Importing a PDF turns its table of contents into groups, two levels deep; a chapter of a
+  single page becomes that page's title. Can be switched off (Settings › PDF on the laptop,
+  Einstellungen › Seiten on the tablet).
+- Favourite pens: up to six pens with their type, colour, width and line in the tool bar; "+"
+  keeps the pen as it is now, a tap picks one, holding (tablet) or a right click (n0te Tablet)
+  removes it; keys 1–6 on n0te Tablet.
+- Dashed, dotted and dash-dot lines (pen menu, and "Linie" for a selection). Older versions
+  show them as solid lines.
+
+### Fixed
+
+- Scribbling out reacts to what is underneath: colouring in and hatching no longer delete the
+  outline they touch (they stay ink), and a quick scribble over a single letter now deletes it.
+  Only what the scribble really covers goes; a long line it crosses keeps its ends, pictures
+  and graphs go when they are mostly covered. One undo brings it all back.
+- What a guest scribbled out sometimes stayed on the owner's screen (and the other way round):
+  the scribble itself stayed visible there. It now goes at once, and strokes from elsewhere that
+  are never stored don't stay for good.
+
 ## [0.35.0] - 2026-11-26
 
 ### Added
