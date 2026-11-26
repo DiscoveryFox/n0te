@@ -57,6 +57,9 @@ pub enum FfiSyncEvent {
     Screenshot { device: String, image: Vec<u8> },
     /// Another device is erasing: strokes it hid, area-eraser dabs as x, y, r triples.
     LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<f32> },
+    /// A laser pointer moving: samples as x, y, t (ms) triples since the last one, `down` false
+    /// when it lifts. `who` points (an own device, the owner or a guest), `guest` as a guest.
+    Laser { device: String, notebook: String, sheet: String, who: String, samples: Vec<f32>, down: bool, guest: bool },
     OpenRequest { device: String, notebook: String },
     FollowRequest { device: String, on: bool },
     GuestJoined { invite: String, notebook: String, name: String, device: String },
@@ -183,6 +186,7 @@ fn event(e: Event) -> FfiSyncEvent {
         Event::LatexResult { device, id, latex, engine, error } => FfiSyncEvent::LatexResult { device, id, latex, engine, error },
         Event::Screenshot { device, image } => FfiSyncEvent::Screenshot { device, image },
         Event::LiveErase { device, notebook, sheet, ids, dabs } => FfiSyncEvent::LiveErase { device, notebook, sheet, ids, dabs: dabs.iter().flatten().copied().collect() },
+        Event::Laser { device, notebook, sheet, who, samples, down, guest } => FfiSyncEvent::Laser { device, notebook, sheet, who, samples: samples.iter().flatten().copied().collect(), down, guest },
         Event::LiveStroke { device, notebook, sheet, stroke, seq, brush, samples, done } => FfiSyncEvent::LiveStroke {
             device,
             notebook,
@@ -295,6 +299,15 @@ impl SyncEngine {
         self.with(|e| {
             let d: Vec<[f32; 3]> = dabs.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
             e.send_live_erase(&notebook, &sheet, &ids, &d);
+            Ok(())
+        })
+    }
+    /// The laser pointer on `sheet`: samples as x, y, t (ms) triples since the last call (sheet
+    /// points), `down` false once the pen lifts. Guests see it too.
+    pub fn send_laser(&self, notebook: String, sheet: String, samples: Vec<f32>, down: bool) -> R<()> {
+        self.with(|e| {
+            let s: Vec<[f32; 3]> = samples.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect();
+            e.send_laser(&notebook, &sheet, &s, down);
             Ok(())
         })
     }

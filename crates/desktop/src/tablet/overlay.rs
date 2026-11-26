@@ -36,8 +36,6 @@ struct Overlay {
     lasso: Option<Vec<Point>>,
     /// The selection's frame in page coordinates.
     frame: Option<Rect>,
-    /// The laser point (page coordinates).
-    laser: Option<Point>,
     /// The pen hovering: where (page coordinates) and the ring's radius in px.
     hover: Option<(Point, f32)>,
     ruler: Option<tools::Ruler>,
@@ -140,11 +138,6 @@ impl canvas::Program<Message> for Overlay {
         if let Some((p, r)) = self.hover {
             let c = at(p.x, p.y);
             frame.stroke(&Path::circle(c, r), Stroke::default().with_color(Color { a: 0.7, ..theme::INK }).with_width(1.0));
-        }
-        if let Some(p) = self.laser {
-            let c = at(p.x, p.y);
-            frame.fill(&Path::circle(c, 14.0), Color { a: 0.18, ..accent });
-            frame.fill(&Path::circle(c, 6.0), accent);
         }
         vec![frame.into_geometry()]
     }
@@ -264,7 +257,6 @@ fn view<'a>(app: &'a App, t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Mess
         let (x0, y0) = (placed.placed.rect.x0, placed.placed.rect.y0);
         Some(Rect::new(r.x0 + x0, r.y0 + y0, r.x1 + x0, r.y1 + y0))
     });
-    let laser = t.laser.filter(|(k, _)| *k == o.key).map(|(_, p)| p);
     // Hovering: a ring as big as the eraser (eraser) or the line (pens), not while writing.
     let hover = t.hover.filter(|(k, _)| *k == o.key && !t.busy()).map(|(_, p)| {
         let r = match t.tool {
@@ -301,11 +293,11 @@ fn view<'a>(app: &'a App, t: &'a Tablet, o: &'a Open) -> Option<Element<'a, Mess
         let line = t.flow.as_ref().filter(|f| f.sheet == p.sheet_id).map(|f| (f.top + f.bottom) / 2.0);
         Some((Rectangle::new(Point::new(band.x - o.camera.origin.x, band.y - o.camera.origin.y), band.size()), glyph, line))
     });
-    if lasso.is_none() && frame.is_none() && laser.is_none() && hover.is_none() && ruler.is_none() && handles.is_empty() && ghost.is_none() && space.is_none() && loupe.is_none() && flow.is_none() {
+    if lasso.is_none() && frame.is_none() && hover.is_none() && ruler.is_none() && handles.is_empty() && ghost.is_none() && space.is_none() && loupe.is_none() && flow.is_none() {
         return None;
     }
     let held = held.map(|h| h.handle.dir);
-    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, laser, hover, ruler, handles, held, ghost, space, loupe, flow }).width(Length::Fill).height(Length::Fill).into())
+    Some(canvas::Canvas::new(Overlay { camera: o.camera, lasso, frame, hover, ruler, handles, held, ghost, space, loupe, flow }).width(Length::Fill).height(Length::Fill).into())
 }
 
 /// The writing magnifier's strip over its pane: the frame's part of the page, large (its own

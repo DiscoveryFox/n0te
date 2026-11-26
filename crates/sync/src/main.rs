@@ -78,6 +78,7 @@ fn event_json(e: &Event) -> Option<String> {
         Event::LatexRequest { device, id, png } => json!({ "t": "latex_request", "device": device, "id": id, "bytes": png.len() }),
         Event::LatexResult { device, id, latex, engine, error } => json!({ "t": "latex_result", "device": device, "id": id, "latex": latex, "engine": engine, "error": error }),
         Event::LiveErase { device, notebook, sheet, ids, dabs } => json!({ "t": "erase", "device": device, "notebook": notebook, "sheet": sheet, "ids": ids, "dabs": dabs }),
+        Event::Laser { device, notebook, sheet, who, samples, down, guest } => json!({ "t": "laser", "device": device, "notebook": notebook, "sheet": sheet, "who": who, "samples": samples, "down": down, "guest": guest }),
         Event::OpenRequest { device, notebook } => json!({ "t": "open", "device": device, "notebook": notebook }),
         Event::FollowRequest { device, on } => json!({ "t": "follow", "device": device, "on": on }),
         Event::GuestJoined { invite, notebook, name, device } => json!({ "t": "guest", "invite": invite, "notebook": notebook, "name": name, "device": device, "on": true }),
@@ -615,6 +616,12 @@ fn dispatch(engine: &Engine, args: &[String]) -> Res<String> {
                 }
                 std::thread::sleep(Duration::from_millis(100));
             }
+        }
+        // laser <notebook> <sheet> <samples json array of [x, y, t_ms]> <down 1/0>
+        "laser" => {
+            let samples: Vec<[f32; 3]> = args.get(3).and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            engine.send_laser(&arg(1, "Notizbuch")?, &arg(2, "Blatt")?, &samples, args.get(4).is_some_and(|d| d == "1"));
+            String::new()
         }
         // erase <notebook> <sheet> <ids json array> <dabs json array of [x, y, r]>
         "erase" => {

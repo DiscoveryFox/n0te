@@ -473,6 +473,37 @@ fn wait_event(rx: &Receiver<Event>, what: &str, f: impl Fn(&Event) -> bool) -> E
 }
 
 #[test]
+fn the_laser_reaches_guests_through_the_owner_and_guests_point_back() {
+    // The tablet points, the guest is connected to the laptop: before 0.36 the laptop showed
+    // the tablet's laser but never passed it on.
+    let (rl, rt, rg) = (root("las-l"), root("las-t"), root("las-g"));
+    let laptop = engine(&rl, "Laptop");
+    let tablet = engine(&rt, "Tablet");
+    pair(&laptop, &tablet);
+    wait("online", || laptop.devices().iter().all(|d| d.online) && tablet.devices().iter().all(|d| d.online));
+    let (nb, sheet) = notebook_with_strokes(&rl, "Vortrag", 1);
+    wait("the tablet has the notebook", || strokes(&rt, &nb, &sheet) == 1);
+    let guest = engine(&rg, "Mia");
+    let (guest_events, tablet_events, laptop_events) = (guest.events().unwrap(), tablet.events().unwrap(), laptop.events().unwrap());
+    guest.join(&laptop.create_invite(&nb, Role::Read, 0).unwrap()).unwrap();
+    wait("the guest is in", || guest.joined().iter().all(|j| j.online));
+
+    let pts: Vec<[f32; 3]> = (0..10).map(|i| [100.0 + i as f32, 200.0, i as f32 * 16.0]).collect();
+    tablet.send_laser(&nb, &sheet, &pts, true);
+    let e = wait_event(&guest_events, "the tablet's laser at the guest", |e| matches!(e, Event::Laser { .. }));
+    assert!(matches!(&e, Event::Laser { who, samples, guest: false, down: true, .. } if *who == tablet.node_id() && samples.len() == 10), "{e:?}");
+    wait_event(&laptop_events, "the tablet's laser at the laptop", |e| matches!(e, Event::Laser { guest: false, .. }));
+
+    // A read-only guest points too: the owner's own devices see it, marked as a guest's.
+    guest.send_laser(&nb, &sheet, &pts[..3], false);
+    let e = wait_event(&tablet_events, "the guest's laser at the tablet", |e| matches!(e, Event::Laser { .. }));
+    assert!(matches!(&e, Event::Laser { who, guest: true, down: false, .. } if *who == guest.node_id()), "{e:?}");
+    // Nothing comes back round to the one who pointed.
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(guest_events.try_iter().all(|e| !matches!(e, Event::Laser { who, .. } if who == guest.node_id())));
+}
+
+#[test]
 fn live_presence_strokes_and_open_requests() {
     let (ra, rb) = (root("la"), root("lb"));
     let a = engine(&ra, "Laptop");

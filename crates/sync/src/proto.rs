@@ -105,6 +105,11 @@ pub enum Live {
     /// hidden by the stroke eraser, and/or area-eraser dabs (x, y, radius in sheet points).
     /// Added after v1: older peers can't decode it and ignore it.
     Erase { notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
+    /// A laser pointer moving, added after 0.35 (older peers can't decode it and ignore it):
+    /// its samples since the last message (x, y in sheet points, t in ms on the pointing
+    /// device's clock), `down` false once it lifts. `who` is the pointing device (kept when an
+    /// owner passes the pointer on), `guest` whether it points as a guest.
+    Laser { notebook: String, sheet: String, who: String, samples: Vec<[f32; 3]>, down: bool, guest: bool },
 }
 
 pub fn encode<T: Serialize>(v: &T) -> Vec<u8> {

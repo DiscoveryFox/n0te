@@ -725,6 +725,7 @@ class NotebookActivity : ComponentActivity() {
                     if (presenceOwner(nbId) === this@Pane) SyncHub.presence(nbId, sheetId, rect, zoom, laser)
                 }
                 override fun erase(sheetId: String, ids: List<String>, dabs: FloatArray) = SyncHub.liveErase(nbId, sheetId, ids, dabs)
+                override fun laser(sheetId: String, samples: FloatArray, down: Boolean) = SyncHub.laser(nbId, sheetId, samples, down)
             }
             container = FrameLayout(this@NotebookActivity).apply {
                 addView(view, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -1506,6 +1507,8 @@ class NotebookActivity : ComponentActivity() {
                 is uniffi.n0te_ffi.FfiSyncEvent.GuestWaiting -> if (e.notebook == id && e.on && leads) flash("${e.name} möchte herein · tippe unten rechts auf „wartet“")
                 is uniffi.n0te_ffi.FfiSyncEvent.GuestLeft -> if (e.notebook == id) { guestPages = guestPages - e.device; view.hideRemote(e.device) }
                 is uniffi.n0te_ffi.FfiSyncEvent.LiveErase -> if (e.notebook == id) view.remoteErase(e.sheet, e.ids)
+                // Pointers: own devices', the owner's and guests' (each in its colour).
+                is uniffi.n0te_ffi.FfiSyncEvent.Laser -> if (e.notebook == id) view.remoteLaser(e.who, e.sheet, e.samples.toFloatArray(), e.down, e.guest)
                 is uniffi.n0te_ffi.FfiSyncEvent.FollowRequest -> {
                     following = if (e.on) e.device else null
                     view.followDevice = following

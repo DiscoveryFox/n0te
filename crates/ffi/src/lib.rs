@@ -19,6 +19,7 @@ uniffi::setup_scaffolding!();
 
 mod android;
 mod edit;
+mod laser;
 pub mod sync;
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]

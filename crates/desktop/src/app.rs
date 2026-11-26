@@ -677,8 +677,8 @@ impl App {
             if crate::mode() == crate::Mode::Tablet { crate::tablet::pen::subscription().map(Message::Pen) } else { Subscription::none() },
             // n0te Tablet: frames while a stroke is drawn (shapes snap when the pen rests).
             if crate::mode() == crate::Mode::Tablet && self.tablet_wants_frames() { iced::window::frames().map(|_| Message::Tablet(crate::tablet::Msg::Frame)) } else { Subscription::none() },
-            // The frame clock: a gliding page, a found spot fading.
-            if self.glide.is_some() || matches!(&self.screen, Screen::Notebook(s) if s.panes.iter().any(|o| o.pages.flash.as_ref().is_some_and(|f| !f.done()))) {
+            // The frame clock: a gliding page, a found spot fading, laser pointers.
+            if self.glide.is_some() || self.lasers_moving() || matches!(&self.screen, Screen::Notebook(s) if s.panes.iter().any(|o| o.pages.flash.as_ref().is_some_and(|f| !f.done()))) {
                 iced::window::frames().map(Message::Glide)
             } else {
                 Subscription::none()
@@ -872,6 +872,32 @@ impl App {
     }
 
     /// The pane showing notebook `nb` that speaks for it (see [`Split::owner`]).
+    /// Laser pointers to draw (anyone's) or to send (this app's).
+    fn lasers_moving(&self) -> bool {
+        let now = crate::pages::laser_now();
+        matches!(&self.screen, Screen::Notebook(s) if s.panes.iter().any(|o| !o.pages.lasers.borrow().is_empty() || o.pages.own_laser.borrow().busy(now)))
+    }
+
+    /// Each frame: this app's pointer goes out in bursts (at most every 33 ms, and its lift),
+    /// others' pointers that faded are forgotten.
+    pub(crate) fn send_lasers(&mut self) {
+        let Screen::Notebook(s) = &self.screen else { return };
+        let now = crate::pages::laser_now();
+        for o in &s.panes {
+            o.pages.lasers.borrow_mut().retain(|_, m| !m.replay.look(now, n0te_core::laser::Style::SHORT).gone);
+            let mut own = o.pages.own_laser.borrow_mut();
+            let due = own.lift_out || (!own.out.is_empty() && now - own.sent_at >= 33.0);
+            let Some(sheet) = own.sheet_id.clone().filter(|_| due) else { continue };
+            let samples = std::mem::take(&mut own.out);
+            let down = !own.lift_out;
+            own.lift_out = false;
+            own.sent_at = now;
+            if let Some(sync) = &self.sync {
+                sync.send(&["laser".to_string(), o.id.clone(), sheet, serde_json::to_string(&samples).unwrap_or_default(), if down { "1" } else { "0" }.to_string()]);
+            }
+        }
+    }
+
     pub fn pane_showing(&self, nb: &str) -> Option<PaneKey> {
         match &self.screen {
             Screen::Notebook(s) => s.owner(nb),
@@ -1025,6 +1051,23 @@ impl App {
                 self.sidebar = o.sidebar;
                 if self.sidebar {
                     return sidebar::reveal_current(self);
+                }
+            }
+            // L held: the mouse is a laser pointer (everyone in the notebook sees it, guests too).
+            Message::Key(keyboard::Event::KeyPressed { key: Key::Character(c), modifiers, .. }) if c.as_str() == "l" && modifiers.is_empty() && self.editing.is_none() && self.palette.is_none() && self.pane().is_some_and(|o| o.text_page.is_none()) => {
+                if let Some(o) = self.pane() {
+                    o.pages.own_laser.borrow_mut().mouse = true;
+                }
+            }
+            Message::Key(keyboard::Event::KeyReleased { key: Key::Character(c), .. }) if c.as_str() == "l" => {
+                if let Screen::Notebook(s) = &self.screen {
+                    for o in &s.panes {
+                        let mut own = o.pages.own_laser.borrow_mut();
+                        if own.mouse {
+                            own.mouse = false;
+                            own.lift(crate::pages::laser_now());
+                        }
+                    }
                 }
             }
             Message::Key(keyboard::Event::KeyPressed { key, modifiers, .. }) => return self.shortcut(key, modifiers),
@@ -1243,6 +1286,7 @@ impl App {
                         o.pages.flash = None;
                     }
                 }
+                self.send_lasers();
                 return self.glide_step(now);
             }
             Message::Language(l) => {
@@ -2419,6 +2463,20 @@ impl App {
                 if let Screen::Notebook(s) = &self.screen {
                     for o in s.panes.iter().filter(|o| o.id == notebook) {
                         o.pages.live_erase(&sheet, &ids, &dabs);
+                    }
+                }
+            }
+            LiveEvent::Laser { notebook, sheet, who, samples, down, guest } => {
+                if let Screen::Notebook(s) = &self.screen {
+                    let now = crate::pages::laser_now();
+                    let burst: Vec<(f32, f32, f32)> = samples.iter().map(|s| (s[0], s[1], s[2])).collect();
+                    for o in s.panes.iter().filter(|o| o.id == notebook) {
+                        let mut lasers = o.pages.lasers.borrow_mut();
+                        if lasers.get(&who).is_some_and(|m| m.sheet_id != sheet) {
+                            lasers.remove(&who);
+                        }
+                        let m = lasers.entry(who.clone()).or_insert_with(|| crate::pages::LaserMark { sheet_id: sheet.clone(), colour: n0te_core::laser::colour(&who, guest), replay: Default::default() });
+                        m.replay.add(&burst, down, now);
                     }
                 }
             }

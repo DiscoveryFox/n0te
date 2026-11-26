@@ -20,7 +20,11 @@ import android.view.ViewConfiguration
 import android.widget.OverScroller
 import uniffi.n0te_ffi.FfiBackground
 import uniffi.n0te_ffi.FfiBrush
+import uniffi.n0te_ffi.FfiLaserLook
 import uniffi.n0te_ffi.FfiScribbleTarget
+import uniffi.n0te_ffi.LaserReplay
+import uniffi.n0te_ffi.laserColour
+import uniffi.n0te_ffi.laserLook
 import uniffi.n0te_ffi.scribbleJudge
 import uniffi.n0te_ffi.scribbleMoves
 import uniffi.n0te_ffi.strokeOutline
@@ -78,6 +82,8 @@ class NotebookView(context: Context) : View(context) {
         /** Erasing as it happens: strokes just hidden, area-eraser dabs (x, y, r triples). */
         fun erase(sheetId: String, ids: List<String>, dabs: FloatArray)
         fun presence(sheetId: String?, rect: FloatArray, zoom: Float, laser: FloatArray?)
+        /** The laser pointer's samples since the last call (x, y in sheet points, t ms); [down] false once it lifts. */
+        fun laser(sheetId: String, samples: FloatArray, down: Boolean)
     }
 
     /** Another device's view (sheet points) and laser pointer. */
@@ -358,8 +364,16 @@ class NotebookView(context: Context) : View(context) {
     private var laserUpAt = 0L
     private var laserSeg = 0
     private val laserEnded = HashMap<Int, Long>()
-    private val laserGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0x66FF2A2A; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-    private val laserCore = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFFFF3B30.toInt(); style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
+    private val laserFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val laserPath = Path()
+    /** The pointer's samples not sent yet (sheet points of [laserOutPage], t), sent ≥ every 33 ms. */
+    private val laserOut = ArrayList<Float>()
+    private var laserOutPage: Placed? = null
+    private var laserOutAt = 0L
+
+    /** Another device's (or a guest's) laser pointer, played back smoothly. */
+    private class RemoteLaser(val sheetId: String, val colour: Int) { val replay = LaserReplay() }
+    private val remoteLasers = HashMap<String, RemoteLaser>()
 
     /** Next tap picks a colour from the page (pipette). */
     var eyedropper: ((Int) -> Unit)? = null
@@ -1950,44 +1964,85 @@ class NotebookView(context: Context) : View(context) {
     /**
      * The laser trail (kept in page coordinates, so it stays on the content while scrolling):
      * short — the last moment of the pen's path; long — seconds; keep — all of it while the pen
-     * is down. Each pen-down is a segment that fades after the pen lifts.
+     * is down. Each pen-down is a segment that fades after the pen lifts. The look comes from
+     * the core (the same on every device); other devices' and guests' pointers in their colours.
      */
     private fun drawLaser(c: Canvas) {
-        if (laser.isEmpty()) return
+        if (laser.isEmpty() && remoteLasers.isEmpty()) return
         val now = since(SystemClock.uptimeMillis())
-        val (trail, fadeMs) = when (Settings.laserTrail) {
-            "long" -> 4000f to 1500f
-            "keep" -> Float.MAX_VALUE to 2000f
-            else -> LASER_TRAIL_MS to LASER_FADE_MS
-        }
+        val px = scale / density
         val active = if (action == Action.LASER) laserSeg else -1
-        fun alphaOf(seg: Int): Float = if (seg == active) 1f else laserEnded[seg]?.let { (1f - (now - since(it)) / fadeMs).coerceIn(0f, 1f) } ?: 0f
-        laser.removeAll { now - it[2] > trail || alphaOf(it[3].toInt()) <= 0f }
-        laserEnded.keys.retainAll(laser.map { it[3].toInt() }.toSet())
-        if (laser.isEmpty()) return
-        var i = 0
-        while (i < laser.size) {
-            val seg = laser[i][3].toInt()
-            val path = Path()
-            var j = i
-            while (j < laser.size && laser[j][3].toInt() == seg) {
-                val sx = laser[j][0] * scale + tx; val sy = laser[j][1] * scale + ty
-                if (j == i) path.moveTo(sx, sy) else path.lineTo(sx, sy)
-                j++
-            }
-            val fade = alphaOf(seg)
-            laserGlow.strokeWidth = 14f * density; laserGlow.alpha = (0x55 * fade).toInt()
-            laserCore.strokeWidth = 4f * density; laserCore.alpha = (255 * fade).toInt()
-            c.drawPath(path, laserGlow)
-            c.drawPath(path, laserCore)
-            if (seg == active) {
-                val last = laser[j - 1]
-                laserCore.style = Paint.Style.FILL
-                c.drawCircle(last[0] * scale + tx, last[1] * scale + ty, 5f * density, laserCore)
-                laserCore.style = Paint.Style.STROKE
-            }
-            i = j
+        val segs = laser.map { it[3].toInt() }.distinct()
+        for (seg in segs) {
+            val pts = laser.filter { it[3].toInt() == seg }
+            val samples = ArrayList<Float>(pts.size * 3)
+            for (q in pts) { samples += q[0]; samples += q[1]; samples += q[2] }
+            val lifted = if (seg == active) -1f else laserEnded[seg]?.let { since(it) } ?: -1f
+            val look = laserLook(samples, now, lifted, Settings.laserTrail, px)
+            if (look.gone) { laser.removeAll { it[3].toInt() == seg }; laserEnded.remove(seg); continue }
+            drawLook(c, look, 0f, 0f, LASER_RED)
         }
+        val m = model
+        val gone = ArrayList<String>()
+        for ((who, rl) in remoteLasers) {
+            val p = m?.placed?.firstOrNull { it.sheetId == rl.sheetId }
+            val look = rl.replay.look(now, Settings.laserTrail, px)
+            if (look.gone) { gone += who; continue }
+            if (p != null) drawLook(c, look, p.rect.left, p.rect.top, rl.colour)
+        }
+        gone.forEach { remoteLasers.remove(it) }
+        if (laser.isNotEmpty() || remoteLasers.isNotEmpty()) postInvalidateOnAnimation()
+    }
+
+    /** One pointer's look (page points offset by [ox], [oy]): the glow, the trail, the dot. */
+    private fun drawLook(c: Canvas, l: FfiLaserLook, ox: Float, oy: Float, colour: Int) {
+        laserFill.color = colour
+        fun quads(q: List<Float>, k: Float) {
+            var i = 0
+            while (i + 8 < q.size) {
+                laserPath.rewind()
+                laserPath.moveTo((q[i] + ox) * scale + tx, (q[i + 1] + oy) * scale + ty)
+                laserPath.lineTo((q[i + 2] + ox) * scale + tx, (q[i + 3] + oy) * scale + ty)
+                laserPath.lineTo((q[i + 4] + ox) * scale + tx, (q[i + 5] + oy) * scale + ty)
+                laserPath.lineTo((q[i + 6] + ox) * scale + tx, (q[i + 7] + oy) * scale + ty)
+                laserPath.close()
+                laserFill.alpha = (255 * k * q[i + 8]).toInt().coerceIn(0, 255)
+                c.drawPath(laserPath, laserFill)
+                i += 9
+            }
+        }
+        quads(l.glow, 0.22f)
+        quads(l.core, 1f)
+        if (l.dot.size == 3) {
+            val x = (l.dot[0] + ox) * scale + tx; val y = (l.dot[1] + oy) * scale + ty; val a = l.dot[2]
+            val r = LASER_DOT * density
+            laserFill.alpha = (255 * 0.16f * a).toInt(); c.drawCircle(x, y, r * 3f, laserFill)
+            laserFill.alpha = (255 * 0.32f * a).toInt(); c.drawCircle(x, y, r * 1.8f, laserFill)
+            laserFill.alpha = (255 * a).toInt(); c.drawCircle(x, y, r, laserFill)
+            laserFill.color = 0xFFFFFFFF.toInt(); laserFill.alpha = (230 * a).toInt(); c.drawCircle(x, y, r * 0.4f, laserFill)
+        }
+    }
+
+    /** The pointer to the other devices: samples relative to the page in focus at pen-down. */
+    private fun laserSend(wx: Float, wy: Float, t: Float) {
+        val sink = live ?: return
+        val p = laserOutPage ?: focusedSheet()?.also { laserOutPage = it } ?: return
+        laserOut += wx - p.rect.left; laserOut += wy - p.rect.top; laserOut += t
+        val now = SystemClock.uptimeMillis()
+        if (now - laserOutAt >= 33) { sink.laser(p.sheetId, laserOut.toFloatArray(), true); laserOut.clear(); laserOutAt = now }
+    }
+
+    private fun laserLift() {
+        val sink = live ?: return
+        val p = laserOutPage ?: return
+        sink.laser(p.sheetId, laserOut.toFloatArray(), false)
+        laserOut.clear(); laserOutPage = null
+    }
+
+    /** Another device's (or a guest's) laser pointer on [sheetId]: samples x, y (sheet points), t on its clock. */
+    fun remoteLaser(who: String, sheetId: String, samples: FloatArray, down: Boolean, guest: Boolean) {
+        val rl = remoteLasers[who]?.takeIf { it.sheetId == sheetId } ?: RemoteLaser(sheetId, laserColour(who, guest).toInt()).also { remoteLasers[who] = it }
+        rl.replay.add(samples.toList(), down, since(SystemClock.uptimeMillis()))
         postInvalidateOnAnimation()
     }
 
@@ -2608,9 +2663,10 @@ class NotebookView(context: Context) : View(context) {
             cursorPaint.color = 0xAA787880.toInt()
             c.drawCircle(hoverX, hoverY, max(3f, eraserBaseRadius() * scale), cursorPaint)
         } else if (tool == Tool.LASER) {
-            laserCore.style = Paint.Style.FILL; laserCore.alpha = 200
-            c.drawCircle(hoverX, hoverY, 5f * density, laserCore)
-            laserCore.style = Paint.Style.STROKE
+            // Hovering: the dot as it will look, a little fainter.
+            laserFill.color = LASER_RED
+            laserFill.alpha = 40; c.drawCircle(hoverX, hoverY, LASER_DOT * density * 1.8f, laserFill)
+            laserFill.alpha = 200; c.drawCircle(hoverX, hoverY, LASER_DOT * density, laserFill)
         } else if (tool == Tool.PEN || tool == Tool.MARKER) {
             cursorPaint.color = Tools.inks[colorIdx]
             val k = if (loupeOpen && loupeStrip().contains(hoverX, hoverY)) loupeScale() else scale
@@ -3014,7 +3070,10 @@ class NotebookView(context: Context) : View(context) {
             action = Action.LASER; target = null
             laserSeg++
             if (Settings.laserTrail == "short") { laser.clear(); laserEnded.clear() }
-            laser += floatArrayOf(wx, wy, since(SystemClock.uptimeMillis()), laserSeg.toFloat())
+            val t0 = since(SystemClock.uptimeMillis())
+            laser += floatArrayOf(wx, wy, t0, laserSeg.toFloat())
+            laserOut.clear(); laserOutPage = null
+            laserSend(wx, wy, t0)
             invalidate()
             return
         }
@@ -3312,8 +3371,10 @@ class NotebookView(context: Context) : View(context) {
                 if (!batch) invalidate()
             }
             Action.LASER -> {
-                laser += floatArrayOf(wx, wy, since(SystemClock.uptimeMillis()), laserSeg.toFloat())
-                if (!batch) { invalidate(); sendPresence(false, PointF(x, y)) }
+                val t = since(SystemClock.uptimeMillis())
+                laser += floatArrayOf(wx, wy, t, laserSeg.toFloat())
+                laserSend(wx, wy, t)
+                if (!batch) { invalidate(); sendPresence(false) }
             }
             Action.SPACE -> space?.let { sd ->
                 // Which way: from where the pen first goes (a PDF page only gets space downwards).
@@ -3591,7 +3652,7 @@ class NotebookView(context: Context) : View(context) {
                 // hold time, letting go before the ring closed cancels (the page came at the close).
                 if (Settings.handleHoldMs <= 0 && h != null && commit && handleDrag > -40f * density) listener?.onAddPage(h.dir, h.mainNode)
             }
-            Action.LASER -> { laserUpAt = SystemClock.uptimeMillis(); laserEnded[laserSeg] = laserUpAt; postInvalidateOnAnimation() }
+            Action.LASER -> { laserUpAt = SystemClock.uptimeMillis(); laserEnded[laserSeg] = laserUpAt; laserLift(); postInvalidateOnAnimation() }
             Action.TEXT -> if (m != null && p != null) {
                 val hit = textHit
                 if (textMoved && hit != null) {
@@ -4917,8 +4978,9 @@ class NotebookView(context: Context) : View(context) {
         const val MM = 72f / 25.4f
         /** Where the line one writes on sits in the frame (share of its height from the top). */
         const val LOUPE_BASELINE = 0.72f
-        const val LASER_TRAIL_MS = 650f
-        const val LASER_FADE_MS = 450f
+        const val LASER_RED = 0xFFFF3B30.toInt()
+        /** The laser dot's radius (dp; core laser Style). */
+        const val LASER_DOT = 4.5f
         /** Width of a group title's fold button (points). */
         const val FOLD_W = 30f
         const val DOUBLE_TAP_MS = 300L

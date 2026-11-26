@@ -64,6 +64,9 @@ pub enum LiveEvent {
     Stroke { device: String, notebook: String, sheet: String, stroke: u64, brush: (f32, f32, u32, u8), samples: Vec<u8>, done: bool },
     /// Someone erasing: strokes hidden, area-eraser dabs (x, y, r), in `sheet` points.
     Erase { notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
+    /// A laser pointer: samples (x, y in `sheet` points, t ms on its clock) since the last one;
+    /// `who` points (an own device, the owner or a guest), `guest` as a guest.
+    Laser { notebook: String, sheet: String, who: String, samples: Vec<[f32; 3]>, down: bool, guest: bool },
     Open { device: String, notebook: String },
     Follow { device: String, on: bool },
     Guest { name: String, notebook: String, device: String, on: bool },
@@ -129,6 +132,17 @@ fn parse(line: &str) -> Option<LiveEvent> {
             ),
             samples: v["samples"].as_array().map(|a| a.iter().filter_map(|x| x.as_u64().map(|b| b as u8)).collect()).unwrap_or_default(),
             done: v["done"].as_bool().unwrap_or(false),
+        },
+        "laser" => LiveEvent::Laser {
+            notebook: s("notebook"),
+            sheet: s("sheet"),
+            who: s("who"),
+            samples: v["samples"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|t| t.as_array().and_then(|t| Some([t.first()?.as_f64()? as f32, t.get(1)?.as_f64()? as f32, t.get(2)?.as_f64()? as f32]))).collect())
+                .unwrap_or_default(),
+            down: v["down"].as_bool().unwrap_or(false),
+            guest: v["guest"].as_bool().unwrap_or(false),
         },
         "open" => LiveEvent::Open { device: s("device"), notebook: s("notebook") },
         "follow" => LiveEvent::Follow { device: s("device"), on: v["on"].as_bool().unwrap_or(false) },

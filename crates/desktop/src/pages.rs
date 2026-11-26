@@ -787,6 +787,109 @@ pub struct RemoteMark {
     pub name: String,
 }
 
+/// Another device's (or a guest's) laser pointer, played back smoothly (core `laser`).
+pub struct LaserMark {
+    pub sheet_id: String,
+    pub colour: u32,
+    pub replay: n0te_core::laser::Replay,
+}
+
+/// This app's own laser pointer: the mouse while L is held (n0te Laptop), the laser tool
+/// (n0te Tablet). Drawn like everyone's; its samples go out in bursts (see `App::send_lasers`).
+#[derive(Debug, Default)]
+pub struct OwnLaser {
+    /// The mouse points now (L held).
+    pub mouse: bool,
+    pub sheet_id: Option<String>,
+    /// Samples (sheet points, t on [`laser_now`]) for the look.
+    pub samples: Vec<(f32, f32, f32)>,
+    pub lifted: Option<f32>,
+    /// Samples not sent yet; the lift not sent yet; when the last burst went.
+    pub out: Vec<[f32; 3]>,
+    pub lift_out: bool,
+    pub sent_at: f32,
+}
+
+impl OwnLaser {
+    /// The pointer at (x, y) of `sheet` (sheet points): a new trail after a lift.
+    pub fn point(&mut self, sheet: &str, x: f32, y: f32, now: f32) {
+        if self.lifted.is_some() || self.sheet_id.as_deref() != Some(sheet) {
+            self.samples.clear();
+            self.lifted = None;
+            self.sheet_id = Some(sheet.to_string());
+        }
+        self.samples.push((x, y, now));
+        self.out.push([x, y, now]);
+        if self.samples.len() > 4000 {
+            self.samples.drain(..1000);
+        }
+    }
+
+    pub fn lift(&mut self, now: f32) {
+        if self.sheet_id.is_some() && self.lifted.is_none() {
+            self.lifted = Some(now);
+            self.lift_out = true;
+        }
+    }
+
+    /// Something to draw or send.
+    pub fn busy(&self, now: f32) -> bool {
+        self.mouse || self.lift_out || !self.out.is_empty() || (self.sheet_id.is_some() && self.lifted.is_none_or(|t| now - t < n0te_core::laser::Style::SHORT.fade_ms))
+    }
+}
+
+/// Milliseconds on this app's laser clock.
+pub fn laser_now() -> f32 {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f32() * 1000.0
+}
+
+/// One pointer's look as a mesh in its sheet's points (draw scaled by `zoom`, which makes the
+/// trail's screen-pixel widths right): the glow, the trail, the dot.
+fn laser_mesh(look: &n0te_core::laser::Look, colour: u32, zoom: f32) -> Option<Mesh> {
+    let base = argb(colour);
+    let mut vertices: Vec<SolidVertex2D> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    let quad = |q: &[f32; 9], k: f32, vertices: &mut Vec<SolidVertex2D>, indices: &mut Vec<u32>| {
+        let c = color::pack(Color { a: base.a * q[8] * k, ..base });
+        let n = vertices.len() as u32;
+        for i in 0..4 {
+            vertices.push(SolidVertex2D { position: [q[2 * i], q[2 * i + 1]], color: c });
+        }
+        indices.extend([n, n + 1, n + 2, n, n + 2, n + 3]);
+    };
+    for q in look.quads(zoom, 3.0) {
+        quad(&q, 0.22, &mut vertices, &mut indices);
+    }
+    for q in look.quads(zoom, 1.0) {
+        quad(&q, 1.0, &mut vertices, &mut indices);
+    }
+    if let Some((x, y, a)) = look.dot {
+        let r = n0te_core::laser::Style::SHORT.dot / zoom.max(1e-3);
+        let mut disc = |radius: f32, c: Color| {
+            let n = vertices.len() as u32;
+            let packed = color::pack(c);
+            vertices.push(SolidVertex2D { position: [x, y], color: packed });
+            for k in 0..=20 {
+                let t = k as f32 / 20.0 * std::f32::consts::TAU;
+                vertices.push(SolidVertex2D { position: [x + radius * t.cos(), y + radius * t.sin()], color: packed });
+            }
+            for k in 0..20 {
+                indices.extend([n, n + 1 + k, n + 2 + k]);
+            }
+        };
+        disc(r * 3.0, Color { a: base.a * 0.16 * a, ..base });
+        disc(r * 1.8, Color { a: base.a * 0.32 * a, ..base });
+        disc(r, Color { a: base.a * a, ..base });
+        disc(r * 0.4, Color { a: 0.9 * a, ..Color::WHITE });
+    }
+    if vertices.is_empty() {
+        return None;
+    }
+    let clip = Rectangle::new(Point::new(-1e6, -1e6), Size::new(2e6, 2e6));
+    Some(Mesh::Solid { buffers: Indexed { vertices, indices }, transformation: Transformation::IDENTITY, clip_bounds: clip })
+}
+
 /// A spot that was jumped to (a search hit, a heading): it lights up in the accent and fades.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flash {
@@ -947,6 +1050,10 @@ pub struct Pages {
     pub erasing: RefCell<HashMap<String, Erasing>>,
     /// Draw other devices' views as frames (the laser point shows either way).
     pub show_remote_frame: Cell<bool>,
+    /// Other devices' and guests' laser pointers, by who points.
+    pub lasers: RefCell<HashMap<String, LaserMark>>,
+    /// This app's own pointer.
+    pub own_laser: RefCell<OwnLaser>,
     /// The spot just jumped to, lighting up.
     pub flash: Option<Flash>,
     /// A board open on its own (n0te Tablet): endless paper, nothing else shown.
@@ -974,6 +1081,8 @@ impl Pages {
             live: RefCell::new(HashMap::new()),
             erasing: RefCell::new(HashMap::new()),
             show_remote_frame: Cell::new(true),
+            lasers: RefCell::new(HashMap::new()),
+            own_laser: RefCell::new(OwnLaser::default()),
             flash: None,
             board: None,
             space: RefCell::new(None),
@@ -1884,6 +1993,16 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 }
                 None
             }
+            // L held (n0te Laptop): the mouse is a laser pointer, on the page it started on.
+            Event::Mouse(mouse::Event::CursorMoved { position }) if self.pages.own_laser.borrow().mouse && bounds.contains(*position) => {
+                let at = cam.to_page(bounds, *position);
+                let mut own = self.pages.own_laser.borrow_mut();
+                let page = own.sheet_id.clone().filter(|_| own.lifted.is_none()).and_then(|id| self.pages.pages.iter().find(|p| p.placed.sheet_id == id).map(|p| p.placed.clone())).or_else(|| self.pages.sheet_at(at.x, at.y).cloned());
+                if let Some(p) = page {
+                    own.point(&p.sheet_id, at.x - p.rect.x0, at.y - p.rect.y0, laser_now());
+                }
+                None
+            }
             Event::Mouse(mouse::Event::CursorMoved { position }) => match state.drag {
                 Some((start, last, moved)) => {
                     let moved = moved || position.distance(start) > 4.0;
@@ -2071,6 +2190,21 @@ impl<'a, Message> Widget<Message, Theme, iced::Renderer> for PageView<'a, Messag
                 let at = cam.to_screen(bounds, sh.origin.x, sh.origin.y);
                 r.with_translation(Vector::new(at.x, at.y), |r| {
                     r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh_cache(cache));
+                });
+            }
+            // Laser pointers: everyone's, then this app's own on top.
+            let now = laser_now();
+            let style = n0te_core::laser::Style::SHORT;
+            let own = pages.own_laser.borrow();
+            let own_look = own.sheet_id.as_ref().map(|s| (s.clone(), n0te_core::laser::OWN, n0te_core::laser::ribbon(&own.samples, now, own.lifted, style)));
+            drop(own);
+            let looks: Vec<(String, u32, n0te_core::laser::Look)> = pages.lasers.borrow().values().map(|m| (m.sheet_id.clone(), m.colour, m.replay.look(now, style))).chain(own_look).collect();
+            for (sheet, colour, look) in looks {
+                let Some(sh) = shown.iter().find(|s| s.page.placed.sheet_id == sheet) else { continue };
+                let Some(mesh) = laser_mesh(&look, colour, cam.zoom) else { continue };
+                let at = cam.to_screen(bounds, sh.origin.x, sh.origin.y);
+                r.with_translation(Vector::new(at.x, at.y), |r| {
+                    r.with_transformation(Transformation::scale(cam.zoom), |r| r.draw_mesh(mesh));
                 });
             }
             let erasing = pages.erasing.borrow();

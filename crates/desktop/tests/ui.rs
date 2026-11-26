@@ -692,6 +692,49 @@ fn palette_finds_and_runs_commands_and_pages() {
 }
 
 #[test]
+fn laser_pointers_of_others_show_and_fade_and_l_makes_the_mouse_one() {
+    use n0te_desktop::live::LiveEvent;
+    let (mut h, _root, nb) = blank_notebook("laser");
+    let sheet = open(&h).pages.pages[0].placed.sheet_id.clone();
+    // A guest points (passed on by the owner): played back in a guest's colour.
+    let samples: Vec<[f32; 3]> = (0..10).map(|i| [100.0 + i as f32 * 5.0, 200.0, 5000.0 + i as f32 * 16.0]).collect();
+    h.message(Message::Live(LiveEvent::Laser { notebook: nb.clone(), sheet: sheet.clone(), who: "mia".into(), samples, down: true, guest: true }));
+    {
+        let o = open(&h);
+        let lasers = o.pages.lasers.borrow();
+        assert_ne!(lasers["mia"].colour, n0te_core::laser::OWN);
+        assert_eq!(lasers["mia"].replay.samples.len(), 10);
+    }
+    // It lifts, fades, and the frames forget it.
+    h.message(Message::Live(LiveEvent::Laser { notebook: nb.clone(), sheet: sheet.clone(), who: "mia".into(), samples: vec![], down: false, guest: true }));
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    h.message(Message::Glide(std::time::Instant::now()));
+    assert!(open(&h).pages.lasers.borrow().is_empty());
+
+    // L held: the mouse points; let go, the pointer lifts and goes out.
+    let [press, release] = h.key_event(iced::keyboard::Key::Character("l".into()), Some("l"));
+    let (iced::Event::Keyboard(press), iced::Event::Keyboard(release)) = (press, release) else { unreachable!() };
+    h.message(Message::Key(press));
+    assert!(open(&h).pages.own_laser.borrow().mouse);
+    let v = open(&h).camera.viewport;
+    let c = open(&h).camera.origin;
+    let at = Point::new(c.x + v.width * 0.5, c.y + v.height * 0.3);
+    h.move_to(at);
+    h.move_to(Point::new(at.x + 30.0, at.y + 10.0));
+    assert!(open(&h).pages.own_laser.borrow().samples.len() >= 2, "{:?}", open(&h).pages.own_laser.borrow());
+    h.message(Message::Key(release));
+    {
+        let o = open(&h);
+        let own = o.pages.own_laser.borrow();
+        assert!(!own.mouse && own.lifted.is_some() && own.lift_out);
+    }
+    h.message(Message::Glide(std::time::Instant::now()));
+    let o = open(&h);
+    let own = o.pages.own_laser.borrow();
+    assert!(own.out.is_empty() && !own.lift_out, "sent");
+}
+
+#[test]
 fn live_events_show_the_tablet_and_changes_from_it() {
     use n0te_desktop::live::LiveEvent;
     let (mut h, root, nb) = blank_notebook("live");

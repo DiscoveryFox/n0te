@@ -11,6 +11,7 @@ pub mod format;
 pub mod ids;
 pub mod ink;
 pub mod inklines;
+pub mod laser;
 pub mod layout;
 pub mod notebook;
 pub mod pens;

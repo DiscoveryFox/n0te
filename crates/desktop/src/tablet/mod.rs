@@ -631,7 +631,7 @@ impl App {
         let text_hit = o.pages.text_at(at.x, at.y);
         if tool == Tool::Laser {
             self.tablet.laser = Some((key, at));
-            self.send_laser(key, &placed.sheet_id, Some((at.x - placed.rect.x0, at.y - placed.rect.y0)));
+            o.pages.own_laser.borrow_mut().point(&placed.sheet_id, at.x - placed.rect.x0, at.y - placed.rect.y0, crate::pages::laser_now());
             return Task::none();
         }
         if self.read_only_nb(&notebook) {
@@ -742,12 +742,15 @@ impl App {
                 return;
             }
             self.tablet.laser = Some((key, at));
-            let hit = pane_camera(&self.screen, key).and(match &self.screen {
-                Screen::Notebook(split) => split.pane(key).and_then(|o| o.pages.sheet_at(at.x, at.y).map(|p| (p.sheet_id.clone(), p.rect.x0, p.rect.y0))),
-                Screen::Library => None,
-            });
-            if let Some((sheet, x0, y0)) = hit {
-                self.send_laser(key, &sheet, Some((at.x - x0, at.y - y0)));
+            // On the page it went down on, so the trail stays one piece across page edges.
+            if let Screen::Notebook(split) = &self.screen
+                && let Some(o) = split.pane(key)
+            {
+                let mut own = o.pages.own_laser.borrow_mut();
+                let page = own.sheet_id.clone().and_then(|id| o.pages.pages.iter().find(|p| p.placed.sheet_id == id).map(|p| p.placed.clone()));
+                if let Some(p) = page {
+                    own.point(&p.sheet_id, at.x - p.rect.x0, at.y - p.rect.y0, crate::pages::laser_now());
+                }
             }
             return;
         }
@@ -855,7 +858,11 @@ impl App {
             return Task::none();
         }
         if let Some((key, _)) = self.tablet.laser.take() {
-            self.send_laser(key, "", None);
+            if let Screen::Notebook(split) = &self.screen
+                && let Some(o) = split.pane(key)
+            {
+                o.pages.own_laser.borrow_mut().lift(crate::pages::laser_now());
+            }
             return Task::none();
         }
         if let Some(m) = self.tablet.moving.take() {
@@ -1355,22 +1362,6 @@ fn hash_id(s: &str) -> u64 {
 }
 
 impl App {
-    /// Where this view looks, with the laser point (sheet points) or without it (`None`).
-    fn send_laser(&mut self, key: PaneKey, sheet: &str, at: Option<(f32, f32)>) {
-        let Some(sync) = self.sync.clone() else { return };
-        let Screen::Notebook(split) = &self.screen else { return };
-        let Some(o) = split.pane(key) else { return };
-        let (x0, y0) = o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).map(|p| (p.placed.rect.x0, p.placed.rect.y0)).unwrap_or((0.0, 0.0));
-        let v = o.camera.view_rect();
-        let mut args = vec!["presence".to_string(), o.id.clone(), sheet.to_string()];
-        args.extend([v.x0 - x0, v.y0 - y0, v.width(), v.height()].iter().map(|x| format!("{x:.1}")));
-        args.push(format!("{:.3}", o.camera.zoom));
-        if let Some((x, y)) = at {
-            args.extend([format!("{x:.1}"), format!("{y:.1}")]);
-        }
-        sync.send(&args);
-    }
-
     /// Pastes the copied strokes in the middle of the active pane's view, on the sheet there.
     fn paste_strokes(&mut self) {
         if self.tablet.clip.is_empty() {

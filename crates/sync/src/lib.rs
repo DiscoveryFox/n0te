@@ -83,6 +83,10 @@ pub enum Event {
     Screenshot { device: String, image: Vec<u8> },
     /// Another device is erasing: strokes it hid, area-eraser dabs (x, y, radius).
     LiveErase { device: String, notebook: String, sheet: String, ids: Vec<String>, dabs: Vec<[f32; 3]> },
+    /// A laser pointer moving (x, y, t ms samples since the last one; `down` false when it
+    /// lifts). `device` sent it here, `who` points (an own device, the owner or a guest, passed
+    /// on by the owner), `guest` whether it points as a guest.
+    Laser { device: String, notebook: String, sheet: String, who: String, samples: Vec<[f32; 3]>, down: bool, guest: bool },
     /// An own device asks to open a notebook (live session button).
     OpenRequest { device: String, notebook: String },
     /// An own device asks this one to follow (or stop following) its view.

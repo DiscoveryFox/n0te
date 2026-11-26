@@ -521,6 +521,19 @@ impl Engine {
         }
     }
 
+    /// This device's laser pointer on `sheet`: its samples (x, y in sheet points, t in ms)
+    /// since the last call, `down` false once the pen lifts. To own devices and guests with the
+    /// notebook; the owner passes it on to its guests and own devices (guests point too).
+    pub fn send_laser(&self, notebook: &str, sheet: &str, samples: &[[f32; 3]], down: bool) {
+        let who = self.inner.ep.id().to_string();
+        let chunks: Vec<&[[f32; 3]]> = if samples.is_empty() { vec![&[][..]] } else { samples.chunks(60).collect() };
+        let n = chunks.len();
+        for (i, c) in chunks.into_iter().enumerate() {
+            let live = Live::Laser { notebook: notebook.into(), sheet: sheet.into(), who: who.clone(), samples: c.to_vec(), down: down || i + 1 < n, guest: false };
+            self.inner.send_live(notebook, None, live);
+        }
+    }
+
     /// Erasing as it happens on `sheet`: strokes just hidden by the stroke eraser and / or new
     /// area-eraser dabs (x, y, radius). The stored result follows with the next save.
     pub fn send_live_erase(&self, notebook: &str, sheet: &str, ids: &[String], dabs: &[[f32; 3]]) {
@@ -1781,9 +1794,15 @@ impl Inner {
     // --- live ------------------------------------------------------------------------------
 
     fn send_live(&self, nb: &str, except: Option<EndpointId>, live: Live) {
+        self.send_live_to(nb, except, |_| true, live);
+    }
+
+    /// Live to the sessions with `nb` whose kind `to` accepts (but not `except`): as a datagram,
+    /// or as a message when it doesn't fit.
+    fn send_live_to(&self, nb: &str, except: Option<EndpointId>, to: impl Fn(&Kind) -> bool, live: Live) {
         let bytes = proto::encode(&live);
         for s in self.sessions_for(nb) {
-            if Some(s.peer) == except {
+            if Some(s.peer) == except || !to(&s.kind) {
                 continue;
             }
             let fits = s.conn.max_datagram_size().is_some_and(|m| bytes.len() <= m);
@@ -1804,6 +1823,19 @@ impl Inner {
             // Erasing changes the notebook: only from those who may write it.
             Live::Erase { notebook, sheet, ids, dabs } if s.kind.covers(&notebook) && Self::may_receive(&s.kind) => {
                 (self.emit)(Event::LiveErase { device: s.id(), notebook, sheet, ids, dabs });
+            }
+            // Pointing changes nothing: everyone in the notebook may, guests too. The owner passes
+            // it on: an own device's pointer to its guests, a guest's to its own devices and the
+            // other guests (never own to own, so nothing goes round in circles).
+            Live::Laser { notebook, sheet, who, samples, down, guest } if s.kind.covers(&notebook) && samples.len() <= 240 => {
+                let guest = guest || matches!(s.kind, Kind::Guest { .. });
+                let on = Live::Laser { notebook: notebook.clone(), sheet: sheet.clone(), who: who.clone(), samples: samples.clone(), down, guest };
+                match s.kind {
+                    Kind::Own => self.send_live_to(&notebook, Some(s.peer), |k| matches!(k, Kind::Guest { .. }), on),
+                    Kind::Guest { .. } => self.send_live_to(&notebook, Some(s.peer), |_| true, on),
+                    Kind::Host { .. } => {}
+                }
+                (self.emit)(Event::Laser { device: s.id(), notebook, sheet, who, samples, down, guest });
             }
             _ => {}
         }

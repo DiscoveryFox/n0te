@@ -259,6 +259,13 @@ object SyncHub : SyncListener {
         runCatching { e.sendPresence(notebook, sheet, rect.toList(), zoom, laser?.toList()) }
     }
 
+    /** The laser pointer: samples (x, y, t triples, sheet points) since the last call; guests see it too. */
+    fun laser(notebook: String, sheet: String, samples: FloatArray, down: Boolean) {
+        val e = engine ?: return
+        if (!sharing(notebook)) return
+        N0te.io.execute { runCatching { e.sendLaser(notebook, sheet, samples.toList(), down) } }
+    }
+
     /** Erasing as it happens: strokes just hidden and / or area-eraser dabs (x, y, r triples). */
     fun liveErase(notebook: String, sheet: String, ids: List<String>, dabs: FloatArray) {
         val e = engine ?: return
