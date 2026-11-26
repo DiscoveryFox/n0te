@@ -768,10 +768,25 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         }
     }
 
-    /** Strokes the path (x, y pairs) crosses within [radius] (scribble-to-delete). */
-    fun strokesCrossed(sheetId: String, path: FloatArray, radius: Float, then: (List<String>) -> Unit) {
+    /**
+     * Scribbling out, as the core decided ([v]): what it deletes goes from the page at once, the
+     * pieces it cuts out of longer strokes follow from the core; one undo step.
+     */
+    fun scribbleOut(sheetId: String, v: uniffi.n0te_ffi.FfiScribble) {
         val st = state(sheetId)
-        withHandle(st) { h -> N0te.background({ h.hitPath(bytesOf(path), radius) }) { r -> then(r.getOrNull().orEmpty()) } }
+        val gone = v.delete.toHashSet()
+        st.strokes.removeAll { it.id in gone }
+        st.images = st.images.filter { it.id !in gone }
+        st.invalidateNode()
+        onChanged()
+        withEdit(st) { h ->
+            N0te.background({ h.scribbleOut(v.delete, v.cut, v.path); if (v.cut.isNotEmpty()) reloadStrokes(h) else null }) { r ->
+                if (r.isSuccess) {
+                    r.getOrNull()?.let { list -> applyReload(st, Result.success(list)) }
+                    pushUndo(sheetId); markDirty(sheetId)
+                }
+            }
+        }
     }
 
     /** The core's strokes as drawn; many at once (a page, a paste) on several threads. */

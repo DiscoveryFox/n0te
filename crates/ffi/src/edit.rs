@@ -322,6 +322,64 @@ fn pairs(b: &[u8]) -> Vec<(f32, f32)> {
     floats(b).chunks_exact(2).map(|c| (c[0], c[1])).collect()
 }
 
+// --- scribbling out (core scribble: the same rules on every device) ----------------------------
+
+/// Something on the page a scribble may cover, as the tablet draws it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiScribbleTarget {
+    pub id: String,
+    /// A stroke's outline (LE f32 x, y pairs of the filled polygon), or with `boxed` the box
+    /// of a picture or graph (x0, y0, x1, y1).
+    pub shape: Vec<u8>,
+    pub boxed: bool,
+}
+
+/// What a scribble deletes: whole objects, and longer strokes it cuts a piece out of along
+/// `path` (LE f32 x, y, radius triples). Both empty: the gesture is ink.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FfiScribble {
+    pub delete: Vec<String>,
+    pub cut: Vec<String>,
+    pub path: Vec<u8>,
+}
+
+/// Whether a stroke (packed samples) moves like a scribble at all: cheap, before gathering
+/// what it might cover.
+#[uniffi::export]
+pub fn scribble_moves(samples: Vec<u8>) -> bool {
+    n0te_core::scribble::motion(&crate::points_of(&samples)).is_some()
+}
+
+/// What a stroke (packed samples, drawn `width` wide) scribbles out of `targets`.
+#[uniffi::export]
+pub fn scribble_judge(samples: Vec<u8>, width: f32, targets: Vec<FfiScribbleTarget>) -> FfiScribble {
+    use n0te_core::scribble::{Target, judge};
+    let targets: Vec<Target> = targets
+        .into_iter()
+        .map(|t| {
+            let f = floats(&t.shape);
+            if t.boxed && f.len() >= 4 {
+                Target::boxed(t.id, n0te_core::ink::Rect::new(f[0], f[1], f[2], f[3]))
+            } else {
+                Target::outline(t.id, &f)
+            }
+        })
+        .collect();
+    let v = judge(&crate::points_of(&samples), width, &targets);
+    let path = v.path.iter().flat_map(|&(x, y, r)| [x, y, r]).flat_map(f32::to_le_bytes).collect();
+    FfiScribble { delete: v.delete, cut: v.cut, path }
+}
+
+#[uniffi::export]
+impl SheetHandle {
+    /// Applies a scribble's verdict: deletes and cuts as one undo step. How many objects changed.
+    pub fn scribble_out(&self, delete: Vec<String>, cut: Vec<String>, path: Vec<u8>) -> R<u32> {
+        let path: Vec<(f32, f32, f32)> = floats(&path).chunks_exact(3).map(|c| (c[0], c[1], c[2])).collect();
+        let v = n0te_core::scribble::Verdict { delete, cut, path };
+        Ok(lock(&self.sheet).scribble_out(&v)? as u32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -351,6 +409,37 @@ mod tests {
         nb.set_size(ids[0].clone(), 842.0, 595.0).unwrap();
         assert!(nb.set_size(ids[0].clone(), 1.0, 595.0).is_err());
         assert_eq!(nb.sheet_order(), vec![ids[1].clone()]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scribbling_out_through_ffi_with_outlines() {
+        let dir = std::env::temp_dir().join(format!("n0te-ffi-scribble-{}", n0te_core::ids::new_id(5)));
+        let lib = NoteLibrary::open(dir.to_string_lossy().into_owned()).unwrap();
+        let nb = lib.create_notebook("x".into()).unwrap();
+        let spec = crate::FfiSheetSpec { width: 595.0, height: 842.0, background: crate::FfiBackground::Blank, spacing: 20.0, pdf_blob: None, pdf_page: 0, gaps: vec![] };
+        let ids = nb.add_sheet(None, 0, spec).unwrap();
+        let sheet: Arc<SheetHandle> = nb.clone().open_sheet(ids[1].clone()).unwrap();
+        let pack = |v: &[f32]| v.iter().flat_map(|f| f.to_le_bytes()).collect::<Vec<u8>>();
+        let brush = FfiBrush { width: 1.5, thinning: 0.5, color: 0xFF000000, kind: 0 };
+        // A letter-sized stroke, and a quick zigzag over it (x, y, pressure, t).
+        let letter = sheet.add_stroke(brush, pack(&[50.0, 45.0, 0.5, 0.0, 50.0, 50.0, 0.5, 20.0, 51.0, 55.0, 0.5, 40.0])).unwrap();
+        let mut zig = Vec::new();
+        for i in 0..12 {
+            zig.extend_from_slice(&[if i % 2 == 0 { 43.0 } else { 57.0 }, 43.0 + i as f32 * 1.3, 0.5, i as f32 * 30.0]);
+        }
+        let zig = pack(&zig);
+        assert!(scribble_moves(zig.clone()));
+        let target = FfiScribbleTarget { id: letter.id.clone(), shape: letter.outline.clone(), boxed: false };
+        let picture = FfiScribbleTarget { id: "pic".into(), shape: pack(&[200.0, 0.0, 240.0, 30.0]), boxed: true };
+        let v = scribble_judge(zig.clone(), 1.5, vec![target, picture]);
+        assert_eq!((v.delete.clone(), v.cut.len()), (vec![letter.id.clone()], 0));
+        assert_eq!(sheet.scribble_out(v.delete, v.cut, v.path).unwrap(), 1);
+        assert_eq!(sheet.stroke_count(), 0);
+        assert!(sheet.undo().unwrap());
+        assert_eq!(sheet.stroke_count(), 1);
+        // Nothing under it: the same gesture is ink.
+        assert!(scribble_judge(zig, 1.5, vec![]).delete.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 

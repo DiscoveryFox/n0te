@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use iced::{Point, Rectangle, Size};
 use n0te_core::ink::{InkPoint, Rect};
+use n0te_core::scribble;
 use n0te_core::layout::Placed;
 use n0te_core::notebook::{Axis, Background, Below, Side, SheetSpec, SpacePlan, SpacePlanX};
 
@@ -350,27 +351,23 @@ impl App {
 
     // --- scribbling ------------------------------------------------------------------------
 
-    /// A scribble over ink (Android: `isScribble`): the strokes it crosses go (one step to undo)
-    /// and it isn't kept itself. Whether it crossed any.
+    /// Scribbling out (core `scribble`, the same rules as the Android app): what the gesture
+    /// covers goes, as one step to undo, and the gesture isn't kept. Whether it deleted any.
     pub(super) fn scribble_away(&mut self, d: &Drawing) -> bool {
-        let Some(sheet) = self.tablet_sheet(&d.notebook, &d.sheet) else { return false };
-        let r = d.brush.width / 2.0 + 1.5;
-        let path: Vec<(f32, f32)> = d.points.iter().map(|p| (p.x, p.y)).collect();
-        let mut ids = sheet.hit_path(&path, r);
-        let area = d.points.iter().fold(Rect::EMPTY, |a, p| a.include(p.x, p.y)).inflate(r + 20.0);
-        for s in sheet.strokes_in(Some(area)) {
-            if !ids.contains(&s.id) && tools::crosses(&s.points, s.brush.width, &d.points, r) {
-                ids.push(s.id);
-            }
+        if scribble::motion(&d.points).is_none() {
+            return false;
         }
-        if ids.is_empty() {
+        let Some(sheet) = self.tablet_sheet(&d.notebook, &d.sheet) else { return false };
+        let area = d.points.iter().fold(Rect::EMPTY, |a, p| a.include(p.x, p.y)).inflate(d.brush.width + 4.0);
+        let v = scribble::judge(&d.points, d.brush.width, &sheet.scribble_targets(area));
+        if v.is_empty() {
             return false;
         }
         if let Some(o) = self.pane_mut_of(d.pane) {
             o.pages.live.borrow_mut().remove(&(LOCAL.to_string(), d.live_id));
         }
-        let n = ids.len();
-        self.edit_tracked(&d.notebook, &d.sheet, |s| s.remove(&ids));
+        let n = v.delete.len() + v.cut.len();
+        self.edit_tracked(&d.notebook, &d.sheet, |s| s.scribble_out(&v).map(|_| ()));
         self.say(if n == 1 { tr("1 Strich weggekritzelt").to_string() } else { trf("{} Striche weggekritzelt", &[&n]) });
         true
     }

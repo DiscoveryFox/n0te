@@ -894,8 +894,9 @@ impl App {
             }
         }
         if let Some(mut d) = self.tablet.drawing.take() {
-            // A quick zigzag over ink deletes what it crosses (and isn't kept itself).
-            if d.brush.kind != n0te_core::ink::KIND_MARKER && !d.snapped && d.edge == 0 && tools::is_scribble(&d.points) && self.scribble_away(&d) {
+            // Scribbling over ink deletes what it covers (and isn't kept itself); colouring in
+            // and hatching stay ink (core scribble).
+            if d.brush.kind != n0te_core::ink::KIND_MARKER && !d.snapped && d.edge == 0 && self.scribble_away(&d) {
                 return Task::none();
             }
             // Rested long enough before lifting: a shape or an arrowhead after all.

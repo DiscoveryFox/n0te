@@ -476,10 +476,10 @@ fn a_scribble_over_ink_deletes_it() {
     let before = strokes(&h, &nb, &sheet).len();
     drag(&mut h, a, Point::new(a.x + 120.0, a.y), 8);
     assert_eq!(strokes(&h, &nb, &sheet).len(), before + 1);
-    // A quick zigzag across it.
-    h.press_at(Point::new(a.x + 30.0, a.y - 12.0));
-    for i in 1..=16 {
-        let x = a.x + 30.0 + i as f32 * 4.0;
+    // A quick zigzag over all of it.
+    h.press_at(Point::new(a.x - 10.0, a.y - 12.0));
+    for i in 1..=34 {
+        let x = a.x - 10.0 + i as f32 * 4.0;
         let y = if i % 2 == 0 { a.y - 12.0 } else { a.y + 12.0 };
         h.move_to(Point::new(x, y));
     }
@@ -489,6 +489,16 @@ fn a_scribble_over_ink_deletes_it() {
     // Undo brings the line back.
     h.message(Message::Tablet(Msg::Undo));
     assert_eq!(strokes(&h, &nb, &sheet).len(), before + 1);
+    // Colouring in next to it with the same zigzag, touching the line only at its ends, keeps
+    // the line and keeps the colouring as ink.
+    h.press_at(Point::new(a.x + 10.0, a.y + 2.0));
+    for i in 1..=24 {
+        let x = a.x + 10.0 + i as f32 * 4.0;
+        let y = if i % 2 == 0 { a.y + 2.0 } else { a.y + 40.0 };
+        h.move_to(Point::new(x, y));
+    }
+    h.release();
+    assert_eq!(strokes(&h, &nb, &sheet).len(), before + 2, "the line stays, the colouring is ink");
 }
 
 #[test]

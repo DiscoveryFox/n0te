@@ -11,6 +11,7 @@ use crate::error::{Error, Result};
 use crate::ids;
 use crate::ink::{self, Brush, InkPoint, Rect};
 use crate::plot::{LabelMode, LineStyle, Obj, Plot, PointStyle, Slider, Snap, Style};
+use crate::scribble;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Stroke {
@@ -241,6 +242,45 @@ impl Sheet {
             let Some(runs) = cut_stroke(&s.points, s.brush.width, path) else { continue };
             changed += 1;
             self.objects.delete(&s.id)?;
+            for run in runs {
+                let id = ids::new_id(self.doc.peer_id());
+                self.objects.insert(&id, LoroValue::Binary(encode_stroke(&s.brush, &run).into()))?;
+            }
+        }
+        self.doc.commit();
+        Ok(changed)
+    }
+
+    /// What a scribble over `area` could cover ([`scribble::judge`]): strokes by their
+    /// samples, pictures and graphs as boxes.
+    pub fn scribble_targets(&self, area: Rect) -> Vec<scribble::Target> {
+        let mut out: Vec<scribble::Target> = self.strokes_in(Some(area)).iter().map(|s| scribble::Target::stroke(s.id.clone(), &s.points, s.brush.width)).collect();
+        let boxes = self.images().into_iter().map(|i| (i.id, i.x, i.y, i.w, i.h)).chain(self.plots().into_iter().map(|p| (p.id, p.x, p.y, p.w, p.h)));
+        for (id, x, y, w, h) in boxes {
+            let r = Rect::new(x, y, x + w, y + h);
+            if r.intersects(&area) {
+                out.push(scribble::Target::boxed(id, r));
+            }
+        }
+        out
+    }
+
+    /// Scribbling out, as [`scribble::judge`] decided: removes what it deletes and cuts the
+    /// covered piece out of longer strokes, as one edit (one undo step). How many objects
+    /// changed.
+    pub fn scribble_out(&self, v: &scribble::Verdict) -> Result<usize> {
+        let mut changed = 0;
+        for id in &v.delete {
+            if self.objects.get(id).is_some() {
+                self.objects.delete(id)?;
+                changed += 1;
+            }
+        }
+        for id in &v.cut {
+            let Some(s) = self.stroke(id)? else { continue };
+            let Some(runs) = cut_stroke(&s.points, s.brush.width, &v.path) else { continue };
+            self.objects.delete(&s.id)?;
+            changed += 1;
             for run in runs {
                 let id = ids::new_id(self.doc.peer_id());
                 self.objects.insert(&id, LoroValue::Binary(encode_stroke(&s.brush, &run).into()))?;
@@ -1872,6 +1912,26 @@ mod tests {
         assert_eq!(s.len(), 3);
         assert!(s.undo().unwrap());
         assert_eq!(s.len(), 2, "one undo restores the whole line");
+    }
+
+    #[test]
+    fn scribbling_out_deletes_and_cuts_in_one_step() {
+        let s = Sheet::create(6).unwrap();
+        let small = s.add_stroke(Brush::default(), &line(46.0, 54.0, 48.0)).unwrap();
+        let long = s.add_stroke(Brush::default(), &line(0.0, 100.0, 52.0)).unwrap();
+        let far = s.add_stroke(Brush::default(), &line(0.0, 100.0, 300.0)).unwrap();
+        s.add_image("blob", 200.0, 0.0, 40.0, 30.0).unwrap();
+        // What a scribble over (50, 50) sees: the two strokes there, not the far ones.
+        let near: Vec<String> = s.scribble_targets(Rect::new(40.0, 40.0, 60.0, 60.0)).into_iter().map(|t| t.id).collect();
+        assert!(near.contains(&small) && near.contains(&long) && !near.contains(&far) && near.len() == 2, "{near:?}");
+        let v = scribble::Verdict { delete: vec![small.clone()], cut: vec![long.clone()], path: vec![(50.0, 40.0, 4.0), (50.0, 60.0, 4.0)] };
+        assert_eq!(s.scribble_out(&v).unwrap(), 2);
+        assert!(s.stroke(&small).unwrap().is_none() && s.stroke(&long).unwrap().is_none());
+        let pieces: Vec<Stroke> = s.strokes().into_iter().filter(|st| st.bounds.y0 < 100.0).collect();
+        assert_eq!(pieces.len(), 2, "the long line keeps both ends");
+        assert!(s.undo().unwrap());
+        assert!(s.stroke(&small).unwrap().is_some() && s.stroke(&long).unwrap().is_some(), "one undo brings both back");
+        assert_eq!(s.strokes().len(), 3);
     }
 
     #[test]

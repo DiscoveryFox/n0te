@@ -3,7 +3,7 @@
 //! strip and frame, and how inserted space is told. Pure functions, tested here.
 
 use iced::{Point, Rectangle, Size};
-use n0te_core::ink::{InkPoint, Rect};
+use n0te_core::ink::Rect;
 use n0te_core::layout::Placed;
 use n0te_core::notebook::Background;
 
@@ -92,70 +92,6 @@ impl Ruler {
         let (c, s) = (self.angle.cos(), self.angle.sin());
         Point::new(self.cx + along * c - across * s, self.cy + along * s + across * c)
     }
-}
-
-// --- scribbling to delete ------------------------------------------------------------------------
-
-/// A scribble: a quick back-and-forth (at least four sharp reversals), much longer than the
-/// area it covers, done within 2.5 s (NotebookView.kt `isScribble`).
-pub fn is_scribble(pts: &[InkPoint]) -> bool {
-    let n = pts.len();
-    if n < 12 {
-        return false;
-    }
-    let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
-    let mut len = 0.0;
-    for (i, p) in pts.iter().enumerate() {
-        x0 = x0.min(p.x);
-        y0 = y0.min(p.y);
-        x1 = x1.max(p.x);
-        y1 = y1.max(p.y);
-        if i > 0 {
-            len += (p.x - pts[i - 1].x).hypot(p.y - pts[i - 1].y);
-        }
-    }
-    let diag = (x1 - x0).hypot(y1 - y0);
-    if diag < 6.0 || len < diag * 3.0 {
-        return false;
-    }
-    if pts[n - 1].t_ms.saturating_sub(pts[0].t_ms) > 2500 {
-        return false; // slow: drawing, not scribbling
-    }
-    // Direction changes over steps of about 2 pt.
-    let step = (diag / 40.0).max(2.0);
-    let mut reversals = 0;
-    let (mut ax, mut ay) = (pts[0].x, pts[0].y);
-    let (mut pdx, mut pdy) = (0.0f32, 0.0f32);
-    for p in &pts[1..] {
-        let (dx, dy) = (p.x - ax, p.y - ay);
-        if dx.hypot(dy) < step {
-            continue;
-        }
-        if (pdx != 0.0 || pdy != 0.0) && dx * pdx + dy * pdy < -0.5 * dx.hypot(dy) * pdx.hypot(pdy) {
-            reversals += 1;
-        }
-        (pdx, pdy, ax, ay) = (dx, dy, p.x, p.y);
-    }
-    reversals >= 4
-}
-
-/// The distance of point (px, py) to the segment a–b.
-pub fn seg_dist(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
-    let (dx, dy) = (bx - ax, by - ay);
-    let l2 = dx * dx + dy * dy;
-    let t = if l2 < 1e-6 { 0.0 } else { (((px - ax) * dx + (py - ay) * dy) / l2).clamp(0.0, 1.0) };
-    (px - (ax + t * dx)).hypot(py - (ay + t * dy))
-}
-
-/// Whether the path `pts` passes within `r` (plus half its width) of a stroke's line: every
-/// second sample against its segments, so a long straight line with two samples is caught too.
-pub fn crosses(points: &[InkPoint], width: f32, pts: &[InkPoint], r: f32) -> bool {
-    let r = r + width / 2.0;
-    pts.iter().step_by(2).any(|q| match points.len() {
-        0 => false,
-        1 => (points[0].x - q.x).hypot(points[0].y - q.y) <= r,
-        _ => points.windows(2).any(|w| seg_dist(q.x, q.y, w[0].x, w[0].y, w[1].x, w[1].y) <= r),
-    })
 }
 
 // --- the "+" beside the current page row -----------------------------------------------------------
@@ -301,10 +237,6 @@ pub fn space_label(bg: Background, sideways: bool, d: f32, step: f32, grow: f32,
 mod tests {
     use super::*;
 
-    fn pt(x: f32, y: f32, t: u32) -> InkPoint {
-        InkPoint { x, y, pressure: 0.5, t_ms: t }
-    }
-
     #[test]
     fn the_ruler_takes_the_pen_along_its_edge() {
         let r = Ruler { cx: 100.0, cy: 100.0, angle: 0.0 };
@@ -332,30 +264,6 @@ mod tests {
         let free = r.turned_to(40.0f32.to_radians()).angle;
         assert!((free - 40.0f32.to_radians()).abs() < 1e-6);
         assert!((r.turned_to(-90.0f32.to_radians()).degrees() - 270.0).abs() < 1e-3);
-    }
-
-    #[test]
-    fn a_quick_zigzag_is_a_scribble_writing_is_not() {
-        let zig: Vec<InkPoint> = (0..40).map(|i| pt(if i % 8 < 4 { (i % 4) as f32 * 10.0 } else { (4 - i % 4) as f32 * 10.0 }, i as f32 * 0.8, i * 15)).collect();
-        assert!(is_scribble(&zig));
-        // The same, slowly: drawing.
-        let slow: Vec<InkPoint> = zig.iter().enumerate().map(|(i, p)| InkPoint { t_ms: i as u32 * 100, ..*p }).collect();
-        assert!(!is_scribble(&slow));
-        // A line, a word-like wave, a tiny dot cluster: no.
-        let line: Vec<InkPoint> = (0..40).map(|i| pt(i as f32 * 3.0, 0.0, i * 10)).collect();
-        assert!(!is_scribble(&line));
-        let wave: Vec<InkPoint> = (0..60).map(|i| pt(i as f32 * 2.0, (i as f32 * 0.5).sin() * 4.0, i * 10)).collect();
-        assert!(!is_scribble(&wave));
-        assert!(!is_scribble(&zig[..10]));
-    }
-
-    #[test]
-    fn a_scribble_crosses_a_two_point_line() {
-        let line = [pt(0.0, 50.0, 0), pt(300.0, 50.0, 1)];
-        let over: Vec<InkPoint> = (0..20).map(|i| pt(140.0 + (i % 2) as f32 * 20.0, 40.0 + i as f32, i)).collect();
-        assert!(crosses(&line, 2.0, &over, 2.0));
-        let beside: Vec<InkPoint> = over.iter().map(|p| InkPoint { y: p.y + 100.0, ..*p }).collect();
-        assert!(!crosses(&line, 2.0, &beside, 2.0));
     }
 
     #[test]

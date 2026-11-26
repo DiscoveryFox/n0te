@@ -15,6 +15,7 @@ pub mod layout;
 pub mod notebook;
 pub mod pens;
 pub mod plot;
+pub mod scribble;
 pub mod search;
 pub mod shapes;
 pub mod sheet;

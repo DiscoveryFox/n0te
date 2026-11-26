@@ -20,6 +20,9 @@ import android.view.ViewConfiguration
 import android.widget.OverScroller
 import uniffi.n0te_ffi.FfiBackground
 import uniffi.n0te_ffi.FfiBrush
+import uniffi.n0te_ffi.FfiScribbleTarget
+import uniffi.n0te_ffi.scribbleJudge
+import uniffi.n0te_ffi.scribbleMoves
 import uniffi.n0te_ffi.strokeOutline
 import uniffi.n0te_ffi.strokeLayers
 import kotlin.math.abs
@@ -4278,14 +4281,19 @@ class NotebookView(context: Context) : View(context) {
         }
         sendLiveSamples(true)
         var n = count
-        // A quick zigzag over ink deletes what it crosses (and is not kept itself).
-        if (Settings.scribbleErase && tool != Tool.MARKER && !splitStroke && snapEdge == 0 && isScribble(samples, n)) {
-            val ids = strokesUnder(m, p, samples, n, brush.width / 2f + 1.5f)
-            if (ids.isNotEmpty()) {
-                m.deleteStrokes(p.sheetId, ids)
-                listener?.onMessage(if (ids.size == 1) "1 Strich weggekritzelt" else "${ids.size} Striche weggekritzelt")
-                cancelInk()
-                return
+        // Scribbling over ink deletes what it covers (and is not kept itself); colouring in and
+        // hatching stay ink. The core decides, with the same rules as n0te Tablet.
+        if (Settings.scribbleErase && tool != Tool.MARKER && !splitStroke && snapEdge == 0) {
+            val bytes = bytesOf(samples, n * 4)
+            if (scribbleMoves(bytes)) {
+                val v = scribbleJudge(bytes, brush.width, scribbleTargets(m, p, samples, n))
+                if (v.delete.isNotEmpty() || v.cut.isNotEmpty()) {
+                    m.scribbleOut(p.sheetId, v)
+                    val k = v.delete.size + v.cut.size
+                    listener?.onMessage(if (k == 1) "1 Strich weggekritzelt" else "$k Striche weggekritzelt")
+                    cancelInk()
+                    return
+                }
             }
         }
         removeCallbacks(holdCheck); removeCallbacks(arrowCheck)
@@ -4544,15 +4552,20 @@ class NotebookView(context: Context) : View(context) {
         stillX = lx; stillY = ly
     }
 
-    /** Strokes on [p]'s sheet that the path (n samples) passes within [r] of. */
-    private fun strokesUnder(m: NotebookModel, p: Placed, pts: FloatArray, n: Int, r: Float): List<String> {
+    /** What a scribble over the path (n samples) on [p]'s sheet could cover: strokes by their outline, pictures and graphs by their box. */
+    private fun scribbleTargets(m: NotebookModel, p: Placed, pts: FloatArray, n: Int): List<FfiScribbleTarget> {
         val st = m.sheets[p.sheetId] ?: return emptyList()
+        val r = brush.width + 4f
         var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
         for (i in 0 until n) { x0 = min(x0, pts[i * 4]); y0 = min(y0, pts[i * 4 + 1]); x1 = max(x1, pts[i * 4]); y1 = max(y1, pts[i * 4 + 1]) }
-        return st.strokes.filter { s ->
-            s.bounds.right >= x0 - r && s.bounds.left <= x1 + r && s.bounds.bottom >= y0 - r && s.bounds.top <= y1 + r &&
-                (0 until n step 2).any { i -> polygonNear(s.outline, pts[i * 4], pts[i * 4 + 1], r) }
-        }.map { it.id }
+        val area = RectF(x0 - r, y0 - r, x1 + r, y1 + r)
+        val out = ArrayList<FfiScribbleTarget>()
+        for (s in st.strokes) if (s.id !in st.hidden && RectF.intersects(area, s.bounds)) out += FfiScribbleTarget(s.id, bytesOf(s.outline, s.outline.size), false)
+        for (im in st.images) {
+            val box = RectF(im.x, im.y, im.x + im.w, im.y + im.h)
+            if (RectF.intersects(area, box)) out += FfiScribbleTarget(im.id, bytesOf(floatArrayOf(box.left, box.top, box.right, box.bottom), 4), true)
+        }
+        return out
     }
 
     private fun cancelInk() {
@@ -4915,40 +4928,6 @@ class NotebookView(context: Context) : View(context) {
         const val RULER_W = 56f
 
         fun normPressure(p: Float, stylus: Boolean) = if (stylus) p.coerceIn(0.05f, 1f) else 0.5f
-
-        /**
-         * A scribble: a quick back-and-forth (at least 4 sharp reversals), much longer than the
-         * area it covers. Samples are x, y, pressure, t quadruples.
-         */
-        fun isScribble(pts: FloatArray, n: Int): Boolean {
-            if (n < 12) return false
-            var x0 = Float.MAX_VALUE; var y0 = Float.MAX_VALUE; var x1 = -Float.MAX_VALUE; var y1 = -Float.MAX_VALUE
-            var len = 0f
-            for (i in 0 until n) {
-                val x = pts[i * 4]; val y = pts[i * 4 + 1]
-                x0 = min(x0, x); y0 = min(y0, y); x1 = max(x1, x); y1 = max(y1, y)
-                if (i > 0) len += hypot(x - pts[(i - 1) * 4], y - pts[(i - 1) * 4 + 1])
-            }
-            val diag = hypot(x1 - x0, y1 - y0)
-            if (diag < 6f || len < diag * 3f) return false
-            if (pts[(n - 1) * 4 + 3] - pts[3] > 2500f) return false // slow: drawing, not scribbling
-            // Direction changes over ~2 pt steps.
-            val step = max(2f, diag / 40f)
-            var reversals = 0
-            var ax = pts[0]; var ay = pts[1]
-            var pdx = 0f; var pdy = 0f
-            for (i in 1 until n) {
-                val x = pts[i * 4]; val y = pts[i * 4 + 1]
-                val dx = x - ax; val dy = y - ay
-                if (hypot(dx, dy) < step) continue
-                if (pdx != 0f || pdy != 0f) {
-                    val dot = dx * pdx + dy * pdy
-                    if (dot < -0.5f * hypot(dx, dy) * hypot(pdx, pdy)) reversals++
-                }
-                pdx = dx; pdy = dy; ax = x; ay = y
-            }
-            return reversals >= 4
-        }
 
         fun segDist(px: Float, py: Float, ax: Float, ay: Float, bx: Float, by: Float): Float {
             val dx = bx - ax; val dy = by - ay
