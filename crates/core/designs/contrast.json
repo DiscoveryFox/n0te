@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "contrast",
+  "name": "Hoher Kontrast",
+  "name_en": "High contrast",
+  "description": "Schwarz, Weiß und Gelb: so gut lesbar wie möglich",
+  "description_en": "Black, white and yellow: as legible as it gets",
+  "dark": true,
+  "colors": {
+    "background": "#000000",
+    "surface": "#000000",
+    "surface_2": "#1f1f1f",
+    "border": "#ffffff",
+    "text": "#ffffff",
+    "muted": "#d9d9d9",
+    "accent": "#ffe500",
+    "on_accent": "#000000",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 8, "cards": 10, "panels": 12 },
+  "labels": "sans",
+  "headings": "sans",
+  "fill": "outline",
+  "shadows": false
+}

@@ -58,11 +58,11 @@ fn main() {
     }
     let mut h = Harness::new(App::new(&root), "tiny-skia", Size::new(1440.0, 900.0), 1.0).expect("renderer");
     let mut gpu = Harness::new(App::new(&root), "wgpu", Size::new(1440.0, 900.0), 1.0);
-    for t in theme::PALETTES {
-        if !wanted.is_empty() && !wanted.iter().any(|w| w == t.id) {
+    for t in theme::builtins() {
+        if !wanted.is_empty() && !wanted.iter().any(|w| *w == t.id) {
             continue;
         }
-        h.message(Message::SetTheme(t.id));
+        h.message(Message::SetTheme(t.id.as_str()));
         h.message(Message::Back);
         // Opened lately (the start's first row): these, the last one first.
         for t in ["Ideen", "Physik Praktikum", "Analysis I", "Lineare Algebra"] {
@@ -79,7 +79,7 @@ fn main() {
         h.events(&[]);
         h.screenshot(out.join(format!("{}-1a2-all-list.png", t.id)));
         h.message(Message::Shelf(shelf::Msg::ListView(false)));
-        library_screens(&mut h, &out, t.id, &ids);
+        library_screens(&mut h, &out, &t.id, &ids);
         h.message(Message::StartCreate);
         h.message(Message::NewTitle("Analysis II".into()));
         h.events(&[]);
@@ -118,16 +118,16 @@ fn main() {
         h.message(Message::SearchClear);
         h.events(&[]);
         h.screenshot(out.join(format!("{}-7-headings.png", t.id)));
-        split_screens(&mut h, &out, t.id);
+        split_screens(&mut h, &out, &t.id);
         // Coordinate systems on squared paper, then the dialog for one.
         let g = match gpu.as_mut() {
             Some(g) => g,
             None => &mut h,
         };
-        g.message(Message::SetTheme(t.id));
+        g.message(Message::SetTheme(t.id.as_str()));
         g.message(Message::Open(id.clone()));
         g.events(&[]);
-        outline_screens(g, &out, t.id);
+        outline_screens(g, &out, &t.id);
         g.message(Message::Jump(plot_sheet.clone()));
         g.events(&[]);
         g.screenshot(out.join(format!("{}-8-plots.png", t.id)));

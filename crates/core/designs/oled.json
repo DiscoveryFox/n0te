@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "oled",
+  "name": "OLED",
+  "name_en": "OLED",
+  "description": "Technisch: Haarlinien, eckig, reines Schwarz",
+  "description_en": "Technical: hairlines, square, pure black",
+  "dark": true,
+  "colors": {
+    "background": "#000000",
+    "surface": "#000000",
+    "surface_2": "#101010",
+    "border": "#1e1e1e",
+    "text": "#ffffff",
+    "muted": "#8a8a8a",
+    "accent": "#ff2d2d",
+    "on_accent": "#ffffff",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 0, "cards": 0, "panels": 0 },
+  "labels": "mono_caps",
+  "headings": "mono",
+  "fill": "rule",
+  "shadows": false
+}

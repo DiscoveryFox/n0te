@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "light",
+  "name": "Hell",
+  "name_en": "Light",
+  "description": "Weich und ruhig: Flächen statt Linien",
+  "description_en": "Soft and calm: surfaces, not lines",
+  "dark": false,
+  "colors": {
+    "background": "#f1f1ef",
+    "surface": "#ffffff",
+    "surface_2": "#e8e8e5",
+    "border": "#d6d6d1",
+    "text": "#111111",
+    "muted": "#6e6e73",
+    "accent": "#d71921",
+    "on_accent": "#ffffff",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 12, "cards": 16, "panels": 20 },
+  "labels": "sans",
+  "headings": "sans",
+  "fill": "tonal",
+  "shadows": true
+}

@@ -38,6 +38,10 @@ object Settings {
     val shareView get() = b("share_view", true)
     /** PDF export: side pages all at the end (else right after their page); the export dialog's last choice. */
     val exportSidesAtEnd get() = b("export_sides_at_end", false)
+    /** The design's decorations behind the library (snow, stars, …). */
+    val decorShow get() = b("decor_show", true)
+    /** Decorations move (snow falls, stars twinkle); off: they hold still. */
+    val decorMotion get() = b("decor_motion", true)
     fun set(key: String, v: Boolean) { p?.edit()?.putBoolean(key, v)?.apply() }
     fun set(key: String, v: Float) { p?.edit()?.putFloat(key, v)?.apply() }
     fun set(key: String, v: String) { p?.edit()?.putString(key, v)?.apply() }

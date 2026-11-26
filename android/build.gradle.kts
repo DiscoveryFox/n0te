@@ -79,7 +79,8 @@ android {
     testOptions {
         unitTests.all {
             // JVM tests load a laptop build of the same Rust library (cargo build -p n0te-ffi).
-            it.systemProperty("jna.library.path", n0teDir.resolve("target/release").absolutePath)
+            // scripts/test.sh passes -Pn0te.ffiDir=target/fast (an optimised build without LTO).
+            it.systemProperty("jna.library.path", n0teDir.resolve(project.findProperty("n0te.ffiDir") as String? ?: "target/release").absolutePath)
             // ...and the laptop pdfium from n0te/scripts/fetch-pdfium.sh (PdfBindingsTest).
             it.systemProperty("n0te.pdfium", n0teDir.resolve("third_party/pdfium/linux-x64/lib/libpdfium.so").absolutePath)
         }

@@ -3,6 +3,8 @@
 
 pub mod app;
 pub mod blocks;
+pub mod crash;
+pub mod decor;
 pub mod demo;
 pub mod gestures;
 pub mod i18n;

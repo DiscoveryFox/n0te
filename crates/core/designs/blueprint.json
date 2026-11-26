@@ -1,0 +1,28 @@
+{
+  "n0te_style": 1,
+  "id": "blueprint",
+  "name": "Blaupause",
+  "name_en": "Blueprint",
+  "description": "Technische Zeichnung: Raster, Haarlinien, Gelbstift",
+  "description_en": "Technical drawing: grid, hairlines, yellow pencil",
+  "dark": true,
+  "colors": {
+    "background": "#0f3460",
+    "surface": "#133d70",
+    "surface_2": "#1a4a85",
+    "border": "#3a679e",
+    "text": "#eaf2ff",
+    "muted": "#a3bce0",
+    "accent": "#ffd23f",
+    "on_accent": "#0f2747",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 2, "cards": 2, "panels": 2 },
+  "labels": "mono_caps",
+  "headings": "mono",
+  "fill": "rule",
+  "shadows": false,
+  "decorations": [
+    { "kind": "grid", "colors": ["#cfe0ff"], "amount": 0.5 }
+  ]
+}

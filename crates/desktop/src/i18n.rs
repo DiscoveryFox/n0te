@@ -264,7 +264,6 @@ mod tests {
     fn texts_from_tables_have_their_english() {
         // Shown through `tr(name)` rather than a literal, so the scan above can't see them.
         let mut texts: Vec<&str> = Vec::new();
-        texts.extend(crate::theme::PALETTES.iter().flat_map(|t| [t.name, t.style.desc]));
         texts.extend(n0te_core::format::FORMATS.iter().map(|f| f.name));
         texts.extend(n0te_core::pens::PALETTE_NAMES);
         texts.extend(crate::plots::QUICK.iter().map(|q| q.2));

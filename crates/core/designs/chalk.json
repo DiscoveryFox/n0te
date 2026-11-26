@@ -1,0 +1,25 @@
+{
+  "n0te_style": 1,
+  "id": "chalk",
+  "name": "Kreidetafel",
+  "name_en": "Chalkboard",
+  "description": "Schiefergrün, Kreideweiß und gelbe Kreide",
+  "description_en": "Slate green, chalk white and yellow chalk",
+  "dark": true,
+  "colors": {
+    "background": "#1f2a24",
+    "surface": "#26342d",
+    "surface_2": "#2e3e36",
+    "border": "#44574d",
+    "text": "#f2f0e6",
+    "muted": "#a3b1a9",
+    "accent": "#f4c95d",
+    "on_accent": "#1f2a24",
+    "paper": "#ffffff"
+  },
+  "corners": { "buttons": 6, "cards": 8, "panels": 10 },
+  "labels": "sans",
+  "headings": "serif",
+  "fill": "outline",
+  "shadows": false
+}

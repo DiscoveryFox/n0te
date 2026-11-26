@@ -6,6 +6,7 @@
 //!
 //! PDF (import, tiles, search, export): see [`pdf`].
 
+pub mod design;
 pub mod pdf;
 
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
