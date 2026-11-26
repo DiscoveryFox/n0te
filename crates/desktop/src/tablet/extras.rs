@@ -190,6 +190,26 @@ impl App {
         self.tablet.ruler = Some((key, tools::Ruler { angle, ..tools::Ruler::new(tools::instrument_kind(self.tablet.instrument), cx, cy) }));
     }
 
+    // --- the paint bucket ------------------------------------------------------------------------
+
+    /// Fills the closed area at `at` (page point) of `placed` with the colour in use: a tint
+    /// (hatching with the pen's line set to dashed). Tells when the area isn't closed.
+    pub(super) fn fill_at(&mut self, nb: &str, placed: &Placed, at: Point) {
+        let (lx, ly) = (at.x - placed.rect.x0, at.y - placed.rect.y0);
+        let Some(s) = self.tablet_sheet(nb, &placed.sheet_id) else { return };
+        let walls: Vec<Vec<f32>> = s.strokes().iter().filter(|st| st.brush.base_kind() != n0te_core::ink::KIND_FILL).map(|st| n0te_core::ink::outline(&st.points, &st.brush)).collect();
+        let area = if placed.is_board() { Rect::new(lx - 600.0, ly - 600.0, lx + 600.0, ly + 600.0) } else { Rect::new(0.0, 0.0, placed.rect.width(), placed.rect.height()) };
+        let Some(poly) = n0te_core::fill::region(&walls, lx, ly, area, 3.0) else {
+            self.say(tr("Die Fläche ist nicht geschlossen").to_string());
+            return;
+        };
+        let hatch = self.tablet.dash != 0;
+        let color = (self.tablet.ink() & 0x00FF_FFFF) | if hatch { 0xFF00_0000 } else { 0x5900_0000 };
+        let brush = n0te_core::ink::Brush { width: 0.8, thinning: 0.0, color, kind: n0te_core::ink::KIND_FILL }.with_dash(if hatch { 1 } else { 0 });
+        let pts: Vec<InkPoint> = poly.into_iter().map(|(x, y)| InkPoint { x, y, pressure: 0.5, t_ms: 0 }).collect();
+        self.edit_tracked(nb, &placed.sheet_id, |s| s.add_stroke(brush, &pts).map(|_| ()));
+    }
+
     // --- the compass ---------------------------------------------------------------------------
 
     /// Where a pin snaps near `at` on `sheet`: its strokes' ends and crossings (page points).

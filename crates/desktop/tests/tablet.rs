@@ -113,7 +113,8 @@ fn pen_events_carry_pressure_and_the_eraser_end_erases() {
 #[test]
 fn the_lasso_selects_and_delete_removes() {
     let mut h = opened("lasso");
-    let (nb, sheet, a) = first_page(&h, 0.4, 0.85);
+    // Low on the page but on screen (the tool bar may take two rows).
+    let (nb, sheet, a) = first_page(&h, 0.4, 0.75);
     let before = strokes(&h, &nb, &sheet).len();
     drag(&mut h, a, Point::new(a.x + 80.0, a.y), 6);
     assert_eq!(strokes(&h, &nb, &sheet).len(), before + 1);
@@ -730,4 +731,31 @@ fn the_geodreieck_guides_the_pen_and_the_compass_draws_round_its_needle() {
     let origin = { let o = open(&h); o.pages.pages.iter().find(|p| p.placed.sheet_id == sheet).unwrap().placed.rect };
     let off: f32 = arc.points.iter().map(|p| ((p.x + origin.x0 - c.c.cx).hypot(p.y + origin.y0 - c.c.cy) - c.c.r).abs()).fold(0.0, f32::max);
     assert!(off < 0.5, "on the circle: {off}");
+}
+
+#[test]
+fn the_paint_bucket_fills_a_closed_box_and_not_an_open_page() {
+    use n0te_desktop::tablet::{Msg, Tool};
+    let mut h = opened("bucket");
+    let (nb, sheet, a) = first_page(&h, 0.5, 0.6);
+    // A box drawn in one stroke.
+    let corners = [(0.0, 0.0), (140.0, 0.0), (140.0, 90.0), (0.0, 90.0), (0.0, 0.0)];
+    h.press_at(Point::new(a.x, a.y));
+    for w in corners.windows(2) {
+        for i in 1..=8 {
+            let t = i as f32 / 8.0;
+            h.move_to(Point::new(a.x + w[0].0 + (w[1].0 - w[0].0) * t, a.y + w[0].1 + (w[1].1 - w[0].1) * t));
+        }
+    }
+    h.release();
+    let before = strokes(&h, &nb, &sheet).len();
+    h.message(Message::Tablet(Msg::Tool(Tool::Fill)));
+    h.click(Point::new(a.x + 70.0, a.y + 45.0));
+    let s = strokes(&h, &nb, &sheet);
+    assert_eq!(s.len(), before + 1, "filled");
+    assert!(s.iter().any(|st| st.brush.base_kind() == n0te_core::ink::KIND_FILL));
+    // Outside the box, on an open page: nothing, and it says why.
+    h.click(Point::new(a.x - 150.0, a.y + 200.0));
+    assert_eq!(strokes(&h, &nb, &sheet).len(), before + 1);
+    assert_eq!(h.app.status.as_deref(), Some("Die Fläche ist nicht geschlossen"));
 }

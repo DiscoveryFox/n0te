@@ -16,7 +16,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
 /** Line icons drawn on a 24-unit grid (thin, even strokes: the Nothing look). */
-enum class Glyph { LOUPE, ARROW_LEFT, ARROW_RIGHT, RETURN, CLOSE, BACK, PEN, MARKER, ERASER, LASSO, UNDO, REDO, HAND, PLUS, MENU, SEND, TRASH, CHECK, PDF, RULER, BOARD, DOWN, LEFT, RIGHT, GROUP, SHARE, LAPTOP, PAGE, UP_ARROW, DOWN_ARROW, SETTINGS, PIPETTE, LOCK, UNLOCK, COPY, CUT, PASTE, LASER, TEXT, SPACE, HEADING, SEARCH, PLOT, FOLDER, TAG, PIN, HOME, MARK, LIST, GRID, SPLIT, STAR, MAXIMIZE, RESTORE }
+enum class Glyph { BUCKET, LOUPE, ARROW_LEFT, ARROW_RIGHT, RETURN, CLOSE, BACK, PEN, MARKER, ERASER, LASSO, UNDO, REDO, HAND, PLUS, MENU, SEND, TRASH, CHECK, PDF, RULER, BOARD, DOWN, LEFT, RIGHT, GROUP, SHARE, LAPTOP, PAGE, UP_ARROW, DOWN_ARROW, SETTINGS, PIPETTE, LOCK, UNLOCK, COPY, CUT, PASTE, LASER, TEXT, SPACE, HEADING, SEARCH, PLOT, FOLDER, TAG, PIN, HOME, MARK, LIST, GRID, SPLIT, STAR, MAXIMIZE, RESTORE }
 
 @Composable
 fun GlyphIcon(g: Glyph, tint: Color, size: Dp = 22.dp) {
@@ -86,6 +86,8 @@ fun GlyphIcon(g: Glyph, tint: Color, size: Dp = 22.dp) {
                 line(9f, 15f, 17f, 4f); line(15f, 15f, 7f, 4f)
             }
             Glyph.PASTE -> { line(7f, 5f, 5f, 5f, 5f, 21f, 19f, 21f, 19f, 5f, 17f, 5f); line(9f, 3f, 15f, 3f, 15f, 7f, 9f, 7f, 9f, 3f); line(9f, 13f, 15f, 13f); line(9f, 17f, 13f, 17f) }
+            // The paint bucket: a tipped pail pouring a drop.
+            Glyph.BUCKET -> { line(5f, 11f, 11f, 5f, 18f, 12f, 12f, 18f, 5f, 11f); line(5f, 11f, 18f, 12f); line(19f, 14f, 20f, 17f, 19f, 19f, 18f, 17f, 19f, 14f) }
             Glyph.LASER -> { drawCircle(tint, 3f * k, Offset(16f * k, 8f * k)); line(4f, 20f, 13f, 11f); line(16f, 2f, 16f, 3.5f); line(22f, 8f, 20.5f, 8f); line(20.2f, 3.8f, 19.2f, 4.8f) }
             Glyph.TEXT -> { line(5f, 7f, 5f, 4.5f, 19f, 4.5f, 19f, 7f); line(12f, 4.5f, 12f, 19.5f); line(9f, 19.5f, 15f, 19.5f) }
             Glyph.UP_ARROW -> { line(12f, 20f, 12f, 4f); line(6f, 10f, 12f, 4f, 18f, 10f) }

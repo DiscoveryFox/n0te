@@ -52,6 +52,7 @@ fn tool_label(t: Tool) -> &'static str {
         Tool::Text => tr("Text"),
         Tool::Laser => tr("Laser"),
         Tool::Space => tr("Platz"),
+        Tool::Fill => tr("Füllen"),
     }
 }
 
@@ -154,7 +155,7 @@ pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
     let pen = format!("{} ▾", pen_label(t.pen));
     tools_w += label_w(&pen, big, 24.0);
     tools = tools.push(tool_button(&pen, pen_on, pen_msg));
-    for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso, Tool::Space, Tool::Text, Tool::Laser] {
+    for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso, Tool::Space, Tool::Text, Tool::Laser, Tool::Fill] {
         tools_w += label_w(tool_label(tool), big, 24.0);
         tools = tools.push(tool_button(tool_label(tool), t.tool == tool, Msg::Tool(tool)));
     }

@@ -23,6 +23,7 @@ import uniffi.n0te_ffi.FfiBrush
 import uniffi.n0te_ffi.FfiInstrumentShape
 import uniffi.n0te_ffi.FfiLaserLook
 import uniffi.n0te_ffi.compassArc
+import uniffi.n0te_ffi.fillRegion
 import uniffi.n0te_ffi.compassLabel
 import uniffi.n0te_ffi.compassSnapRadius
 import uniffi.n0te_ffi.instrumentContains
@@ -58,7 +59,7 @@ import kotlin.math.min
  */
 class NotebookView(context: Context) : View(context) {
 
-    enum class Tool { PEN, MARKER, ERASER, LASSO, LASER, TEXT }
+    enum class Tool { PEN, MARKER, ERASER, LASSO, LASER, TEXT, FILL }
 
     /** NONE; ZOOM: zoom fixed, only up/down; PAGE: zoom free, sideways stays on the page. In both a sideways pull moves to the next side page. */
     enum class Lock { NONE, ZOOM, PAGE }
@@ -766,6 +767,23 @@ class NotebookView(context: Context) : View(context) {
     private var compassPreview: Path? = null
 
     private fun compassReset() { compassStage = 0; compassPreview = null; compassMovingNeedle = false }
+
+    /** Fills the closed area at (lx, ly) of [p] (sheet points) with the colour in use: a tint, or hatching. */
+    private fun fillAt(m: NotebookModel, p: Placed, lx: Float, ly: Float) {
+        val st = m.sheets[p.sheetId] ?: return
+        val walls = st.strokes.filter { it.id !in st.hidden && it.kind != KIND_FILL }.map { it.outline.toList() }
+        // A board has no edge: a window round the tap.
+        val area = if (p.isBoard) listOf(lx - 600f, ly - 600f, lx + 600f, ly + 600f) else listOf(0f, 0f, p.rect.width(), p.rect.height())
+        val hatch = Settings.fillHatch
+        val base = freeInk ?: Tools.inks[colorIdx]
+        val b = FfiBrush(0.8f, 0f, ((base and 0x00FFFFFF) or ((if (hatch) 0xFF else 0x59) shl 24)).toUInt(), (KIND_FILL or (if (hatch) 1 shl 4 else 0)).toUByte())
+        N0te.background({ fillRegion(walls, lx, ly, area, 3f) }) { r ->
+            val bytes = r.getOrNull() ?: return@background
+            if (bytes.isEmpty()) { listener?.onMessage("Die Fläche ist nicht geschlossen"); return@background }
+            m.addStroke(p.sheetId, b, bytes, floatsOf(strokeOutline(b, bytes)))
+            invalidate()
+        }
+    }
 
     /** Where a pin snaps near (wx, wy): ends and crossings of the page's strokes (world). */
     private fun pinAt(p: Placed, wx: Float, wy: Float): FloatArray {
@@ -3222,6 +3240,12 @@ class NotebookView(context: Context) : View(context) {
             pickColorAt(x.toInt(), y.toInt())?.let(pick)
             return
         }
+        // The paint bucket: a tap fills the closed area there (bounded by the page's ink).
+        if (tool == Tool.FILL && !erasing && !readOnly) {
+            action = Action.TAP; target = null
+            m.placed.firstOrNull { it.rect.contains(wx, wy) }?.let { fillAt(m, it, wx - it.rect.left, wy - it.rect.top) }
+            return
+        }
         if (tool == Tool.LASER && !erasing) {
             // Laser pointer: anywhere, doesn't touch the selection or the pages.
             action = Action.LASER; target = null
@@ -5197,6 +5221,8 @@ class NotebookView(context: Context) : View(context) {
         const val SEL_LAYER_MAX = 4096
         const val SEL_LAYER_PIXELS = 8L shl 20
         const val KIND_PENCIL = 1
+        /** A filled area (the paint bucket; core ink KIND_FILL). */
+        const val KIND_FILL = 3
         /** The zoom counts as resting this long after it last changed (the ink's tiles are then drawn at it). */
         const val ZOOM_REST_MS = 220L
         const val LAYOUT_ANIM_MS = 300f

@@ -1961,6 +1961,15 @@ class NotebookActivity : ComponentActivity() {
                 "add" -> Dropdown("add") { AddMenu() }
                 "export" -> ExportDialog()
                 "pen" -> Dropdown("pen") { PenMenu() }
+                "fill" -> Dropdown("fill") {
+                    Column(Modifier.width(240.dp)) {
+                        Section("Füllen")
+                        listOf(false to "Fläche (durchscheinend)", true to "Schraffur").forEach { (h, label) ->
+                            MenuRow(label, null, { Settings.set("fill_hatch", h); tool = NotebookView.Tool.FILL; applyTools(); menu = null },
+                                trailing = if (Settings.fillHatch == h) { { Text("✓", color = Ui.Red, fontSize = 15.sp) } } else null)
+                        }
+                    }
+                }
                 "instrument" -> Dropdown("instrument") {
                     Column(Modifier.width(260.dp)) {
                         Section("Instrument")
@@ -2796,6 +2805,10 @@ class NotebookActivity : ComponentActivity() {
             IconBtn(Glyph.PEN, selected = tool == NotebookView.Tool.PEN, key = "pen",
                 onLongClick = { menu = "pen" }) { if (tool == NotebookView.Tool.PEN) menu = "pen" else { tool = NotebookView.Tool.PEN; applyTools() } }
             if (Settings.toolMarker) IconBtn(Glyph.MARKER, selected = tool == NotebookView.Tool.MARKER) { tool = NotebookView.Tool.MARKER; applyTools() }
+            // The paint bucket: tap a closed area; hold for tint or hatching.
+            if (Settings.toolFill) IconBtn(Glyph.BUCKET, selected = tool == NotebookView.Tool.FILL, key = "fill", onLongClick = { menu = "fill" }) {
+                if (tool == NotebookView.Tool.FILL) menu = "fill" else { tool = NotebookView.Tool.FILL; applyTools(); flash("Füllen: in eine geschlossene Fläche tippen") }
+            }
             EraserBtn()
             if (Settings.toolLasso) SelectBtn()
             if (Settings.toolLaser) IconBtn(Glyph.LASER, selected = tool == NotebookView.Tool.LASER) { tool = NotebookView.Tool.LASER; applyTools() }

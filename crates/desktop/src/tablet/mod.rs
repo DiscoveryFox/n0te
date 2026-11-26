@@ -47,6 +47,8 @@ pub enum Tool {
     Laser,
     /// Put the pen down and drag: space goes into the page there, down or sideways.
     Space,
+    /// The paint bucket: a tap fills the closed area there (a tint, or hatching).
+    Fill,
 }
 
 /// How the eraser erases.
@@ -449,7 +451,7 @@ impl Tablet {
             Tool::Lasso => "lasso",
             Tool::Text => "text",
             Tool::Space => "space",
-            Tool::Pen | Tool::Laser => "pen",
+            Tool::Pen | Tool::Laser | Tool::Fill => "pen",
         };
         let widths = self.widths.iter().map(|w| format!("{w:.2}")).collect::<Vec<_>>().join(",");
         let f = &self.fountain;
@@ -759,6 +761,10 @@ impl App {
             self.space_down(key, &placed, at);
             return Task::none();
         }
+        if tool == Tool::Fill {
+            self.fill_at(&notebook, &placed, at);
+            return Task::none();
+        }
         // The compass: the pen sets the needle and the radius, then draws round the needle.
         if tool == Tool::Pen && map.is_none() && self.tablet.compass.as_ref().is_some_and(|c| c.key == key) {
             self.compass_down(key, &notebook, &placed, at, s.t_ms, cam.zoom);
@@ -847,7 +853,7 @@ impl App {
                 self.tablet.lassoing = Some(Lassoing { pane: key, notebook, sheet: placed.sheet_id.clone(), origin, polygon: vec![local.0, local.1] });
                 self.tablet.lasso_outline = Some((key, vec![at]));
             }
-            Tool::Text | Tool::Laser | Tool::Space => {}
+            Tool::Text | Tool::Laser | Tool::Space | Tool::Fill => {}
         }
         Task::none()
     }

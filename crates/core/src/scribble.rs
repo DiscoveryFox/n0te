@@ -432,7 +432,7 @@ fn seg_dist(px: f32, py: f32, a: (f32, f32), b: (f32, f32)) -> f32 {
 
 /// Euclidean distance (in cells) from each cell to the nearest cell outside the mask; 0
 /// outside. Felzenszwalb and Huttenlocher's two passes of 1-D lower envelopes.
-fn edt(mask: &[bool], w: usize, h: usize) -> Vec<f32> {
+pub(crate) fn edt(mask: &[bool], w: usize, h: usize) -> Vec<f32> {
     let inf = (2 * (w + h) * (w + h)) as f32;
     let mut g: Vec<f32> = mask.iter().map(|&m| if m { inf } else { 0.0 }).collect();
     let n = w.max(h);

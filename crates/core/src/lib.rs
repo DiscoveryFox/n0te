@@ -7,6 +7,7 @@
 pub mod arrows;
 pub mod design;
 pub mod error;
+pub mod fill;
 pub mod format;
 pub mod ids;
 pub mod ink;

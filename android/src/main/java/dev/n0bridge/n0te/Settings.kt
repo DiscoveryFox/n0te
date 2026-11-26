@@ -103,6 +103,9 @@ object Settings {
     val toolLaser get() = b("tool_laser", true)
     /** Favourite pens in the tool bar. */
     val toolFavourites get() = b("tool_favourites", true)
+    /** The paint bucket in the tool bar, and whether it hatches (else a tint). */
+    val toolFill get() = b("tool_fill", true)
+    val fillHatch get() = b("fill_hatch", false)
     /** The instrument the ruler button lays down: 0 ruler, 1 Geodreieck, 2 protractor, 3 compass. */
     val instrument get() = f("instrument", 0f).toInt().coerceIn(0, 3)
     // Pencil look (see Pencil): grain 0 = smooth … 1 = rough; softness 0 = even … 1 = soft edge,

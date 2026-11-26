@@ -740,6 +740,8 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("PDF", "PDF"),
     ("Als Favorit gemerkt · Rechtsklick entfernt", "Kept as a favourite · right click removes it"),
     ("Geodreieck", "Set square"),
+    ("Füllen", "Fill"),
+    ("Die Fläche ist nicht geschlossen", "The area isn't closed"),
     ("Winkelmesser", "Protractor"),
     ("Zirkel", "Compass"),
     ("Stift setzen: Nadel · ziehen: Radius · dann rundherum zeichnen", "Pen down: the needle · drag: the radius · then draw round it"),

@@ -242,6 +242,10 @@ impl Sheet {
             let Some(runs) = cut_stroke(&s.points, s.brush.width, path) else { continue };
             changed += 1;
             self.objects.delete(&s.id)?;
+            // A filled area goes whole (cut open, its outline would make no sense).
+            if s.brush.base_kind() == ink::KIND_FILL {
+                continue;
+            }
             for run in runs {
                 let id = ids::new_id(self.doc.peer_id());
                 self.objects.insert(&id, LoroValue::Binary(encode_stroke(&s.brush, &run).into()))?;
@@ -254,7 +258,11 @@ impl Sheet {
     /// What a scribble over `area` could cover ([`scribble::judge`]): strokes by their
     /// samples, pictures and graphs as boxes.
     pub fn scribble_targets(&self, area: Rect) -> Vec<scribble::Target> {
-        let mut out: Vec<scribble::Target> = self.strokes_in(Some(area)).iter().map(|s| scribble::Target::stroke(s.id.clone(), &s.points, s.brush.width)).collect();
+        let mut out: Vec<scribble::Target> = self
+            .strokes_in(Some(area))
+            .iter()
+            .map(|s| if s.brush.base_kind() == ink::KIND_FILL { scribble::Target::boxed(s.id.clone(), s.bounds) } else { scribble::Target::stroke(s.id.clone(), &s.points, s.brush.width) })
+            .collect();
         let boxes = self.images().into_iter().map(|i| (i.id, i.x, i.y, i.w, i.h)).chain(self.plots().into_iter().map(|p| (p.id, p.x, p.y, p.w, p.h)));
         for (id, x, y, w, h) in boxes {
             let r = Rect::new(x, y, x + w, y + h);

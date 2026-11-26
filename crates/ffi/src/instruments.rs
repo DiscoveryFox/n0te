@@ -105,3 +105,18 @@ pub fn snap_pin(ends: Vec<f32>, x: f32, y: f32, radius: f32) -> Vec<f32> {
     let s: Vec<((f32, f32), (f32, f32), f32)> = ends.chunks_exact(5).map(|c| ((c[0], c[1]), (c[2], c[3]), c[4])).collect();
     instruments::snap_point_ends(&s, x, y, radius).map(|(a, b)| vec![a, b]).unwrap_or_default()
 }
+
+/// The paint bucket: the area a tap at (x, y) fills on a page `area` (x0, y0, x1, y1), bounded
+/// by the strokes' outlines (`walls`), gaps narrower than 2 × `gap` closed: the samples of a
+/// fill stroke (packed x, y, pressure, t), empty when the area isn't closed.
+#[uniffi::export]
+pub fn fill_region(walls: Vec<Vec<f32>>, x: f32, y: f32, area: Vec<f32>, gap: f32) -> Vec<u8> {
+    if area.len() < 4 {
+        return Vec::new();
+    }
+    let r = n0te_core::ink::Rect::new(area[0], area[1], area[2], area[3]);
+    match n0te_core::fill::region(&walls, x, y, r, gap) {
+        Some(poly) => crate::pack_points(&poly.into_iter().map(|(x, y)| n0te_core::ink::InkPoint { x, y, pressure: 0.5, t_ms: 0 }).collect::<Vec<_>>()),
+        None => Vec::new(),
+    }
+}

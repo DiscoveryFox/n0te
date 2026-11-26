@@ -32,6 +32,10 @@ pub struct Brush {
 pub const KIND_PEN: u8 = 0;
 pub const KIND_PENCIL: u8 = 1;
 pub const KIND_MARKER: u8 = 2;
+/// A filled area (the paint bucket, [`crate::fill`]): its points go round its outline, holes
+/// joined in by zero-width links; dashed ([`DASH_DASHED`]) it is hatched with lines `width`
+/// wide instead. Apps before 0.37 draw such a stroke as a line round the area.
+pub const KIND_FILL: u8 = 3;
 
 /// How a pen stroke is dashed, in bits 4–5 of [`Brush::kind`] (apps before 0.36 don't know
 /// these kinds and draw such strokes solid, rather than losing them).
@@ -50,9 +54,10 @@ impl Brush {
     pub fn dash(&self) -> u8 {
         (self.kind >> DASH_SHIFT) & 3
     }
-    /// The same brush dashed `dash` (only pens dash; pencils and markers stay solid).
+    /// The same brush dashed `dash` (only pens dash and fills hatch; pencils and markers stay
+    /// solid).
     pub fn with_dash(self, dash: u8) -> Brush {
-        let dash = if self.base_kind() == KIND_PEN { dash & 3 } else { 0 };
+        let dash = if matches!(self.base_kind(), KIND_PEN | KIND_FILL) { dash & 3 } else { 0 };
         Brush { kind: self.base_kind() | (dash << DASH_SHIFT), ..self }
     }
 }
@@ -254,6 +259,9 @@ impl Default for Rect {
 /// ends get round caps. A single sample becomes a dot. The polygon is meant to be filled with
 /// the non-zero rule, which also handles self-overlapping strokes.
 pub fn outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
+    if brush.base_kind() == KIND_FILL {
+        return fill_outline(points, brush);
+    }
     if let Some(runs) = dash_runs(points, brush) {
         return joined(&runs, &Brush { kind: brush.base_kind(), ..*brush });
     }
@@ -308,6 +316,10 @@ pub fn pencil_layer_brushes(brush: &Brush) -> [Brush; 2] {
 /// overlap too, which is invisible for opaque ink (draw translucent ink, e.g. highlighters,
 /// into a separate layer).
 pub fn outline_mesh(points: &[InkPoint], brush: &Brush, xy: &mut Vec<f32>, indices: &mut Vec<u32>) {
+    if brush.base_kind() == KIND_FILL {
+        fill_mesh(points, brush, xy, indices);
+        return;
+    }
     if let Some(runs) = dash_runs(points, brush) {
         let solid = Brush { kind: brush.base_kind(), ..*brush };
         for r in &runs {
@@ -356,6 +368,138 @@ pub fn outline_mesh(points: &[InkPoint], brush: &Brush, xy: &mut Vec<f32>, indic
             let (dx, dy) = direction(&pts, 0);
             fan(pts[0].0, pts[0].1, r_start, (-dx, -dy), base + 1, base);
         }
+    }
+}
+
+// --- filled areas ---------------------------------------------------------------------------
+
+/// Where a horizontal line at `y` is inside the polygon (non-zero rule): spans (x0, x1).
+fn spans(poly: &[(f32, f32)], y: f32) -> Vec<(f32, f32)> {
+    let n = poly.len();
+    let mut cross: Vec<(f32, i32)> = Vec::new();
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        if (a.1 <= y && b.1 > y) || (b.1 <= y && a.1 > y) {
+            let x = a.0 + (y - a.1) / (b.1 - a.1) * (b.0 - a.0);
+            cross.push((x, if b.1 > a.1 { 1 } else { -1 }));
+        }
+    }
+    cross.sort_by(|p, q| p.0.total_cmp(&q.0));
+    let mut out = Vec::new();
+    let (mut w, mut start) = (0, 0.0);
+    for (x, d) in cross {
+        let was = w;
+        w += d;
+        if was == 0 && w != 0 {
+            start = x;
+        } else if was != 0 && w == 0 && x > start {
+            out.push((start, x));
+        }
+    }
+    out
+}
+
+/// The hatch lines of a filled area (45°, `gap` apart): segments in page points.
+fn hatch(poly: &[(f32, f32)], gap: f32) -> Vec<((f32, f32), (f32, f32))> {
+    let (c, s) = (std::f32::consts::FRAC_1_SQRT_2, std::f32::consts::FRAC_1_SQRT_2);
+    // Turned so the hatching runs horizontally, then back.
+    let turned: Vec<(f32, f32)> = poly.iter().map(|&(x, y)| (x * c + y * s, -x * s + y * c)).collect();
+    let (y0, y1) = turned.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
+    let mut out = Vec::new();
+    if !(y1 > y0) || turned.len() < 3 || !(y1 - y0).is_finite() {
+        return out;
+    }
+    // At most 20 000 lines, however big the area (one from another device may be absurd).
+    let gap = gap.max((y1 - y0) / 20_000.0);
+    let mut y = (y0 / gap).ceil() * gap;
+    while y <= y1 && out.len() < 20_000 {
+        for (a, b) in spans(&turned, y) {
+            out.push(((a * c - y * s, a * s + y * c), (b * c - y * s, b * s + y * c)));
+        }
+        let next = y + gap;
+        if next <= y {
+            break;
+        }
+        y = next;
+    }
+    out
+}
+
+fn hatch_gap(brush: &Brush) -> f32 {
+    (brush.width * 3.0 + 3.0).max(4.0)
+}
+
+fn fill_poly(points: &[InkPoint]) -> Vec<(f32, f32)> {
+    points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect()
+}
+
+/// A filled area as one polygon: the area itself, or its hatch lines as thin bars joined by
+/// zero-width links.
+fn fill_outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
+    let poly = fill_poly(points);
+    if brush.dash() == DASH_SOLID {
+        return poly.iter().flat_map(|&(x, y)| [x, y]).collect();
+    }
+    let w = brush.width.max(0.3) / 2.0;
+    let bars: Vec<[(f32, f32); 4]> = hatch(&poly, hatch_gap(brush)).into_iter().map(|(a, b)| bar(a, b, w)).collect();
+    let mut out = Vec::with_capacity(bars.len() * 10);
+    for q in &bars {
+        for p in q {
+            out.extend_from_slice(&[p.0, p.1]);
+        }
+        out.extend_from_slice(&[q[0].0, q[0].1]);
+    }
+    for q in bars.iter().rev().skip(1) {
+        out.extend_from_slice(&[q[0].0, q[0].1]);
+    }
+    out
+}
+
+/// A segment as a bar `w` either side of it.
+fn bar(a: (f32, f32), b: (f32, f32), w: f32) -> [(f32, f32); 4] {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let l = dx.hypot(dy).max(1e-6);
+    let (nx, ny) = (-dy / l * w, dx / l * w);
+    [(a.0 + nx, a.1 + ny), (b.0 + nx, b.1 + ny), (b.0 - nx, b.1 - ny), (a.0 - nx, a.1 - ny)]
+}
+
+/// A filled area as triangles: rows half a point high across it (they meet without
+/// overlapping, so a see-through fill is even), or its hatch lines.
+fn fill_mesh(points: &[InkPoint], brush: &Brush, xy: &mut Vec<f32>, indices: &mut Vec<u32>) {
+    let poly = fill_poly(points);
+    let quad = |q: [(f32, f32); 4], xy: &mut Vec<f32>, indices: &mut Vec<u32>| {
+        let base = (xy.len() / 2) as u32;
+        for p in q {
+            xy.extend_from_slice(&[p.0, p.1]);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    };
+    if brush.dash() != DASH_SOLID {
+        let w = brush.width.max(0.3) / 2.0;
+        for (a, b) in hatch(&poly, hatch_gap(brush)) {
+            quad(bar(a, b, w), xy, indices);
+        }
+        return;
+    }
+    let (y0, y1) = poly.iter().fold((f32::MAX, f32::MIN), |a, p| (a.0.min(p.1), a.1.max(p.1)));
+    if !(y1 > y0) || poly.len() < 3 {
+        return;
+    }
+    if !(y1 - y0).is_finite() {
+        return;
+    }
+    let h = 0.5f32.max((y1 - y0) / 4000.0);
+    let mut y = y0;
+    while y < y1 {
+        let mid = y + h / 2.0;
+        for (a, b) in spans(&poly, mid) {
+            quad([(a, y), (b, y), (b, y + h), (a, y + h)], xy, indices);
+        }
+        let next = y + h;
+        if next <= y {
+            break;
+        }
+        y = next;
     }
 }
 
