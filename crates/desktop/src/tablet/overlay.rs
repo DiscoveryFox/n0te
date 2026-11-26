@@ -374,5 +374,12 @@ impl canvas::Program<Message> for StripMarks {
 pub fn layers<'a>(app: &'a App, o: &'a Open) -> Vec<Element<'a, Message>> {
     let mut out: Vec<Element<'a, Message>> = view(app, &app.tablet, o).into_iter().collect();
     out.extend(loupe_layers(app, o));
+    // What the selection can do, floating by it (not while the pen moves it).
+    if let Some((key, r)) = app.selection_bar().filter(|_| !app.tablet.busy())
+        && key == o.key
+        && let Some(bar) = super::toolbar::selection_bar(&app.tablet)
+    {
+        out.push(pin(bar).x(r.x - o.camera.origin.x).y(r.y - o.camera.origin.y).into());
+    }
     out
 }

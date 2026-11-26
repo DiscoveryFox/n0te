@@ -113,6 +113,25 @@ fn main() {
     }
     h.screenshot(out.join("tablet.png"));
     println!("tablet.png");
+    // A small pen laptop (1200 × 800 logical px, e.g. 1800 × 1200 at 150 %): the bar must fit.
+    if std::env::var_os("N0TE_SHOTS_NARROW").is_some() {
+        let wide = h.size;
+        h.size = Size::new(1200.0, 800.0);
+        for _ in 0..3 {
+            h.events(&[]);
+        }
+        h.screenshot(out.join("tablet-narrow.png"));
+        println!("tablet-narrow.png");
+        h.message(Message::Tablet(Msg::Tool(Tool::Eraser)));
+        h.events(&[]);
+        h.screenshot(out.join("tablet-narrow-eraser.png"));
+        println!("tablet-narrow-eraser.png");
+        h.message(Message::Tablet(Msg::Tool(Tool::Lasso)));
+        h.size = wide;
+        for _ in 0..3 {
+            h.events(&[]);
+        }
+    }
     h.message(Message::Tablet(Msg::ClearSelection));
     h.message(Message::Tablet(Msg::Tool(Tool::Pen)));
     h.message(Message::Tablet(Msg::PenMenu(true)));

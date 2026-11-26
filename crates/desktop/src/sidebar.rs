@@ -161,8 +161,8 @@ pub fn view<'a>(app: &'a App, o: &'a Open, current: u32, ids: Ids) -> Element<'a
     let search = &o.search;
     let pictures = app.settings.outline_pictures;
     let view_pick = |glyph: &'static [u8], on: bool, id: &'static str| {
-        container(button(shelf::icon(glyph, 14.0, if on { theme::p().chrome } else { theme::p().muted })).padding([4, 7]).on_press(om(Msg::Pictures(id == "pictures"))).style(theme::tab(on)))
-            .id(ids.named(id))
+        let label = if id == "pictures" { tr("Als Seitenbilder") } else { tr("Als Liste") };
+        widgets::tip(container(button(shelf::icon(glyph, 14.0, if on { theme::p().chrome } else { theme::p().muted })).padding([4, 7]).on_press(om(Msg::Pictures(id == "pictures"))).style(theme::tab(on))).id(ids.named(id)), label)
     };
     let n = o.pages.total_pages;
     let head = row![
@@ -263,7 +263,7 @@ fn field(query: &str, ids: Ids) -> Element<'_, Message> {
     ]
     .width(Length::Fill);
     if !query.is_empty() {
-        let clear = button(text("×").size(14).line_height(1.0)).padding([2, 7]).on_press(Message::SearchClear).style(theme::ghost);
+        let clear = widgets::tip(button(text("×").size(14).line_height(1.0)).padding([2, 7]).on_press(Message::SearchClear).style(theme::ghost), tr("Suche leeren (Esc)"));
         layers = layers.push(container(clear).padding(Padding { right: 4.0, ..Padding::ZERO }).align_right(Length::Fill).center_y(Length::Fill));
     }
     layers.into()
@@ -435,7 +435,7 @@ fn marked_pages<'a>(o: &'a Open, headings: &HashMap<String, Vec<Heading>>, marke
             s => format!("{} · {}", if s < 0 { format!("L{}", -s) } else { format!("R{s}") }, main_name.unwrap_or_else(|| tr("Seite").into())),
         };
         let on = p.side == 0 && p.number == current;
-        let unmark = button(shelf::icon(shelf::RIBBON, 14.0, theme::p().accent)).padding([4, 6]).on_press(om(Msg::Mark((*node).clone(), false))).style(theme::ghost);
+        let unmark = widgets::tip(button(shelf::icon(shelf::RIBBON, 14.0, theme::p().accent)).padding([4, 6]).on_press(om(Msg::Mark((*node).clone(), false))).style(theme::ghost), tr("Nicht mehr merken"));
         let content = row![
             pages::thumb(&o.pages, i, MARKED_PICTURE_W, on),
             text(format!("{:02}", p.number)).font(theme::meta_font()).size(11.5).color(if on { theme::p().accent } else { theme::p().muted }).width(26),

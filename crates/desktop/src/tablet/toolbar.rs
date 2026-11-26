@@ -38,9 +38,9 @@ fn visible_on_chrome(c: Color) -> Color {
     if (lum - bg_lum).abs() < 0.18 { theme::p().text } else { c }
 }
 
-fn icon_button<'a>(glyph: &'static [u8], m: Option<Msg>) -> Element<'a, Message> {
+fn icon_button<'a>(glyph: &'static [u8], m: Option<Msg>, label: &'a str) -> Element<'a, Message> {
     let color = if m.is_some() { theme::p().text } else { theme::p().muted };
-    button(crate::shelf::icon(glyph, 20.0, color)).padding(10).on_press_maybe(m.map(msg)).style(theme::ghost).into()
+    crate::widgets::tip(button(crate::shelf::icon(glyph, 20.0, color)).padding(10).on_press_maybe(m.map(msg)).style(theme::ghost), label)
 }
 
 fn tool_label(t: Tool) -> &'static str {
@@ -61,6 +61,8 @@ fn tool_label(t: Tool) -> &'static str {
 pub struct Bar {
     /// None: no board there; Some(open): a board, open on its own or not.
     pub board: Option<bool>,
+    /// The window's width (logical px; 0: unknown): too narrow for one row, the bar takes two.
+    pub width: f32,
 }
 
 pub fn pen_label(p: PenType) -> &'static str {
@@ -115,20 +117,29 @@ fn tool_button<'a>(label: &str, on: bool, m: Msg) -> Element<'a, Message> {
     button(text(theme::cased(label)).font(theme::label_font()).size(theme::label_size() + 1.0)).padding([10, 12]).on_press(msg(m)).style(theme::option(on)).into()
 }
 
-/// The bar itself.
+/// About how wide a button with `label` is (the mono designs' capitals are wide).
+fn label_w(label: &str, size: f32, pad: f32) -> f32 {
+    label.chars().count() as f32 * size * 0.62 + pad + 4.0
+}
+
+/// The bar itself: tools, colours, widths (the eraser's two ways instead while it is chosen),
+/// pasting, the ruler, magnifier and board, undo / redo (what a selection can do floats over the
+/// page: [`selection_bar`]). Where one row can't hold all of that (a small pen laptop, German
+/// labels; counted with the widest of those choices, so the bar never changes its height when a
+/// tool is picked), the colours and widths get a second row, and undo and redo stay in reach.
 pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
     let mut tools = row![].spacing(4).align_y(Alignment::Center);
+    let mut tools_w = 0.0;
+    let big = theme::label_size() + 1.0;
     // "Stift" shows the pen type and opens its menu when already chosen.
     let pen_on = t.tool == Tool::Pen;
     let pen_msg = if pen_on { Msg::PenMenu(!t.pen_menu) } else { Msg::Tool(Tool::Pen) };
-    tools = tools.push(tool_button(&format!("{} ▾", pen_label(t.pen)), pen_on, pen_msg));
+    let pen = format!("{} ▾", pen_label(t.pen));
+    tools_w += label_w(&pen, big, 24.0);
+    tools = tools.push(tool_button(&pen, pen_on, pen_msg));
     for tool in [Tool::Marker, Tool::Eraser, Tool::Lasso, Tool::Space, Tool::Text, Tool::Laser] {
+        tools_w += label_w(tool_label(tool), big, 24.0);
         tools = tools.push(tool_button(tool_label(tool), t.tool == tool, Msg::Tool(tool)));
-    }
-    if t.tool == Tool::Eraser {
-        tools = tools.push(Space::new().width(6));
-        tools = tools.push(tool_button(tr("Ganze Striche"), t.eraser_mode == EraserMode::Stroke, Msg::EraserMode(EraserMode::Stroke)));
-        tools = tools.push(tool_button(tr("Fläche"), t.eraser_mode == EraserMode::Area, Msg::EraserMode(EraserMode::Area)));
     }
     let mut colors = row![].spacing(0).align_y(Alignment::Center);
     let pal = pens::PALETTES[t.palette % pens::PALETTES.len()];
@@ -136,36 +147,72 @@ pub fn view(t: &Tablet, extra: Bar) -> Element<'_, Message> {
         colors = colors.push(swatch(*c, i == t.color && matches!(t.tool, Tool::Pen | Tool::Marker), i));
     }
     let ink = visible_on_chrome(argb(t.ink() | 0xFF00_0000));
+    // The pens' widths; the eraser erases whole strokes or just where it goes instead.
     let mut widths = row![].spacing(2).align_y(Alignment::Center);
-    for (i, w) in t.widths.iter().enumerate() {
-        widths = widths.push(width_button(*w, i == t.width, i, ink));
+    if t.tool == Tool::Eraser {
+        widths = widths.push(tool_button(tr("Ganze Striche"), t.eraser_mode == EraserMode::Stroke, Msg::EraserMode(EraserMode::Stroke)));
+        widths = widths.push(tool_button(tr("Fläche"), t.eraser_mode == EraserMode::Area, Msg::EraserMode(EraserMode::Area)));
+    } else {
+        for (i, w) in t.widths.iter().enumerate() {
+            widths = widths.push(width_button(*w, i == t.width, i, ink));
+        }
     }
-    let undo = icon_button(UNDO, t.can_undo().then_some(Msg::Undo));
-    let redo = icon_button(REDO, t.can_redo().then_some(Msg::Redo));
-    let mut bar = row![tools, Space::new().width(14), colors, Space::new().width(10), widths, Space::new().width(Length::Fill)].align_y(Alignment::Center);
-    if let Some(sel) = &t.selection {
-        bar = bar.push(text(trf("{} ausgewählt", &[&sel.ids.len()])).font(theme::meta_font()).size(theme::SMALL).color(theme::p().muted));
-        bar = bar.push(Space::new().width(8));
-        bar = bar.push(button(theme::btn_small(tr("Kopieren"))).padding(theme::pad()).on_press(msg(Msg::Copy)).style(theme::ghost));
-        bar = bar.push(button(theme::btn_small(tr("Ausschneiden"))).padding(theme::pad()).on_press(msg(Msg::Cut)).style(theme::ghost));
-        bar = bar.push(button(theme::btn_small(tr("Löschen"))).padding(theme::pad()).on_press(msg(Msg::DeleteSelection)).style(theme::ghost));
-        bar = bar.push(button(theme::btn_small(tr("Fertig"))).padding(theme::pad()).on_press(msg(Msg::ClearSelection)).style(theme::ghost));
-        bar = bar.push(Space::new().width(8));
-    }
-    if !t.clip_is_empty() && t.selection.is_none() {
-        bar = bar.push(button(theme::btn_small(tr("Einfügen"))).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost));
+    let widths_w = (t.widths.len() as f32 * 38.0).max(label_w(tr("Ganze Striche"), big, 24.0) + label_w(tr("Fläche"), big, 24.0));
+    let paint_w = 14.0 + pal.len() as f32 * 36.0 + 10.0 + widths_w;
+    // Pasting what was copied (a selection's own actions float over the page).
+    let small = theme::label_size() - 1.5;
+    let pad = theme::pad().left + theme::pad().right;
+    let mut actions = row![].align_y(Alignment::Center);
+    let actions_w = label_w(tr("Einfügen"), small, pad) + 8.0;
+    if t.selection.is_none() && !t.clip_is_empty() {
+        actions = actions.push(button(theme::btn_small(tr("Einfügen"))).padding(theme::pad()).on_press(msg(Msg::Paste)).style(theme::ghost)).push(Space::new().width(8));
     }
     // The ruler, the writing magnifier and a board on its own (like the tablet's right group).
-    bar = bar.push(tool_button(tr("Lineal"), t.ruler.is_some(), Msg::Ruler(t.ruler.is_none())));
+    let mut extras = row![tool_button(tr("Lineal"), t.ruler.is_some(), Msg::Ruler(t.ruler.is_none()))].spacing(4).align_y(Alignment::Center);
+    let extras_w = label_w(tr("Lineal"), big, 24.0) + label_w(tr("Lupe"), big, 24.0) + label_w(tr("Board"), big, 24.0);
     if extra.board != Some(true) {
-        bar = bar.push(tool_button(tr("Lupe"), t.loupe.is_some(), Msg::Loupe(t.loupe.is_none())));
+        extras = extras.push(tool_button(tr("Lupe"), t.loupe.is_some(), Msg::Loupe(t.loupe.is_none())));
     }
     if let Some(open) = extra.board {
-        bar = bar.push(tool_button(tr("Board"), open, Msg::Board(!open)));
+        extras = extras.push(tool_button(tr("Board"), open, Msg::Board(!open)));
     }
-    bar = bar.push(Space::new().width(8));
-    bar = bar.push(undo).push(redo);
+    let undo = icon_button(UNDO, t.can_undo().then_some(Msg::Undo), tr("Rückgängig (Strg Z)"));
+    let redo = icon_button(REDO, t.can_redo().then_some(Msg::Redo), tr("Wiederholen (Strg Y)"));
+    let end = row![extras, Space::new().width(8), undo, redo].align_y(Alignment::Center);
+    // The widest the bar gets: the eraser's buttons, "Einfügen", the board's.
+    let one_row = tools_w + paint_w + actions_w + extras_w + 8.0 + 2.0 * 40.0 + 20.0;
+    let bar: Element<'_, Message> = if extra.width <= 0.0 || one_row <= extra.width {
+        row![tools, Space::new().width(14), colors, Space::new().width(10), widths, Space::new().width(Length::Fill), actions, end].align_y(Alignment::Center).into()
+    } else {
+        column![
+            row![tools, Space::new().width(Length::Fill), end].align_y(Alignment::Center),
+            row![colors, Space::new().width(10), widths, Space::new().width(Length::Fill), actions].align_y(Alignment::Center),
+        ]
+        .spacing(2)
+        .into()
+    };
     container(bar).padding([4, 10]).width(Length::Fill).style(theme::chrome).into()
+}
+
+/// What the selection can do, in a small bar over the page above (or below) it: how many
+/// strokes, copy, cut, delete, done. `at`: its place in the pane (see
+/// [`App::selection_bar`](crate::app::App)).
+pub fn selection_bar<'a>(t: &'a Tablet) -> Option<Element<'a, Message>> {
+    let sel = t.selection.as_ref()?;
+    let mut bar = row![text(trf("{} ausgewählt", &[&sel.ids.len()])).font(theme::meta_font()).size(theme::SMALL).color(theme::p().muted), Space::new().width(6)].spacing(2).align_y(Alignment::Center);
+    for (l, m) in [(tr("Kopieren"), Msg::Copy), (tr("Ausschneiden"), Msg::Cut), (tr("Löschen"), Msg::DeleteSelection), (tr("Fertig"), Msg::ClearSelection)] {
+        bar = bar.push(button(theme::btn_small(l)).padding(theme::pad()).on_press(msg(m)).style(theme::ghost));
+    }
+    Some(container(bar).padding([4, 10]).style(theme::menu).into())
+}
+
+/// How big [`selection_bar`] is (logical px), for its place and to keep the pen off it.
+pub fn selection_bar_size(t: &Tablet) -> Option<iced::Size> {
+    let sel = t.selection.as_ref()?;
+    let small = theme::label_size() - 1.5;
+    let pad = theme::pad().left + theme::pad().right;
+    let w = trf("{} ausgewählt", &[&sel.ids.len()]).chars().count() as f32 * 7.2 + 8.0 + [tr("Kopieren"), tr("Ausschneiden"), tr("Löschen"), tr("Fertig")].iter().map(|l| label_w(l, small, pad) + 2.0).sum::<f32>() + 20.0;
+    Some(iced::Size::new(w, 40.0))
 }
 
 /// The pen-type menu (under the bar, left).

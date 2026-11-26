@@ -557,7 +557,8 @@ pub fn toolbar(app: &App) -> Element<'_, Message> {
         let sort = |label: &str, by: Sort| button(theme::btn_small(label)).padding(theme::pad()).on_press(sm(Msg::Sort(by))).style(theme::tab(s.sort == by));
         let list = app.settings.lib_list;
         let view = |glyph: &'static [u8], on: bool, id: &'static str| {
-            container(button(icon(glyph, 15.0, if on { theme::p().chrome } else { theme::p().muted })).padding([6, 9]).on_press(sm(Msg::ListView(id == "list"))).style(theme::tab(on))).id(iced::widget::Id::new(id))
+            let label = if id == "list" { tr("Als Liste") } else { tr("Als Karten") };
+            crate::widgets::tip(container(button(icon(glyph, 15.0, if on { theme::p().chrome } else { theme::p().muted })).padding([6, 9]).on_press(sm(Msg::ListView(id == "list"))).style(theme::tab(on))).id(iced::widget::Id::new(id)), label)
         };
         row![
             search_field(&s.query),
@@ -590,7 +591,7 @@ fn search_field(query: &str) -> Element<'_, Message> {
     ]
     .width(Length::Fixed(320.0));
     if !query.is_empty() {
-        let clear = button(text("×").size(14).line_height(1.0)).padding([2, 7]).on_press(sm(Msg::ClearQuery)).style(theme::ghost);
+        let clear = crate::widgets::tip(button(text("×").size(14).line_height(1.0)).padding([2, 7]).on_press(sm(Msg::ClearQuery)).style(theme::ghost), tr("Suche leeren (Esc)"));
         layers = layers.push(container(clear).padding(Padding { right: 4.0, ..Padding::ZERO }).align_right(Length::Fill).center_y(Length::Fill));
     }
     layers.into()

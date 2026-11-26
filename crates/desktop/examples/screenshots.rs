@@ -247,6 +247,28 @@ fn main() {
     h.app.history = Some(list);
     shot(&mut h, "history");
 
+    // Not for the README (N0TE_SHOTS_EXTRA=1): the dialogs without pictures above, and a smaller
+    // window (a 1280 × 800 laptop, German's long labels), to check nothing is cut off.
+    if std::env::var_os("N0TE_SHOTS_EXTRA").is_some() {
+        h.app.history = None;
+        h.message(Message::ShowHelp(true));
+        shot(&mut h, "x-help");
+        h.message(Message::ShowHelp(false));
+        h.message(Message::ShowExport(true));
+        shot(&mut h, "x-export");
+        h.message(Message::ShowExport(false));
+        h.size = Size::new(1280.0, 800.0);
+        h.message(Message::ShowPage(true));
+        shot(&mut h, "x-narrow-page");
+        h.message(Message::ShowPage(false));
+        h.message(Message::ShowSettings(true));
+        shot(&mut h, "x-narrow-settings");
+        h.message(Message::ShowSettings(false));
+        h.message(Message::Back);
+        shot(&mut h, "x-narrow-library");
+        h.size = Size::new(W, H);
+    }
+
     println!("screenshots in {}", out.display());
     drop(h);
     let _ = std::fs::remove_dir_all(scratch);

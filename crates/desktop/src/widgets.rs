@@ -569,3 +569,9 @@ impl<'a, Message: 'a> From<Divider<'a, Message>> for Element<'a, Message> {
         Element::new(w)
     }
 }
+
+/// What an icon button does, in a small label under it while the pointer rests on it.
+pub fn tip<'a, Message: 'a>(content: impl Into<Element<'a, Message>>, label: &'a str) -> Element<'a, Message> {
+    use iced::widget::{container, text, tooltip};
+    tooltip(content, container(text(label).size(12)).padding([3, 8]).style(theme::chip), tooltip::Position::Bottom).gap(4).into()
+}

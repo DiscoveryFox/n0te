@@ -898,8 +898,30 @@ impl App {
     /// The window areas where the pen writes, without the magnifier's buttons (the pen taps
     /// those like a finger).
     pub(crate) fn without_loupe_controls(&self, areas: Vec<Rectangle>) -> Vec<Rectangle> {
-        let Some(hole) = self.loupe_controls() else { return areas };
-        areas.into_iter().flat_map(|a| subtract(a, hole)).collect()
+        let mut areas = areas;
+        for hole in [self.loupe_controls(), self.selection_bar().map(|(_, r)| r)].into_iter().flatten() {
+            areas = areas.into_iter().flat_map(|a| subtract(a, hole)).collect();
+        }
+        areas
+    }
+
+    /// Where the selection's bar floats (window px), in the pane showing the selection (the
+    /// active one if both do): centred over the selection, above it, below it when there is no
+    /// room above, kept inside the pane.
+    pub fn selection_bar(&self) -> Option<(PaneKey, Rectangle)> {
+        let sel = self.tablet.selection.as_ref()?;
+        let size = super::toolbar::selection_bar_size(&self.tablet)?;
+        let Screen::Notebook(s) = &self.screen else { return None };
+        let o = s.pane(s.active).filter(|o| o.id == sel.notebook).or_else(|| s.panes.iter().find(|o| o.id == sel.notebook))?;
+        let page = o.pages.pages.iter().find(|p| p.placed.sheet_id == sel.sheet)?.placed.rect;
+        let view = Rectangle::new(o.camera.origin, o.camera.viewport);
+        let a = o.camera.to_screen(view, page.x0 + sel.bounds.x0, page.y0 + sel.bounds.y0);
+        let b = o.camera.to_screen(view, page.x0 + sel.bounds.x1, page.y0 + sel.bounds.y1);
+        let x = ((a.x + b.x) / 2.0 - size.width / 2.0).clamp(view.x + 8.0, (view.x + view.width - size.width - 8.0).max(view.x + 8.0));
+        let above = a.y - 14.0 - size.height;
+        let y = if above >= view.y + 8.0 { above } else { b.y + 14.0 };
+        let y = y.clamp(view.y + 8.0, (view.y + view.height - size.height - 8.0).max(view.y + 8.0));
+        Some((o.key, Rectangle::new(Point::new(x, y), size)))
     }
 
     /// Whether the tool in use is the space tool (the toolbar shows it chosen).

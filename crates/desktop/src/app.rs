@@ -3140,16 +3140,16 @@ impl App {
         {
             let x = (page.x0 + e.x - cam.x) * cam.zoom;
             let y = (page.y0 + e.y - cam.y) * cam.zoom;
-            let small = |label: &'static str, m: Message| button(text(label).font(theme::SANS_BOLD).size(12)).padding([3, 8]).on_press(m).style(theme::text_tool);
+            let small = |label: &'static str, m: Message, what: &'static str| crate::widgets::tip(button(text(label).font(theme::SANS_BOLD).size(12)).padding([3, 8]).on_press(m).style(theme::text_tool), what);
             let tools = row![
-                crate::widgets::grip("⠿", iced::mouse::Interaction::Grab, Message::MoveText, Message::PlaceText),
+                crate::widgets::tip(crate::widgets::grip("⠿", iced::mouse::Interaction::Grab, Message::MoveText, Message::PlaceText), tr("Ziehen: verschieben")),
                 Space::new().width(4),
-                small("A−", Message::TextSize(-2.0)),
-                small("A+", Message::TextSize(2.0)),
-                small("×", Message::DeleteText),
-                small("✓", Message::DoneText),
+                small("A−", Message::TextSize(-2.0), tr("Kleiner")),
+                small("A+", Message::TextSize(2.0), tr("Größer")),
+                small("×", Message::DeleteText, tr("Textfeld löschen")),
+                small("✓", Message::DoneText, tr("Fertig (Esc)")),
                 Space::new().width(Length::Fill),
-                crate::widgets::grip("↔", iced::mouse::Interaction::ResizingHorizontally, Message::ResizeText, Message::PlaceText),
+                crate::widgets::tip(crate::widgets::grip("↔", iced::mouse::Interaction::ResizingHorizontally, Message::ResizeText, Message::PlaceText), tr("Ziehen: Breite")),
             ]
             .spacing(4)
             .align_y(Alignment::Center)
@@ -3523,7 +3523,8 @@ impl App {
                 .align_y(Alignment::Center),
             );
         }
-        col = col.push(scrollable(rows).style(theme::scroll_dark).height(Length::Shrink).height(Length::Fixed(320.0)));
+        // The scrollbar beside the rows, not over their buttons.
+        col = col.push(scrollable(rows).spacing(8).style(theme::scroll_dark).height(Length::Fixed(320.0)));
         container(col).padding(20).width(Length::Fill).max_width(760).style(theme::panel).into()
     }
 
@@ -3948,7 +3949,9 @@ impl App {
         let tablet_bar: Element<'a, Message> = if crate::mode() == crate::Mode::Tablet {
             // A board in the middle of the active pane (open on its own or not).
             let board = o.pages.board.as_ref().map(|_| true).or_else(|| o.pages.index_of_number(o.pages.current_number(&o.camera)).filter(|&i| o.pages.pages[i].placed.is_board()).map(|_| false));
-            crate::tablet::toolbar::view(&self.tablet, crate::tablet::toolbar::Bar { board })
+            // The window's width: where the rightmost pane ends (the pages reach the window's edge).
+            let width = s.panes.iter().map(|p| p.camera.origin.x + p.camera.viewport.width).fold(0.0, f32::max);
+            crate::tablet::toolbar::view(&self.tablet, crate::tablet::toolbar::Bar { board, width })
         } else {
             Space::new().height(0).into()
         };
@@ -3990,6 +3993,14 @@ impl App {
         if tablet {
             layers.extend(crate::tablet::overlay::layers(self, o));
         }
+        // A notebook without a single page (all deleted, or not synced here yet) says so.
+        if o.rows.is_empty() {
+            let mut empty = column![theme::heading(tr("Noch keine Seite"), 22.0), text(tr("Dieses Notizbuch ist leer.")).size(14).color(theme::p().muted)].spacing(10).align_x(Alignment::Center);
+            if !self.read_only_nb(&o.id) {
+                empty = empty.push(button(theme::btn(tr("+ Seite"))).padding(theme::pad()).on_press(split::route(o.key, Message::Outline(sidebar::Msg::AddPage))).style(theme::accent_button));
+            }
+            layers.push(container(empty).center(Length::Fill).into());
+        }
         let canvas: Element<'a, Message> = iced::widget::Stack::with_children(layers).into();
         let mut body = row![];
         if o.sidebar {
@@ -4026,50 +4037,65 @@ impl App {
     }
 
     fn top_bar<'a>(&'a self, s: &'a Split, o: &'a Open, current: u32) -> Element<'a, Message> {
-        let chip = |s: String| container(text(s).font(theme::meta_font()).size(theme::SMALL)).padding([3, 10]).style(theme::chip);
         // Two panes: live is the main pane's (★).
         let star = if s.panes.len() > 1 { "★ " } else { "" };
-        container(
+        let share = self.share_label(&o.id);
+        let live = match &self.live_session {
+            Some(l) => format!("{star}● Live · {}", l.name),
+            None => format!("{star}Live"),
+        };
+        let bar = iced::widget::responsive(move |size| {
+            // What the labels need (roughly: the mono designs' capitals are wide). A narrow window
+            // gets the short labels (the long ones as tips), then the title gives way.
+            let w = |l: &str| l.chars().count() as f32 * theme::label_size() * 0.66 + theme::pad().left + theme::pad().right + 6.0;
+            let fixed = w(tr("‹ Bibliothek")) + 18.0 + 70.0 + 8.0 + 80.0 + 6.0 + 40.0 + 14.0 + w(tr("Notizen")) + w("Export") + w(&share) + w(&live);
+            let long = w(tr("+ Textseite")) + w(tr("+ Koordinatensystem")) + w(tr("PDF einfügen"));
+            let title = o.nb.title();
+            let title_w = (title.chars().count() as f32 * 9.0).min(260.0);
+            let narrow = size.width < fixed + long + title_w;
+            let room = if narrow { size.width - fixed - w(tr("+ Text")) - w(tr("+ Graph")) - w("PDF") } else { size.width - fixed - long };
+            let title = crate::library::fit(&title, ((room - 24.0) / 9.0).max(4.0) as usize);
+            let action = |short: &'static str, full: &'static str, m: Message, on: bool| -> Element<'a, Message> {
+                let b = button(theme::btn(if narrow { short } else { full })).padding(theme::pad()).on_press(m).style(theme::tab(on));
+                if narrow { crate::widgets::tip(b, full) } else { b.into() }
+            };
             row![
                 button(theme::btn(tr("‹ Bibliothek"))).padding(theme::pad()).on_press(Message::Back).style(theme::ghost),
                 Space::new().width(18),
-                text(theme::cased(&o.nb.title())).font(theme::title_font()).size(14).color(theme::p().text),
+                text(theme::cased(&title)).font(theme::title_font()).size(14).color(theme::p().text).wrapping(iced::widget::text::Wrapping::None),
                 Space::new().width(Length::Fill),
-                chip(format!("{:>3.0} %", o.camera.zoom * 100.0)),
+                container(text(format!("{:>3.0} %", o.camera.zoom * 100.0)).font(theme::meta_font()).size(theme::SMALL)).padding([3, 10]).style(theme::chip),
                 Space::new().width(8),
                 // The page number opens the page's paper and format (like on the tablet).
-                button(text(format!("{current} / {}", o.pages.total_pages)).font(theme::meta_font()).size(theme::SMALL))
-                    .padding([3, 10])
-                    .on_press(Message::ShowPage(!self.page_panel))
-                    .style(theme::tab(self.page_panel)),
+                crate::widgets::tip(
+                    button(text(format!("{current} / {}", o.pages.total_pages)).font(theme::meta_font()).size(theme::SMALL)).padding([3, 10]).on_press(Message::ShowPage(!self.page_panel)).style(theme::tab(self.page_panel)),
+                    tr("Papier und Format der Seite"),
+                ),
                 Space::new().width(6),
                 split::menu_button(s.menu.is_some()),
                 Space::new().width(14),
-                button(theme::btn(tr("+ Textseite"))).padding(theme::pad()).on_press(Message::NewTextPage).style(theme::tab(false)),
+                action(tr("+ Text"), tr("+ Textseite"), Message::NewTextPage, false),
                 Space::new().width(6),
-                button(theme::btn(tr("+ Koordinatensystem"))).padding(theme::pad()).on_press(Message::InsertPlot).style(theme::tab(false)),
+                action(tr("+ Graph"), tr("+ Koordinatensystem"), Message::InsertPlot, false),
                 Space::new().width(6),
                 button(theme::btn(tr("Notizen"))).padding(theme::pad()).on_press(Message::ToggleNotes).style(theme::tab(o.text_page.as_ref().is_some_and(|t| t.docked))),
                 Space::new().width(6),
-                button(theme::btn(tr("PDF einfügen"))).padding(theme::pad()).on_press(Message::ShowPdfImport(!self.show_pdf_import)).style(theme::tab(self.show_pdf_import)),
+                action("PDF", tr("PDF einfügen"), Message::ShowPdfImport(!self.show_pdf_import), self.show_pdf_import),
                 Space::new().width(6),
                 button(theme::btn("Export")).padding(theme::pad()).on_press(Message::ShowExport(self.export.is_none())).style(theme::tab(self.export.is_some())),
                 Space::new().width(6),
                 // Guests here show on the button ("Teilen · 2 Gäste"); as a guest: whose notebook.
-                button(theme::btn(&self.share_label(&o.id))).padding(theme::pad()).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
+                button(theme::btn(&share)).padding(theme::pad()).on_press(Message::ShowShare(self.share.is_none())).style(theme::tab(self.share.is_some())),
                 Space::new().width(6),
                 match &self.live_session {
-                    Some(l) => button(theme::btn(&format!("{star}● Live · {}", l.name))).padding(theme::pad()).on_press(Message::StopLive).style(theme::accent_button),
-                    None => button(theme::btn(&format!("{star}Live"))).padding(theme::pad()).on_press(Message::StartLive).style(theme::tab(false)),
+                    Some(_) => button(theme::btn(&live)).padding(theme::pad()).on_press(Message::StopLive).style(theme::accent_button),
+                    None => button(theme::btn(&live)).padding(theme::pad()).on_press(Message::StartLive).style(theme::tab(false)),
                 },
             ]
-            .align_y(Alignment::Center),
-        )
-        .padding(Padding { top: 6.0, bottom: 6.0, left: 14.0, right: 14.0 })
-        .height(48)
-        .width(Length::Fill)
-        .style(theme::chrome)
-        .into()
+            .align_y(Alignment::Center)
+            .into()
+        });
+        container(bar).padding(Padding { top: 6.0, bottom: 6.0, left: 14.0, right: 14.0 }).height(48).width(Length::Fill).style(theme::chrome).into()
     }
 
     fn share_label(&self, nb: &str) -> String {
@@ -4104,7 +4130,7 @@ impl App {
                     Space::new().into()
                 },
                 Space::new().width(6),
-                button(text("×").size(12)).padding([0, 6]).on_press(Message::DismissStatus).style(theme::ghost),
+                crate::widgets::tip(button(text("×").size(12)).padding([0, 6]).on_press(Message::DismissStatus).style(theme::ghost), tr("Meldung schließen")),
             ]
             .align_y(Alignment::Center)
             .into(),
