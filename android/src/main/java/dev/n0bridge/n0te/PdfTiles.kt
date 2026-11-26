@@ -37,6 +37,47 @@ fun pdfThumbScale(w: Float, h: Float): Float {
 }
 
 /**
+ * Which PDF tiles the page views have asked the worker for and not got yet (main thread). The
+ * worker drops the queued tiles of a view when that view's generation moves on (also the
+ * thumbnails, which wait behind the sharp tiles), merges a request for a tile another view asked
+ * for into that one (the answer names only the last view), and sends nothing for what it drops.
+ * So a tile is forgotten when its view's generation moves on, done for every view when it
+ * arrives, and asked again when no answer came for [PENDING_MS]: none stays waiting for good.
+ */
+class TileWait {
+    /** Per tile key: the views waiting for it and when each asked. */
+    private val pending = HashMap<String, HashMap<UInt, Long>>()
+    /** Tiles the worker refused, and when: asked again only after [RETRY_MS] (not every frame). */
+    private val refused = HashMap<String, Long>()
+    /** Tiles waited for. */
+    val size get() = pending.size
+
+    /** Whether [view] should ask for tile [key] now (and remembers that it did). */
+    fun ask(key: String, view: UInt, now: Long): Boolean {
+        refused[key]?.let { if (now - it < RETRY_MS) return false }
+        val views = pending.getOrPut(key) { HashMap(2) }
+        val at = views[view]
+        if (at != null && now - at < PENDING_MS) return false
+        views[view] = now
+        return true
+    }
+
+    fun arrived(key: String) { pending.remove(key); refused.remove(key) }
+    fun failed(key: String, now: Long) { pending.remove(key); refused[key] = now }
+
+    /** [view]'s zoom level changed: the worker drops what it had queued for it. */
+    fun newGeneration(view: UInt) {
+        val it = pending.values.iterator()
+        while (it.hasNext()) { val views = it.next(); views.remove(view); if (views.isEmpty()) it.remove() }
+    }
+
+    companion object {
+        const val RETRY_MS = 4000L
+        const val PENDING_MS = 5000L
+    }
+}
+
+/**
  * PDF page backgrounds as bitmap tiles from the core's PDF worker. A page is drawn from a small
  * thumbnail (always requested, so a fast scroll never shows white) with sharp 512 px tiles at
  * the zoom's power-of-two scale on top. Tiles arrive on the worker thread; the cache and the
@@ -61,11 +102,8 @@ object PdfTiles : TileSink {
     private val cache = object : LruCache<String, Bitmap>(96 * 1024 * 1024) {
         override fun sizeOf(key: String, value: Bitmap) = value.byteCount
     }
-    /** Tiles asked for and not there yet, per slot ("<tile key>#<view>"). */
-    private val pending = HashSet<String>()
-    /** Tiles the worker refused, and when: asked again only after [RETRY_MS] (not every frame). */
-    private val failed = HashMap<String, Long>()
-    private const val RETRY_MS = 4000L
+    /** Tiles asked for and not there yet (see [TileWait]). */
+    private val waiting = TileWait()
     private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val dst = RectF()
 
@@ -95,8 +133,7 @@ object PdfTiles : TileSink {
             // Zoom level changed: tiles this view queued for the old level are no longer wanted.
             slot.lastBucket = b
             slot.generation++
-            val mine = "#${slot.view}"
-            pending.removeAll { it.endsWith(mine) && (it.split('/').getOrNull(2)?.toFloatOrNull() ?: 0f) > THUMB }
+            waiting.newGeneration(slot.view)
         }
         // Space inserted into the page splits the PDF: each band of it is drawn where it lies now
         // (the PDF at its own size, moved down by the space above), blank paper in between.
@@ -146,8 +183,7 @@ object PdfTiles : TileSink {
             if (bmp != null) {
                 dst.set(r.left + x / b, r.top + y / b, r.left + (x + tw) / b, r.top + (y + th) / b)
                 c.drawBitmap(bmp, null, dst, paint)
-            } else if ("$k#${slot.view}" !in pending && (failed[k]?.let { android.os.SystemClock.uptimeMillis() - it > RETRY_MS } != false)) {
-                pending += "$k#${slot.view}"
+            } else if (waiting.ask(k, slot.view, android.os.SystemClock.uptimeMillis())) {
                 out += FfiTileRequest(blob, page, b, x.toUInt(), y.toUInt(), tw.toUInt(), th.toUInt(), priority, slot.view, slot.generation)
             }
         }
@@ -160,10 +196,14 @@ object PdfTiles : TileSink {
         runCatching { svc.requestTiles(out) }
     }
 
-    /** Screenshots: one tile each, at their own resolution (view 2), handed to a callback. */
+    /**
+     * Screenshots: one tile each, at their own resolution (view 2), handed to a callback. All in
+     * one generation: a newer one would make the worker drop the snips still queued (the bands of
+     * a PDF split by inserted space are several snips at once; the screenshot never came).
+     */
     private const val SNIP_VIEW = 2u
-    private val snips = HashMap<String, (Bitmap?) -> Unit>()
-    private var snipGeneration = 1uL
+    private const val SNIP_GENERATION = 1uL
+    private val snips = HashMap<String, MutableList<(Bitmap?) -> Unit>>()
 
     /**
      * Renders part of a PDF page at [scale] pixels per point (the region in page points), for a
@@ -176,34 +216,33 @@ object PdfTiles : TileSink {
         val y = (region.top * scale).toInt().coerceIn(0, ph - 1)
         val w = (ceil(region.right * scale).toInt() - x).coerceIn(1, pw - x)
         val h = (ceil(region.bottom * scale).toInt() - y).coerceIn(1, ph - y)
-        val k = key(blob, page, scale, x, y) + "/snip"
-        snips[k] = done
-        runCatching { svc.requestTiles(listOf(FfiTileRequest(blob, page, scale, x.toUInt(), y.toUInt(), w.toUInt(), h.toUInt(), 0u, SNIP_VIEW, snipGeneration++))) }
-            .onFailure { snips.remove(k)?.invoke(null) }
+        val k = key(blob, page, scale, x, y) + "/$w/$h/snip"
+        snips.getOrPut(k) { ArrayList(1) } += done
+        runCatching { svc.requestTiles(listOf(FfiTileRequest(blob, page, scale, x.toUInt(), y.toUInt(), w.toUInt(), h.toUInt(), 0u, SNIP_VIEW, SNIP_GENERATION))) }
+            .onFailure { snips.remove(k)?.forEach { it(null) } }
     }
 
     /** Worker thread. */
     override fun onTile(tile: FfiTile) {
         val r = tile.request
         if (r.view == SNIP_VIEW) {
-            val k = key(r.blob, r.page, r.scale, r.x.toInt(), r.y.toInt()) + "/snip"
+            val k = key(r.blob, r.page, r.scale, r.x.toInt(), r.y.toInt()) + "/${r.width}/${r.height}/snip"
             val bmp = if (tile.error == null && tile.rgba.size >= r.width.toInt() * r.height.toInt() * 4)
                 Bitmap.createBitmap(r.width.toInt(), r.height.toInt(), Bitmap.Config.ARGB_8888).also { it.copyPixelsFromBuffer(ByteBuffer.wrap(tile.rgba)) } else null
-            N0te.main.post { snips.remove(k)?.invoke(bmp) }
+            N0te.main.post { snips.remove(k)?.forEach { it(bmp) } }
             return
         }
         val k = key(r.blob, r.page, r.scale, (r.x.toInt() / TILE), (r.y.toInt() / TILE))
         if (tile.error != null || tile.rgba.size < r.width.toInt() * r.height.toInt() * 4) {
             android.util.Log.w(N0te.TAG, "PDF tile $k: ${tile.error ?: "short buffer"}")
-            N0te.main.post { pending.remove("$k#${r.view}"); failed[k] = android.os.SystemClock.uptimeMillis() }
+            N0te.main.post { waiting.failed(k, android.os.SystemClock.uptimeMillis()) }
             return
         }
         // ARGB_8888 is stored as R, G, B, A bytes: the core's RGBA copies straight in.
         val bmp = Bitmap.createBitmap(r.width.toInt(), r.height.toInt(), Bitmap.Config.ARGB_8888)
         bmp.copyPixelsFromBuffer(ByteBuffer.wrap(tile.rgba))
         N0te.main.post {
-            pending.remove("$k#${r.view}")
-            failed.remove(k)
+            waiting.arrived(k)
             cache.put(k, bmp)
             listener?.invoke()
         }
