@@ -14,7 +14,7 @@ Neuigkeiten).
   or Gemini; paste the AI's answer back (or open/drop its `.json` file). n0te checks it, shows a
   preview to apply or save, and otherwise lists exactly what the AI should fix. The same file
   imports on Android, Windows and Linux; share a design from its card. Format:
-  [docs/styles.md](docs/styles.md).
+  [docs/styles.md](https://github.com/DiscoveryFox/n0te/blob/main/docs/styles.md).
 - Eight new designs: Christmas (snowfall and fairy lights), Blueprint (drafting grid),
   Chalkboard, Starry night (twinkling stars), Cherry blossom (falling petals), Autumn (falling
   leaves), Terminal (scanlines) and High contrast.
