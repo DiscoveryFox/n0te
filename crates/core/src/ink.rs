@@ -41,6 +41,9 @@ impl Default for Brush {
 
 /// Quantization of coordinates: 1/64 pt is far below what a pen can resolve.
 const XY_SCALE: f32 = 64.0;
+/// Coordinates are kept within ±this many points (about 350 km of board): far beyond any
+/// page, and small enough that quantized deltas never overflow.
+pub const MAX_COORD: f32 = 1e9;
 const FORMAT_V1: u8 = 1;
 
 /// Encodes samples as: version, count, then per sample zigzag-varint deltas of x and y
@@ -52,8 +55,8 @@ pub fn encode_points(points: &[InkPoint]) -> Vec<u8> {
     put_uvarint(&mut out, points.len() as u64);
     let (mut px, mut py, mut pt) = (0i64, 0i64, 0u32);
     for p in points {
-        let qx = (p.x * XY_SCALE).round() as i64;
-        let qy = (p.y * XY_SCALE).round() as i64;
+        let q = |v: f32| (v.clamp(-MAX_COORD, MAX_COORD) * XY_SCALE).round() as i64;
+        let (qx, qy) = (q(p.x), q(p.y));
         put_uvarint(&mut out, zigzag(qx - px));
         put_uvarint(&mut out, zigzag(qy - py));
         out.push((p.pressure.clamp(0.0, 1.0) * 255.0).round() as u8);
@@ -79,10 +82,11 @@ pub fn decode_points(bytes: &[u8]) -> Result<Vec<InkPoint>> {
     let mut out = Vec::with_capacity(n);
     let (mut x, mut y, mut t) = (0i64, 0i64, 0u64);
     for _ in 0..n {
-        x += unzigzag(r.uvarint()?);
-        y += unzigzag(r.uvarint()?);
+        // Wrapping: what was encoded never overflows; damaged data must not panic.
+        x = x.wrapping_add(unzigzag(r.uvarint()?));
+        y = y.wrapping_add(unzigzag(r.uvarint()?));
         let p = r.byte()? as f32 / 255.0;
-        t += r.uvarint()?;
+        t = t.wrapping_add(r.uvarint()?);
         out.push(InkPoint { x: x as f32 / XY_SCALE, y: y as f32 / XY_SCALE, pressure: p, t_ms: t as u32 });
     }
     Ok(out)

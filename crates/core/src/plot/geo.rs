@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 
 use super::LineStyle;
-use super::expr::{Cmp, Expr, Func};
+use super::expr::{Cmp, Expr, Func, MAX_DERIVATIVE, MAX_NODES};
 use super::lang::{self, Body, Input, Node, Op};
 use super::points::zeros_of;
 
@@ -253,7 +253,7 @@ pub fn evaluate(objs: &[Obj], view: ViewRange) -> Vec<Result<Val, String>> {
         })
         .collect();
     let mut out: Vec<Option<Result<Val, String>>> = vec![None; objs.len()];
-    let mut env = Env { vals: HashMap::new(), view };
+    let mut env = Env { vals: HashMap::new(), view, made: 0, defining: None };
     // Depth-first in dependency order; a loop is a mistake for everyone in it.
     fn visit(i: usize, objs: &[Obj], names: &[String], parsed: &[Result<Input, String>], index: &HashMap<String, usize>, out: &mut Vec<Option<Result<Val, String>>>, env: &mut Env, stack: &mut Vec<usize>) {
         if out[i].is_some() {
@@ -334,6 +334,10 @@ pub(crate) fn node_refs(n: &Node, out: &mut Vec<String>) {
 struct Env {
     vals: HashMap<String, Val>,
     view: ViewRange,
+    /// Nodes of the functions made (put together, derived) for the object being defined.
+    made: usize,
+    /// The name of the object being defined.
+    defining: Option<String>,
 }
 
 fn bx(e: Expr) -> Box<Expr> {
@@ -536,9 +540,27 @@ impl Env {
         }
     }
 
+    /// `e`, counted against what one object may make ([`MAX_NODES`]); an error when it gets
+    /// too big.
+    fn grown(&mut self, e: Expr) -> Result<Expr, String> {
+        let n = e.size_within(MAX_NODES.saturating_sub(self.made)).ok_or_else(|| "Der Ausdruck wird zu groß".to_string())?;
+        self.made += n;
+        Ok(e)
+    }
+
+    /// `f` derived `n` times (each step counted, see [`Env::grown`]).
+    fn derived(&mut self, mut f: Expr, n: usize) -> Result<Expr, String> {
+        for _ in 0..n {
+            f = self.grown(f.derive())?;
+        }
+        Ok(f)
+    }
+
     /// What a line of input defines.
     fn define(&mut self, input: &Input, style: &Style) -> Result<Val, String> {
         let _ = style;
+        self.made = 0;
+        self.defining = input.name.clone();
         let v = if input.polar {
             // r(θ): the curve (r cos θ, r sin θ), θ from 0 to 2π.
             let Body::Expr(n) = &input.body else { return Err("r = … braucht rechts einen Ausdruck in θ".into()) };
@@ -663,12 +685,9 @@ impl Env {
                     return Ok(Expr::If(items, ops, bx(then), bx(other)));
                 }
                 if let Some(Val::Func(f)) = self.vals.get(name).cloned() {
-                    let mut f = f;
-                    for _ in 0..*primes {
-                        f = f.derive();
-                    }
+                    let f = self.derived(f, *primes as usize)?;
                     let arg = args.first().map(|a| self.fexpr(a)).transpose()?.unwrap_or(Expr::X);
-                    return Ok(f.at(&arg));
+                    return self.grown(f.at(&arg));
                 }
                 if let Some(func) = func_of(name) {
                     let a = args.first().ok_or("Hier fehlt etwas in der Klammer")?;
@@ -678,6 +697,16 @@ impl Env {
                     // a(x + 1): a times the bracket.
                     let arg = args.first().ok_or("Hier fehlt etwas in der Klammer")?;
                     return Ok(Expr::Mul(bx(Expr::Num(v)), bx(self.fexpr(arg)?)));
+                }
+                // `eval` hands anything with x in it straight back here (unless it is a command),
+                // so `f(x) = f(x) + 1` or `g(x) = A(x)` recursed until the stack ran out (the app
+                // crashed while it was typed).
+                if lang::command(name).is_none() && free(n) {
+                    return Err(match self.vals.get(name) {
+                        Some(_) => format!("{name} ist keine Funktion"),
+                        None if self.defining.as_deref() == Some(name.as_str()) => format!("{name} hängt von sich selbst ab"),
+                        None => format!("„{name}“ gibt es nicht"),
+                    });
                 }
                 match self.eval(n)? {
                     Val::Func(e) => e,
@@ -752,10 +781,7 @@ impl Env {
                 }
                 match self.vals.get(name).cloned() {
                     Some(Val::Func(f)) => {
-                        let mut f = f;
-                        for _ in 0..*primes {
-                            f = f.derive();
-                        }
+                        let f = self.derived(f, *primes as usize)?;
                         let x = num(&self.eval(args.first().ok_or("f(…) braucht eine Zahl")?)?)?;
                         Val::Num(f.eval(x))
                     }
@@ -989,12 +1015,12 @@ impl Env {
                 if n == 0 {
                     return wrong("Ableitung(f)");
                 }
-                let mut f = self.func(&args[0])?;
-                let k = if n >= 2 { num(&self.eval(&args[1])?)? as usize } else { 1 };
-                for _ in 0..k.max(1) {
-                    f = f.derive();
+                let f = self.func(&args[0])?;
+                let k = if n >= 2 { num(&self.eval(&args[1])?)? } else { 1.0 };
+                if !(k >= 0.0 && k <= MAX_DERIVATIVE as f64) {
+                    return Err(format!("Höchstens die {MAX_DERIVATIVE}. Ableitung"));
                 }
-                Ok(Val::Func(f))
+                Ok(Val::Func(self.derived(f, (k as usize).max(1))?))
             }
             "integral" | "integralbetween" => {
                 let (f, g, ai) = if cmd == "integral" {
@@ -2637,7 +2663,7 @@ mod tests {
     fn values_are_written_like_in_school() {
         assert_eq!(format_val(&Val::Point((1.5, -2.0))), "(1,5 | −2)");
         let f = lang::parse_expr("0.5x^2 - 3", &HashSet::new()).unwrap();
-        let mut env = Env { vals: HashMap::new(), view: VIEW };
+        let mut env = Env { vals: HashMap::new(), view: VIEW, made: 0, defining: None };
         let e = env.fexpr(&f).unwrap().simplified();
         assert_eq!(fmt_expr(&e), "0,5x² − 3");
         assert_eq!(fmt_line(-2.0, 1.0, 1.0), "y = 2x + 1");

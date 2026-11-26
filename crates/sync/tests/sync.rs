@@ -533,6 +533,32 @@ fn live_presence_strokes_and_open_requests() {
 }
 
 #[test]
+fn a_damaged_document_is_repaired_from_a_paired_device() {
+    // A file cut short here (a full disk, a broken copy): the engine announces it has nothing
+    // of it, the other device sends everything, and the page and index are whole again.
+    let (ra, rb) = (root("da"), root("db"));
+    let (nb, sheet) = notebook_with_strokes(&ra, "Repariert", 2);
+    let a = engine(&ra, "Laptop");
+    let b = engine(&rb, "Tablet");
+    pair(&a, &b);
+    a.notify_local_change(&nb);
+    wait("B has the notebook", || strokes(&rb, &nb, &sheet) == 2);
+    drop(b);
+    let dir = rb.join("notebooks").join(&nb);
+    let cut = |p: PathBuf| {
+        let bytes = std::fs::read(&p).unwrap();
+        std::fs::write(&p, &bytes[..bytes.len() / 2]).unwrap();
+    };
+    cut(dir.join("index.loro"));
+    cut(dir.join("sheets").join(format!("{sheet}.loro")));
+    assert!(Library::open(&rb).unwrap().load_notebook(&nb).is_err());
+    let b = engine(&rb, "Tablet");
+    wait("B's page is whole again", || strokes(&rb, &nb, &sheet) == 2);
+    wait("B's index is whole again", || Library::open(&rb).unwrap().load_notebook(&nb).is_ok_and(|n| n.title() == "Repariert"));
+    drop((a, b));
+}
+
+#[test]
 fn history_checkpoint_and_restore_through_the_engine() {
     let r = root("h");
     let e = engine(&r, "Laptop");

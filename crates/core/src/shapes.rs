@@ -873,10 +873,14 @@ fn poly(c: &[f32], p: f32, t0: f32, t1: f32, close: bool) -> Vec<InkPoint> {
 fn side_stops(len: f32) -> Vec<f32> {
     const NEAR: [f32; 6] = [0.0, 0.25, 0.5, 1.0, 2.0, 4.0];
     let mut out: Vec<f32> = NEAR.iter().copied().filter(|&d| d < len / 2.0).collect();
-    let mut d = 9.0f32;
-    while d < len - 9.0 {
-        out.push(d);
-        d += 6.0;
+    // Every 6 pt from 9 on. A side far longer than any page (a pen position gone wrong, even
+    // infinite) gets no stops in between: `d += 6.0` stops moving at 2^27 and looped forever.
+    if len < 1e6 {
+        let mut d = 9.0f32;
+        while d < len - 9.0 {
+            out.push(d);
+            d += 6.0;
+        }
     }
     for &d in NEAR.iter().rev() {
         if d > 0.0 && len - d > len / 2.0 {

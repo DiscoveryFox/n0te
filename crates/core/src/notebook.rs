@@ -100,6 +100,9 @@ pub struct SpacePlan {
 /// Room kept under the lowest thing on a page that grew to keep it.
 const SPACE_MARGIN: f32 = 12.0;
 
+/// The origin of every notebook edit except a delete that can be taken back.
+const EDIT_ORIGIN: &str = "edit";
+
 /// Separates a notebook's tags in its meta.
 const TAG_SEP: char = '\u{1f}';
 
@@ -117,7 +120,8 @@ pub fn folder_path(folder: &str) -> String {
 /// (the printed sheet never shrinks).
 pub fn plan_space(spec: &SheetSpec, y: f32, dy: f32, below: Below) -> SpacePlan {
     let mut plan = SpacePlan { dy: 0.0, height: spec.height, gaps: spec.gaps.clone() };
-    if !dy.is_finite() || dy == 0.0 {
+    // A spec as the app hands it in may be anything (`clamp` below panics on a NaN height).
+    if !dy.is_finite() || dy == 0.0 || !spec.width.is_finite() || !spec.height.is_finite() || !y.is_finite() {
         return plan;
     }
     let max = crate::format::MAX_PT;
@@ -317,6 +321,8 @@ pub struct Notebook {
     meta: LoroMap,
     /// Records the last [`Notebook::delete_undoable`] so it can be taken back.
     undo_delete: std::sync::Mutex<Option<loro::UndoManager>>,
+    /// Opened from a library with its own peer id: held until dropped (see `store::PeerLease`).
+    pub(crate) lease: Option<crate::store::PeerLease>,
 }
 
 const K_KIND: &str = "kind";
@@ -336,6 +342,18 @@ const K_GAPS: &str = "gaps";
 fn gaps_text(gaps: &[(f32, f32)]) -> String {
     gaps.iter().map(|(a, h)| format!("{a}:{h}")).collect::<Vec<_>>().join(";")
 }
+
+/// A new page's size and spacing must be numbers (a width or height of 0 or less is a board).
+fn check_spec(spec: &SheetSpec) -> Result<()> {
+    if !(spec.width.is_finite() && spec.height.is_finite() && spec.spacing.is_finite()) {
+        return Err(Error::Invalid(format!("page size {}×{} pt, spacing {}", spec.width, spec.height, spec.spacing)));
+    }
+    Ok(())
+}
+
+/// Groups nest at most this deep in the outline (deeper ones are left out): the outline is
+/// walked recursively, and a tree from another device may be nested arbitrarily deep.
+const MAX_GROUP_DEPTH: u32 = 64;
 
 fn parse_gaps(s: &str) -> Vec<(f32, f32)> {
     let mut out: Vec<(f32, f32)> = s
@@ -357,7 +375,7 @@ impl Notebook {
         nb.meta.insert("title", title)?;
         nb.meta.insert("id", ids::new_id(peer))?;
         nb.meta.insert("format", 1)?;
-        nb.doc.commit();
+        nb.commit();
         Ok(nb)
     }
 
@@ -373,7 +391,7 @@ impl Notebook {
         let tree = doc.get_tree("pages");
         tree.enable_fractional_index(0);
         let meta = doc.get_map("meta");
-        Ok(Notebook { doc, tree, meta, undo_delete: std::sync::Mutex::new(None) })
+        Ok(Notebook { doc, tree, meta, undo_delete: std::sync::Mutex::new(None), lease: None })
     }
 
     pub fn id(&self) -> String {
@@ -384,14 +402,14 @@ impl Notebook {
     }
     pub fn set_title(&self, title: &str) -> Result<()> {
         self.meta.insert("title", title)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
     /// Gives a copy of a notebook its own identity (restoring an old version as a new notebook).
     pub(crate) fn set_id(&self, id: &str) -> Result<()> {
         self.meta.insert("id", id)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -402,7 +420,7 @@ impl Notebook {
     }
     pub fn set_folder(&self, folder: &str) -> Result<()> {
         self.meta.insert("folder", folder_path(folder))?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -419,7 +437,7 @@ impl Notebook {
             .filter(|t| !t.is_empty() && seen.insert(t.to_lowercase()))
             .collect();
         self.meta.insert("tags", clean.join(&TAG_SEP.to_string()))?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -429,7 +447,7 @@ impl Notebook {
     }
     pub fn set_pinned(&self, pinned: bool) -> Result<()> {
         self.meta.insert("pinned", pinned)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -439,7 +457,7 @@ impl Notebook {
     }
     pub fn set_cover(&self, cover: &str) -> Result<()> {
         self.meta.insert("cover", cover)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -488,22 +506,24 @@ impl Notebook {
         m.insert(K_KIND, "group")?;
         m.insert(K_TITLE, title)?;
         m.insert(K_COLLAPSED, false)?;
-        self.doc.commit();
+        self.commit();
         Ok(id.to_string())
     }
 
     /// Adds a main sheet at `index` under `parent` (None = main column, or a group).
     /// Returns (node, sheet id).
     pub fn add_sheet(&self, parent: Option<&str>, index: usize, spec: &SheetSpec) -> Result<(NodeId, String)> {
+        check_spec(spec)?;
         let p = self.parent_for_new(parent)?;
         let id = self.create_at(p, index)?;
         let sheet_id = self.fill_sheet(id, spec, None)?;
-        self.doc.commit();
+        self.commit();
         Ok((id.to_string(), sheet_id))
     }
 
     /// Adds a side sheet to the `side` of main sheet `main`, `index` steps outward (0 = next to it).
     pub fn add_side_sheet(&self, main: &str, side: Side, index: usize, spec: &SheetSpec) -> Result<(NodeId, String)> {
+        check_spec(spec)?;
         let main_id = self.node(main)?;
         if self.kind(main_id) != "sheet" || self.side_of(main_id).is_some() {
             return Err(Error::Invalid("side sheets attach to a main sheet".into()));
@@ -514,7 +534,7 @@ impl Notebook {
         let pos = if index < same.len() { same[index] } else { children.len() };
         let id = self.tree.create_at(TreeParentId::Node(main_id), pos)?;
         let sheet_id = self.fill_sheet(id, spec, Some(side))?;
-        self.doc.commit();
+        self.commit();
         Ok((id.to_string(), sheet_id))
     }
 
@@ -554,7 +574,7 @@ impl Notebook {
         }
         // Moving within the same parent: the index refers to the list without the node.
         self.tree.mov_to(id, p, index.min(self.child_count(p).saturating_sub(self.same_parent(id, p) as usize)))?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -564,7 +584,7 @@ impl Notebook {
             return Err(Error::Invalid("only groups collapse".into()));
         }
         self.tree.get_meta(id)?.insert(K_COLLAPSED, collapsed)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -591,14 +611,14 @@ impl Notebook {
             return Err(Error::Invalid("only pages are marked".into()));
         }
         self.tree.get_meta(id)?.insert(K_MARK, on)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
     pub fn set_title_of(&self, node: &str, title: &str) -> Result<()> {
         let id = self.node(node)?;
         self.tree.get_meta(id)?.insert(K_TITLE, title)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -611,7 +631,7 @@ impl Notebook {
         let m = self.tree.get_meta(id)?;
         m.insert(K_BG, background.as_str())?;
         m.insert(K_SPACING, spacing as f64)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -634,7 +654,7 @@ impl Notebook {
         let m = self.tree.get_meta(id)?;
         m.insert(K_W, width as f64)?;
         m.insert(K_H, height as f64)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -657,7 +677,7 @@ impl Notebook {
         let m = self.tree.get_meta(id)?;
         m.insert(K_H, height as f64)?;
         m.insert(K_GAPS, gaps_text(gaps))?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -665,7 +685,7 @@ impl Notebook {
     pub fn delete(&self, node: &str) -> Result<()> {
         let id = self.node(node)?;
         self.tree.delete(id)?;
-        self.doc.commit();
+        self.commit();
         Ok(())
     }
 
@@ -673,7 +693,9 @@ impl Notebook {
     /// comes back with its side sheets and content; the sheets' own documents are untouched).
     pub fn delete_undoable(&self, node: &str) -> Result<()> {
         let id = self.node(node)?;
-        let um = loro::UndoManager::new(&self.doc);
+        let mut um = loro::UndoManager::new(&self.doc);
+        // Only the delete is recorded: every other edit carries `EDIT_ORIGIN`.
+        um.add_exclude_origin_prefix(EDIT_ORIGIN);
         self.tree.delete(id)?;
         self.doc.commit();
         *self.undo_delete.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(um);
@@ -733,9 +755,9 @@ impl Notebook {
     fn walk(&self, parent: TreeParentId, depth: u32, expand_all: bool, out: &mut Vec<OutlineRow>) {
         for id in self.tree.children(parent).unwrap_or_default() {
             match self.kind(id).as_str() {
-                "group" => {
+                "group" if depth < MAX_GROUP_DEPTH => {
                     let collapsed = self.meta_bool(id, K_COLLAPSED);
-                    let count = self.count_sheets(id);
+                    let count = self.count_sheets(id, depth + 1);
                     out.push(OutlineRow::Group { node: id.to_string(), depth, title: self.meta_string(id, K_TITLE), collapsed, count });
                     if !collapsed || expand_all {
                         self.walk(TreeParentId::Node(id), depth + 1, expand_all, out);
@@ -766,11 +788,11 @@ impl Notebook {
         }
     }
 
-    fn count_sheets(&self, id: TreeID) -> u32 {
+    fn count_sheets(&self, id: TreeID, depth: u32) -> u32 {
         let mut n = 0;
         for c in self.tree.children(TreeParentId::Node(id)).unwrap_or_default() {
             match self.kind(c).as_str() {
-                "group" => n += self.count_sheets(c),
+                "group" if depth < MAX_GROUP_DEPTH => n += self.count_sheets(c, depth + 1),
                 "sheet" => n += 1,
                 _ => {}
             }
@@ -783,11 +805,14 @@ impl Notebook {
             s if s.is_empty() => None,
             blob => Some((blob, self.meta_f64(id, K_PDF_PAGE) as u32)),
         };
+        // Numbers as another device (or an older app) stored them: what isn't one as an f32
+        // (NaN, too big) reads as 0, a board, rather than breaking every caller.
+        let num = |key: &str| Some(self.meta_f64(id, key) as f32).filter(|v| v.is_finite()).unwrap_or(0.0);
         SheetSpec {
-            width: self.meta_f64(id, K_W) as f32,
-            height: self.meta_f64(id, K_H) as f32,
+            width: num(K_W),
+            height: num(K_H),
             background: Background::parse(&self.meta_string(id, K_BG)),
-            spacing: self.meta_f64(id, K_SPACING) as f32,
+            spacing: num(K_SPACING),
             pdf,
             gaps: parse_gaps(&self.meta_string(id, K_GAPS)),
         }
@@ -859,6 +884,14 @@ impl Notebook {
             node = p;
         }
         false
+    }
+
+    /// Commits an edit. Every edit but [`Notebook::delete_undoable`] carries [`EDIT_ORIGIN`],
+    /// which the undo of a delete leaves alone: taking back a delete never takes back what was
+    /// done after it (a page renamed while "Rückgängig" was still offered).
+    fn commit(&self) {
+        self.doc.set_next_commit_origin(EDIT_ORIGIN);
+        self.doc.commit();
     }
 
     // --- persistence and sync -------------------------------------------------------------

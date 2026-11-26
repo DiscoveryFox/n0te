@@ -152,7 +152,9 @@ pub fn nice_step(range: f64, count: f64) -> f64 {
 
 /// A tick's number as written: German decimal comma, as many places as the step needs.
 pub fn tick_label(v: f64, step: f64) -> String {
-    let places = if step >= 0.999 { 0 } else { (-step.log10()).ceil().max(0.0) as usize };
+    // At most 15 places (all an f64 has): a step of 0 asked for infinitely many, and the
+    // formatting panicked.
+    let places = if step >= 0.999 { 0 } else { (-step.log10()).ceil().clamp(0.0, 15.0) as usize };
     let v = if v.abs() < step * 1e-6 { 0.0 } else { v };
     let s = format!("{v:.places$}");
     let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
@@ -281,7 +283,10 @@ impl Hand {
     /// A straight line from `a` to `b`, sampled for the hand's sway.
     fn line(&mut self, a: (f32, f32), b: (f32, f32), wobble: f32) -> Vec<InkPoint> {
         let len = (b.0 - a.0).hypot(b.1 - a.1);
-        let n = ((len / 3.0) as usize).max(1);
+        // Every line drawn this way lies in the box (≤ 14 400 pt across); one far longer comes
+        // from a style value that isn't sane (a point size of 10^38) and gets few samples:
+        // `(0..=usize::MAX).collect()` was a "capacity overflow" panic.
+        let n = if len.is_finite() { ((len / 3.0) as usize).clamp(1, 10_000) } else { 1 };
         let path: Vec<(f32, f32)> = (0..=n).map(|i| (a.0 + (b.0 - a.0) * i as f32 / n as f32, a.1 + (b.1 - a.1) * i as f32 / n as f32)).collect();
         self.stroke(&path, wobble)
     }
@@ -433,6 +438,28 @@ fn in_poly(x: f32, y: f32, ps: &[(f32, f32)]) -> bool {
         j = i;
     }
     inside
+}
+
+/// Where the segment from `s` to `e` (page points) runs inside the box widened by `m` on every
+/// side: its parameter range within 0…1, or None if it stays outside.
+fn span_in_box(s: (f32, f32), e: (f32, f32), bx: (f32, f32, f32, f32), m: f64) -> Option<(f64, f64)> {
+    let (sx, sy, dx, dy) = (s.0 as f64, s.1 as f64, (e.0 - s.0) as f64, (e.1 - s.1) as f64);
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for (p, d, min, max) in [(sx, dx, bx.0 as f64 - m, bx.2 as f64 + m), (sy, dy, bx.1 as f64 - m, bx.3 as f64 + m)] {
+        if !(p.is_finite() && d.is_finite()) {
+            return None;
+        }
+        if d.abs() < 1e-12 {
+            if p < min || p > max {
+                return None;
+            }
+            continue;
+        }
+        let (a, b) = ((min - p) / d, (max - p) / d);
+        lo = lo.max(a.min(b));
+        hi = hi.min(a.max(b));
+    }
+    (lo <= hi).then_some((lo, hi))
 }
 
 /// The runs of a page path that lie inside the box (a little over its edges).
@@ -774,7 +801,8 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
     let vals = p.values();
     let known: HashSet<String> = p.objs.iter().map(|o| o.name()).collect();
     let shown = |i: usize| p.objs[i].style.visible;
-    let pen = |o: &Obj, k: f32| Brush { width: if o.style.width > 0.0 { o.style.width } else { w * k }, thinning: thin, color: o.style.color, kind: KIND_PEN };
+    // Style numbers come from other devices and older versions as they are: kept sane here.
+    let pen = |o: &Obj, k: f32| Brush { width: if o.style.width > 0.0 && o.style.width.is_finite() { o.style.width.min(40.0) } else { w * k }, thinning: thin, color: o.style.color, kind: KIND_PEN };
     let hatch_pen = |o: &Obj| Brush { width: (w * 0.42).clamp(0.3, 1.0), thinning: 0.0, color: (o.style.color & 0x00FF_FFFF) | 0xB000_0000, kind: KIND_PEN };
     let gap_of = |o: &Obj| (cap * 0.95 * (1.0 - o.style.fill.clamp(0.0, 1.0) * 0.62)).max(1.6);
     let mut labels: Vec<Label> = Vec::new();
@@ -930,8 +958,23 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
             };
         }
         let line_path = |s: (f32, f32), e: (f32, f32)| {
-            let n = (((e.0 - s.0).hypot(e.1 - s.1) / 3.0) as usize).max(1);
-            (0..=n).map(|k| (s.0 + (e.0 - s.0) * k as f32 / n as f32, s.1 + (e.1 - s.1) * k as f32 / n as f32)).collect::<Vec<_>>()
+            let len = (e.0 - s.0).hypot(e.1 - s.1);
+            let n = if len.is_finite() { ((len / 3.0) as usize).max(1) } else { 1 };
+            let at = |k: usize| (s.0 + (e.0 - s.0) * k as f32 / n as f32, s.1 + (e.1 - s.1) * k as f32 / n as f32);
+            if n <= 100_000 {
+                return (0..=n).map(at).collect::<Vec<_>>();
+            }
+            // Far longer than the box (a corner far off the view): only the samples near the
+            // box, between the two ends. What is left out lies outside, where it would only
+            // have ended the run inside (see `clip_path`) as the ends now do.
+            let mut out = vec![s];
+            if let Some((t0, t1)) = span_in_box(s, e, bx, 8.0) {
+                let k0 = ((t0 * n as f64).floor() as usize).saturating_sub(1);
+                let k1 = ((t1 * n as f64).ceil() as usize).saturating_add(1).min(n);
+                out.extend((k0..=k1).map(at));
+            }
+            out.push(e);
+            out
         };
         let big = ((p.x_max - p.x_min).abs() + (p.y_max - p.y_min).abs()) * 4.0;
         match v {
@@ -1149,7 +1192,7 @@ pub fn render(p: &Plot) -> Vec<(Brush, Vec<InkPoint>)> {
             Val::Points(qs) => qs.clone(),
             _ => continue,
         };
-        let r = if o.style.size > 0.0 { o.style.size } else { (cap * 0.42).max(2.2) };
+        let r = if o.style.size > 0.0 && o.style.size.is_finite() { o.style.size.min(60.0) } else { (cap * 0.42).max(2.2) };
         for (k, q) in ps.iter().enumerate() {
             let (x, y) = p.to_page(q.0, q.1);
             if x < x0 - 0.5 || x > x1 + 0.5 || y < y0 - 0.5 || y > y1 + 0.5 {

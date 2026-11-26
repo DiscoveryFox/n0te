@@ -240,7 +240,9 @@ impl NotebookHandle {
     fn export_bytes(&self, pdf: &PdfService, sheet_ids: Option<Vec<String>>, sides_at_end: bool) -> R<(Vec<u8>, u32)> {
         let order = if sides_at_end { n0te_pdf::notebook::ExportOrder::SidesAtEnd } else { n0te_pdf::notebook::ExportOrder::Inline };
         let pages = {
-            let nb = lock(&self.nb);
+            // A copy of the index: reading every sheet takes a while, and the notebook stays
+            // free for the UI meanwhile (outline, saves) instead of waiting on its lock.
+            let nb = n0te_core::notebook::Notebook::load(0, &lock(&self.nb).snapshot()?)?;
             let id = nb.id();
             let specs = nb.sheet_specs();
             n0te_pdf::notebook::export_sheets_with_images(

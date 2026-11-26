@@ -405,7 +405,10 @@ impl SyncEngine {
     }
     /// Stops syncing (the object is unusable afterwards).
     pub fn shutdown(&self) {
-        if let Some(mut e) = lock(&self.engine).take() {
+        // Taken out first: shutting down takes up to a few seconds, and the other calls (from
+        // the UI thread) shouldn't wait for it on the lock; they get "Sync ist beendet" at once.
+        let engine = lock(&self.engine).take();
+        if let Some(mut e) = engine {
             e.shutdown();
         }
     }
