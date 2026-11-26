@@ -41,14 +41,20 @@ impl Library {
             check_name(role)?;
         }
         let dev = if role.is_empty() { root.join("device") } else { root.join(format!("device.{role}")) };
-        let peer = match fs::read_to_string(&dev) {
-            Ok(s) => s.trim().parse::<u64>().map_err(|_| Error::Format("bad device id".into()))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+        let stored = match fs::read(&dev) {
+            Ok(b) => std::str::from_utf8(&b).ok().and_then(|s| s.trim().parse::<u64>().ok()).filter(|&p| p != 0),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let peer = match stored {
+            Some(p) => p,
+            // Missing, or damaged (a broken copy of the library): a fresh id is as good as the
+            // old one (only reusing one is dangerous), so the library still opens.
+            None => {
                 let p = ids::new_peer_id();
                 write_atomic(&dev, p.to_string().as_bytes())?;
                 p
             }
-            Err(e) => return Err(e.into()),
         };
         Ok(Library { root, peer })
     }
@@ -73,7 +79,9 @@ impl Library {
     }
 
     pub fn create_notebook(&self, title: &str) -> Result<Notebook> {
-        let nb = Notebook::create(self.peer, title)?;
+        let mut nb = Notebook::create(self.peer, title)?;
+        let (_, lease) = self.peer_for(&self.nb_dir(&nb.id())?.join("index.loro"));
+        nb.lease = lease;
         self.save_notebook(&nb)?;
         Ok(nb)
     }
@@ -81,7 +89,25 @@ impl Library {
     pub fn load_notebook(&self, id: &str) -> Result<Notebook> {
         let path = self.nb_dir(id)?.join("index.loro");
         let bytes = fs::read(&path).map_err(|e| not_found(e, &format!("notebook {id}")))?;
-        Notebook::load(self.peer, &bytes)
+        let (peer, lease) = self.peer_for(&path);
+        let mut nb = Notebook::load(peer, &bytes)?;
+        nb.lease = lease;
+        Ok(nb)
+    }
+
+    /// The peer id a document opened from `path` edits with: this library's own, unless a copy
+    /// opened earlier still has it (the editor and the library screen hold one notebook, two
+    /// views one page). Then the new copy gets an id of its own: two copies editing under one id
+    /// make operations with the same ids and different content, which Loro takes for the same
+    /// operation, so one copy's edits would be dropped and devices would end up different.
+    fn peer_for(&self, path: &Path) -> (u64, Option<PeerLease>) {
+        let key = (path.to_path_buf(), self.peer);
+        let mut open = OPEN_WITH_OWN_PEER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if open.contains(&key) {
+            return (ids::new_peer_id(), None);
+        }
+        open.push(key.clone());
+        (self.peer, Some(PeerLease { key }))
     }
 
     /// Saves a notebook. Other processes (the sync service, the laptop app, the tablet app
@@ -93,9 +119,12 @@ impl Library {
         fs::create_dir_all(dir.join("sheets"))?;
         let _lock = self.lock(&id)?;
         let path = dir.join("index.loro");
-        if let Ok(disk) = fs::read(&path) {
-            // A damaged file is replaced by our (complete) copy rather than blocking saves.
-            let _ = nb.import(&disk);
+        if let Ok(disk) = fs::read(&path)
+            && nb.import(&disk).is_err()
+        {
+            // A damaged file is replaced by our (complete) copy rather than blocking saves; the
+            // damaged one is kept next to it, in case something can be got out of it by hand.
+            keep_aside(&path);
         }
         write_atomic(&path, &nb.snapshot()?)?;
         self.touch(&id);
@@ -105,11 +134,18 @@ impl Library {
     /// Loads a sheet; a sheet nobody drew on yet has no file and comes back empty.
     pub fn load_sheet(&self, notebook: &str, sheet: &str) -> Result<Sheet> {
         let path = self.sheet_path(notebook, sheet)?;
-        match fs::read(&path) {
-            Ok(b) => Sheet::load(self.peer, &b),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Sheet::create(self.peer),
-            Err(e) => Err(e.into()),
-        }
+        let bytes = match fs::read(&path) {
+            Ok(b) => Some(b),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let (peer, lease) = self.peer_for(&path);
+        let mut s = match bytes {
+            Some(b) => Sheet::load(peer, &b)?,
+            None => Sheet::create(peer)?,
+        };
+        s.lease = lease;
+        Ok(s)
     }
 
     /// Saves a sheet, merging what is on disk first (see [`Library::save_notebook`]).
@@ -117,8 +153,10 @@ impl Library {
         let path = self.sheet_path(notebook, sheet_id)?;
         fs::create_dir_all(path.parent().expect("has parent"))?;
         let _lock = self.lock(notebook)?;
-        if let Ok(disk) = fs::read(&path) {
-            let _ = sheet.import(&disk);
+        if let Ok(disk) = fs::read(&path)
+            && sheet.import(&disk).is_err()
+        {
+            keep_aside(&path);
         }
         write_atomic(&path, &sheet.snapshot()?)?;
         self.touch(notebook);
@@ -165,21 +203,28 @@ impl Library {
         fs::create_dir_all(dir.join("sheets"))?;
         let _lock = self.lock(id)?;
         let path = dir.join("index.loro");
-        let nb = match fs::read(&path) {
-            Ok(disk) => {
-                let nb = Notebook::load(self.peer, &disk)?;
-                let before = nb.version();
-                nb.import(bytes)?;
-                if nb.version() == before {
-                    return Ok(false);
+        let (nb, damaged) = match fs::read(&path) {
+            Ok(disk) => match Notebook::load(self.peer, &disk) {
+                Ok(nb) => {
+                    let before = nb.version();
+                    nb.import(bytes)?;
+                    if nb.version() == before {
+                        return Ok(false);
+                    }
+                    (nb, false)
                 }
-                nb
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Notebook::load(self.peer, bytes)?,
+                // Damaged here: the peer heard we have nothing and sent everything, so its
+                // updates make the notebook whole again (it never could, were this an error).
+                Err(_) => (Notebook::load(self.peer, bytes)?, true),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Notebook::load(self.peer, bytes)?, false),
             Err(e) => return Err(e.into()),
         };
         if nb.id() != id {
             return Err(Error::Format(format!("updates for notebook {id} carry id {}", nb.id())));
+        }
+        if damaged {
+            keep_aside(&path);
         }
         write_atomic(&path, &nb.snapshot()?)?;
         self.touch(id);
@@ -192,15 +237,22 @@ impl Library {
         fs::create_dir_all(path.parent().expect("has parent"))?;
         let _lock = self.lock(notebook)?;
         let sheet = match fs::read(&path) {
-            Ok(disk) => {
-                let s = Sheet::load(self.peer, &disk)?;
-                let before = s.version();
-                s.import(bytes)?;
-                if s.version() == before {
-                    return Ok(false);
+            Ok(disk) => match Sheet::load(self.peer, &disk) {
+                Ok(s) => {
+                    let before = s.version();
+                    s.import(bytes)?;
+                    if s.version() == before {
+                        return Ok(false);
+                    }
+                    s
                 }
-                s
-            }
+                // Damaged here: repaired from the peer's updates (see `merge_notebook`).
+                Err(_) => {
+                    let s = Sheet::load(self.peer, bytes)?;
+                    keep_aside(&path);
+                    s
+                }
+            },
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Sheet::load(self.peer, bytes)?,
             Err(e) => return Err(e.into()),
         };
@@ -282,32 +334,68 @@ impl Library {
     /// Imports a bundle as a NEW notebook (fresh id, title `title`), leaving any existing copy
     /// alone: restoring an old version from the history. Returns the new id.
     pub fn import_bundle_as_copy(&self, bytes: &[u8], title: &str) -> Result<String> {
+        let b = self.check_bundle(bytes, false)?;
+        let id = ids::new_id(self.peer);
+        b.index.set_id(&id)?;
+        b.index.set_title(title)?;
+        for (blob, data) in &b.blobs {
+            self.put_blob_as(blob, data)?;
+        }
+        for (sheet_id, data) in &b.sheets {
+            self.merge_sheet(&id, sheet_id, data)?;
+        }
+        // The index last: the notebook shows up in the library only once its pages are there.
+        self.save_notebook(&b.index)?;
+        Ok(id)
+    }
+
+    /// The title of the notebook a bundle holds (without importing it).
+    pub fn bundle_title(&self, bytes: &[u8]) -> Result<String> {
+        let entries = read_bundle(bytes)?;
+        let index = entries.iter().find(|(n, _)| n == "index.loro").map(|(_, d)| *d).ok_or_else(|| Error::Format("bundle without index".into()))?;
+        Ok(Notebook::load(self.peer, index)?.title())
+    }
+
+    /// Reads and checks a whole bundle before anything of it is written, so a bad entry can't
+    /// leave half a notebook behind. `strict`: a blob that doesn't match its name is an error
+    /// (else it is left out).
+    fn check_bundle<'a>(&self, bytes: &'a [u8], strict: bool) -> Result<CheckedBundle<'a>> {
         let entries = read_bundle(bytes)?;
         let index = entries.iter().find(|(n, _)| n == "index.loro").map(|(_, d)| *d).ok_or_else(|| Error::Format("bundle without index".into()))?;
         let nb = Notebook::load(self.peer, index)?;
-        let id = ids::new_id(self.peer);
-        nb.set_id(&id)?;
-        nb.set_title(title)?;
-        self.save_notebook(&nb)?;
-        for (name, data) in &entries {
+        check_name(&nb.id())?;
+        let mut out = CheckedBundle { index_bytes: index, index: nb, sheets: Vec::new(), blobs: Vec::new() };
+        for (name, data) in entries {
             if let Some(file) = name.strip_prefix("sheets/") {
                 let Some(sheet_id) = file.strip_suffix(".loro") else { continue };
                 check_name(sheet_id)?;
-                let sheet = Sheet::load(self.peer, data)?;
-                self.save_sheet(&id, sheet_id, &sheet)?;
+                Sheet::load(self.peer, data)?;
+                out.sheets.push((sheet_id.to_string(), data));
             } else if let Some(blob) = name.strip_prefix("blobs/") {
                 check_name(blob)?;
-                if blob_id(data) == blob && !self.root.join("blobs").join(blob).exists() {
-                    write_atomic(&self.root.join("blobs").join(blob), data)?;
+                if blob_id(data) == blob {
+                    out.blobs.push((blob.to_string(), data));
+                } else if strict {
+                    return Err(Error::Format(format!("blob {blob} does not match its content")));
                 }
             }
         }
-        Ok(id)
+        Ok(out)
     }
 
     /// A notebook as one file (`.n0te`): its index, every sheet and the PDFs it uses. Meant
     /// for carrying a notebook to another device by hand; [`Library::import_bundle`] merges.
     pub fn export_bundle(&self, id: &str) -> Result<Vec<u8>> {
+        self.export(id, true)
+    }
+
+    /// A bundle of just the notebook's documents, without its PDFs and pictures: for
+    /// checkpoints of this library (it keeps every blob for good, so they needn't be copied).
+    pub fn export_bundle_without_blobs(&self, id: &str) -> Result<Vec<u8>> {
+        self.export(id, false)
+    }
+
+    fn export(&self, id: &str, with_blobs: bool) -> Result<Vec<u8>> {
         let dir = self.nb_dir(id)?;
         let mut out = BUNDLE_MAGIC.to_vec();
         let mut put = |name: &str, data: &[u8]| {
@@ -322,11 +410,19 @@ impl Library {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().into_owned();
                 if name.ends_with(".loro") && !name.starts_with('.') {
-                    put(&format!("sheets/{name}"), &fs::read(e.path())?);
+                    let data = fs::read(e.path())?;
+                    // A damaged page stays out: the rest of the notebook still travels (and
+                    // the bundle still imports, which checks every page).
+                    if intact(&data) {
+                        put(&format!("sheets/{name}"), &data);
+                    }
                 }
             }
         }
         let nb = Notebook::load(self.peer, &index)?;
+        if !with_blobs {
+            return Ok(out);
+        }
         let mut blobs: Vec<String> = nb.pdf_blobs();
         blobs.extend(self.image_blobs(&nb.id()));
         blobs.sort();
@@ -342,44 +438,16 @@ impl Library {
     /// Adds a bundle's notebook to the library, or merges it into the copy already here (the
     /// documents are CRDTs: both sides' edits are kept). Returns the notebook id.
     pub fn import_bundle(&self, bytes: &[u8]) -> Result<String> {
-        let entries = read_bundle(bytes)?;
-        let index = entries.iter().find(|(n, _)| n == "index.loro").map(|(_, d)| *d).ok_or_else(|| Error::Format("bundle without index".into()))?;
-        let incoming = Notebook::load(self.peer, index)?;
-        let id = incoming.id();
-        let dir = self.nb_dir(&id)?;
-        let nb = match fs::read(dir.join("index.loro")) {
-            Ok(mine) => {
-                let nb = Notebook::load(self.peer, &mine)?;
-                nb.import(index)?;
-                nb
-            }
-            Err(_) => incoming,
-        };
-        self.save_notebook(&nb)?;
-        for (name, data) in &entries {
-            if let Some(file) = name.strip_prefix("sheets/") {
-                let Some(sheet_id) = file.strip_suffix(".loro") else { continue };
-                check_name(sheet_id)?;
-                let sheet = match fs::read(self.sheet_path(&id, sheet_id)?) {
-                    Ok(mine) => {
-                        let s = Sheet::load(self.peer, &mine)?;
-                        s.import(data)?;
-                        s
-                    }
-                    Err(_) => Sheet::load(self.peer, data)?,
-                };
-                self.save_sheet(&id, sheet_id, &sheet)?;
-            } else if let Some(blob) = name.strip_prefix("blobs/") {
-                check_name(blob)?;
-                if blob_id(data) != blob {
-                    return Err(Error::Format(format!("blob {blob} does not match its content")));
-                }
-                let path = self.root.join("blobs").join(blob);
-                if !path.exists() {
-                    write_atomic(&path, data)?;
-                }
-            }
+        let b = self.check_bundle(bytes, true)?;
+        let id = b.index.id();
+        for (blob, data) in &b.blobs {
+            self.put_blob_as(blob, data)?;
         }
+        for (sheet_id, data) in &b.sheets {
+            self.merge_sheet(&id, sheet_id, data)?;
+        }
+        // The index last (see `import_bundle_as_copy`).
+        self.merge_notebook(&id, b.index_bytes)?;
         Ok(id)
     }
 
@@ -405,11 +473,19 @@ impl Library {
     /// Stores a blob (if new) and returns its BLAKE3 hex id ([`blob_id`]).
     pub fn put_blob(&self, data: &[u8]) -> Result<String> {
         let id = blob_id(data);
-        let path = self.root.join("blobs").join(&id);
-        if !path.exists() {
+        self.put_blob_as(&id, data)?;
+        Ok(id)
+    }
+
+    /// Stores `data` (whose id the caller checked) unless it is there already. A file of the
+    /// wrong size (cut short by a full disk or a broken copy) is written again: otherwise the
+    /// blob would stay damaged for good, however often sync brings it.
+    fn put_blob_as(&self, id: &str, data: &[u8]) -> Result<()> {
+        let path = self.root.join("blobs").join(id);
+        if fs::metadata(&path).map(|m| m.len() != data.len() as u64).unwrap_or(true) {
             write_atomic(&path, data)?;
         }
-        Ok(id)
+        Ok(())
     }
 
     /// Reads a blob and checks it against its id.
@@ -441,6 +517,46 @@ impl Library {
 /// The id a blob is stored under: the BLAKE3 hash of its bytes, as hex.
 pub fn blob_id(data: &[u8]) -> String {
     blake3::hash(data).to_hex().to_string()
+}
+
+/// Documents open in this process under their library's own peer id: (file, peer).
+static OPEN_WITH_OWN_PEER: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
+/// A document's claim on its library's peer id (see `Library::peer_for`), given up when the
+/// document is dropped.
+pub(crate) struct PeerLease {
+    key: (PathBuf, u64),
+}
+
+impl Drop for PeerLease {
+    fn drop(&mut self) {
+        let mut open = OPEN_WITH_OWN_PEER.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(i) = open.iter().position(|k| *k == self.key) {
+            open.swap_remove(i);
+        }
+    }
+}
+
+/// A bundle read and checked by `Library::check_bundle`.
+struct CheckedBundle<'a> {
+    index_bytes: &'a [u8],
+    index: Notebook,
+    sheets: Vec<(String, &'a [u8])>,
+    blobs: Vec<(String, &'a [u8])>,
+}
+
+/// Moves a damaged document out of the way (`<name>.damaged-<unix seconds>`, next to it),
+/// before it is replaced by a good copy. Not a document any more by its name, so nothing reads
+/// or syncs it; it stays for recovery by hand.
+fn keep_aside(path: &Path) {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let _ = fs::rename(path, path.with_file_name(format!("{name}.damaged-{secs}")));
+}
+
+/// Whether a stored document is whole (Loro's checksum over it holds), without decoding it.
+fn intact(bytes: &[u8]) -> bool {
+    loro::LoroDoc::decode_import_blob_meta(bytes, true).is_ok()
 }
 
 /// Held while a notebook's files are read-merged-written; the OS lock goes with the file.

@@ -103,6 +103,8 @@ pub struct Sheet {
     objects: LoroMap,
     /// Undo/redo of this device's own edits only (a peer's edits are never undone here).
     undo: Mutex<UndoManager>,
+    /// Opened from a library with its own peer id: held until dropped (see `store::PeerLease`).
+    pub(crate) lease: Option<crate::store::PeerLease>,
 }
 
 const STROKE_V1: u8 = 1;
@@ -126,7 +128,7 @@ impl Sheet {
         undo.set_max_undo_steps(500);
         // What the handwriting recogniser writes is no edit of the user's: undo skips it.
         undo.add_exclude_origin_prefix(INDEX_ORIGIN);
-        Ok(Sheet { doc, objects, undo: Mutex::new(undo) })
+        Ok(Sheet { doc, objects, undo: Mutex::new(undo), lease: None })
     }
 
     fn um(&self) -> std::sync::MutexGuard<'_, UndoManager> {

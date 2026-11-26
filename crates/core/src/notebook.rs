@@ -317,6 +317,8 @@ pub struct Notebook {
     meta: LoroMap,
     /// Records the last [`Notebook::delete_undoable`] so it can be taken back.
     undo_delete: std::sync::Mutex<Option<loro::UndoManager>>,
+    /// Opened from a library with its own peer id: held until dropped (see `store::PeerLease`).
+    pub(crate) lease: Option<crate::store::PeerLease>,
 }
 
 const K_KIND: &str = "kind";
@@ -373,7 +375,7 @@ impl Notebook {
         let tree = doc.get_tree("pages");
         tree.enable_fractional_index(0);
         let meta = doc.get_map("meta");
-        Ok(Notebook { doc, tree, meta, undo_delete: std::sync::Mutex::new(None) })
+        Ok(Notebook { doc, tree, meta, undo_delete: std::sync::Mutex::new(None), lease: None })
     }
 
     pub fn id(&self) -> String {
