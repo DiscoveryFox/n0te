@@ -522,6 +522,21 @@ impl Sheet {
         Ok(())
     }
 
+    /// Gives pen strokes another line (ink DASH_*; pencils and markers stay solid), one step.
+    pub fn set_dash(&self, ids: &[String], dash: u8) -> Result<()> {
+        for id in ids {
+            if let Some(mut s) = self.stroke(id)? {
+                let b = s.brush.with_dash(dash);
+                if b != s.brush {
+                    s.brush = b;
+                    self.objects.insert(id, LoroValue::Binary(encode_stroke(&s.brush, &s.points).into()))?;
+                }
+            }
+        }
+        self.doc.commit();
+        Ok(())
+    }
+
     /// Moves and scales strokes about (ox, oy) (lasso move/resize).
     pub fn transform(&self, ids: &[String], dx: f32, dy: f32, scale: f32, ox: f32, oy: f32) -> Result<()> {
         if !(scale.is_finite() && scale > 0.0) {
@@ -1943,6 +1958,14 @@ mod tests {
         assert_eq!(crossed, vec![ids[0].clone()]);
         assert!(s.undo().unwrap());
         assert!(s.is_empty(), "both strokes were one edit");
+    }
+
+    #[test]
+    fn dashed_pens_keep_their_dash() {
+        let s = Sheet::create(3).unwrap();
+        let id = s.add_stroke(Brush::default().with_dash(ink::DASH_DOTTED), &pts(0.0, 5)).unwrap();
+        let b = s.stroke(&id).unwrap().unwrap().brush;
+        assert_eq!((b.base_kind(), b.dash()), (ink::KIND_PEN, ink::DASH_DOTTED));
     }
 
     #[test]

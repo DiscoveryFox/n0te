@@ -418,6 +418,11 @@ class NotebookModel(val nb: NotebookHandle, private val onChanged: () -> Unit) {
         withEdit(st) { h -> N0te.background({ h.remove(ids.toList()) }) { if (it.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
     }
 
+    fun setDash(sheetId: String, ids: Collection<String>, dash: Int) {
+        val st = state(sheetId)
+        withEdit(st) { h -> N0te.background({ h.setDash(ids.toList(), dash.toUByte()); reloadSome(h, ids) }) { r -> applySome(st, r); if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }
+    }
+
     fun recolor(sheetId: String, ids: Collection<String>, color: Int) {
         val st = state(sheetId)
         withEdit(st) { h -> N0te.background({ h.recolor(ids.toList(), color.toUInt()); reloadSome(h, ids) }) { r -> applySome(st, r); if (r.isSuccess) { pushUndo(sheetId); markDirty(sheetId) } } }

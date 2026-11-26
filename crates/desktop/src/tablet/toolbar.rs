@@ -258,6 +258,13 @@ pub fn pen_menu(t: &Tablet) -> Element<'_, Message> {
         );
     }
     col = col.push(Space::new().height(6));
+    // The line: solid, dashed, dotted, dash-dot (pencils stay solid).
+    let mut dashes = row![].spacing(4);
+    for (d, label) in [(0u8, "────"), (1, "─ ─ ─"), (2, "· · · ·"), (3, "─ · ─")] {
+        dashes = dashes.push(button(text(label).size(12)).padding([4, 8]).on_press(msg(Msg::Dash(d))).style(theme::option(t.dash == d)));
+    }
+    col = col.push(dashes);
+    col = col.push(Space::new().height(6));
     let mut pals = row![].spacing(4);
     for (i, name) in pens::PALETTE_NAMES.iter().enumerate() {
         pals = pals.push(button(text(tr(name)).size(11.5)).padding([4, 8]).on_press(msg(Msg::Palette(i))).style(theme::option(i == t.palette)));

@@ -2221,6 +2221,15 @@ class NotebookActivity : ComponentActivity() {
                     }
                 }
             }
+            if (Tools.pen.kind == 0.toUByte()) {
+                MenuDivider()
+                Section("Linie")
+                Row(Modifier.padding(horizontal = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    listOf(0 to "────", 1 to "─ ─ ─", 2 to "· · · ·", 3 to "─ · ─").forEach { (d, label) ->
+                        Choice(label, Tools.dash == d, keepCase = true) { Tools.chooseDash(d); tool = NotebookView.Tool.PEN; applyTools(); tick++ }
+                    }
+                }
+            }
             if (Tools.pen == PenType.FOUNTAIN) FountainOptions()
             Spacer(Modifier.height(4.dp))
             }
@@ -2813,12 +2822,13 @@ class NotebookActivity : ComponentActivity() {
         }
 
         /** The pen as it is now, as a favourite. */
-        fun currentFavourite() = Tools.Favourite(tool == NotebookView.Tool.MARKER, Tools.pen, freeInk ?: Tools.inks[colorIdx], freeWidth ?: Tools.widths[widthIdx])
+        fun currentFavourite() = Tools.Favourite(tool == NotebookView.Tool.MARKER, Tools.pen, freeInk ?: Tools.inks[colorIdx], freeWidth ?: Tools.widths[widthIdx], if (tool == NotebookView.Tool.MARKER) 0 else Tools.dash)
 
         /** Picks a favourite: its tool, pen type, colour (its palette slot when one holds it) and width. */
         fun useFavourite(f: Tools.Favourite) {
             tool = if (f.marker) NotebookView.Tool.MARKER else NotebookView.Tool.PEN
             Tools.choosePen(f.pen)
+            if (!f.marker) Tools.chooseDash(f.dash)
             val slot = Tools.findInk(f.color)
             if (slot != null) { if (slot.first != Tools.palette) Tools.choosePalette(slot.first); colorIdx = slot.second; freeInk = null } else freeInk = f.color
             val wi = Tools.widths.indexOfFirst { kotlin.math.abs(it - f.width) < 0.01f }
@@ -3689,6 +3699,7 @@ class NotebookActivity : ComponentActivity() {
                 LabeledBtn(Glyph.TRASH, "Löschen") { view.deleteSelection() }
                 LabeledBtn(Glyph.LAPTOP, "Laptop") { sendSelectionToLaptop() }
                 LabeledBtn(Glyph.TEXT, "LaTeX") { recognizeSelection() }
+                LabeledBtn(Glyph.PEN, "Linie") { val d = view.nextDashForSelection(); flash(listOf("Durchgezogen", "Gestrichelt", "Gepunktet", "Strich-Punkt")[d]) }
                 // Handwriting next to a graph (f(x) = x², y = 2x + 1) goes into it as a new row.
                 val intoGraph = selection?.let { s -> !s.multi && nearestPlot(s.sheetId, android.graphics.RectF(s.bounds)) != null } == true
                 LabeledBtn(Glyph.PLOT, if (intoGraph) "In den Graphen" else "Graph") { graphFromSelection() }

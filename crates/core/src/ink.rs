@@ -33,6 +33,103 @@ pub const KIND_PEN: u8 = 0;
 pub const KIND_PENCIL: u8 = 1;
 pub const KIND_MARKER: u8 = 2;
 
+/// How a pen stroke is dashed, in bits 4–5 of [`Brush::kind`] (apps before 0.36 don't know
+/// these kinds and draw such strokes solid, rather than losing them).
+pub const DASH_SOLID: u8 = 0;
+pub const DASH_DASHED: u8 = 1;
+pub const DASH_DOTTED: u8 = 2;
+pub const DASH_DASH_DOT: u8 = 3;
+const DASH_SHIFT: u8 = 4;
+
+impl Brush {
+    /// The kind without its dash: [`KIND_PEN`], [`KIND_PENCIL`] or [`KIND_MARKER`].
+    pub fn base_kind(&self) -> u8 {
+        self.kind & 0x0F
+    }
+    /// [`DASH_SOLID`], [`DASH_DASHED`], [`DASH_DOTTED`] or [`DASH_DASH_DOT`].
+    pub fn dash(&self) -> u8 {
+        (self.kind >> DASH_SHIFT) & 3
+    }
+    /// The same brush dashed `dash` (only pens dash; pencils and markers stay solid).
+    pub fn with_dash(self, dash: u8) -> Brush {
+        let dash = if self.base_kind() == KIND_PEN { dash & 3 } else { 0 };
+        Brush { kind: self.base_kind() | (dash << DASH_SHIFT), ..self }
+    }
+}
+
+/// The pieces a dashed stroke is drawn as, each a stroke of its own, along its way: dashes four
+/// widths long with gaps of three, dots two widths apart, or dash and dot by turns (round ends
+/// make the gaps look a width shorter). None for a solid stroke.
+pub fn dash_runs(points: &[InkPoint], brush: &Brush) -> Option<Vec<Vec<InkPoint>>> {
+    let dash = brush.dash();
+    if dash == DASH_SOLID || brush.base_kind() != KIND_PEN || points.len() < 2 {
+        return None;
+    }
+    let w = brush.width.max(0.6);
+    // (drawn, length in widths); a drawn piece of length 0 is a dot.
+    let pattern: &[(bool, f32)] = match dash {
+        DASH_DASHED => &[(true, 4.0), (false, 3.0)],
+        DASH_DOTTED => &[(true, 0.0), (false, 2.2)],
+        _ => &[(true, 4.0), (false, 2.4), (true, 0.0), (false, 2.4)],
+    };
+    let lerp = |a: &InkPoint, b: &InkPoint, t: f32| InkPoint { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t, pressure: a.pressure + (b.pressure - a.pressure) * t, t_ms: a.t_ms + ((b.t_ms as f32 - a.t_ms as f32) * t).max(0.0) as u32 };
+    let pts: Vec<&InkPoint> = points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).collect();
+    if pts.len() < 2 {
+        return None;
+    }
+    let mut runs: Vec<Vec<InkPoint>> = Vec::new();
+    let mut run: Vec<InkPoint> = Vec::new();
+    let (mut k, mut left) = (0usize, pattern[0].1 * w);
+    if pattern[0].0 {
+        run.push(*pts[0]);
+    }
+    for seg in pts.windows(2) {
+        let (a, b) = (seg[0], seg[1]);
+        let len = (b.x - a.x).hypot(b.y - a.y);
+        let mut at = 0.0f32;
+        while len - at >= left {
+            at += left;
+            let p = lerp(a, b, if len > 0.0 { at / len } else { 0.0 });
+            if pattern[k].0 {
+                run.push(p);
+                runs.push(std::mem::take(&mut run));
+            }
+            k = (k + 1) % pattern.len();
+            left = pattern[k].1 * w;
+            if pattern[k].0 {
+                run.push(p);
+            }
+            if runs.len() > 20_000 {
+                return Some(runs);
+            }
+        }
+        left -= len - at;
+        if pattern[k].0 {
+            run.push(*b);
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    Some(runs)
+}
+
+/// Dashed pieces joined into one polygon: each piece's outline, then on to the next one's first
+/// vertex and, after the last, back the same way, so the joins have no area (they fill nothing)
+/// while the whole line still hits and selects as one.
+fn joined(runs: &[Vec<InkPoint>], brush: &Brush) -> Vec<f32> {
+    let polys: Vec<Vec<f32>> = runs.iter().map(|r| solid_outline(r, brush)).filter(|p| p.len() >= 6).collect();
+    let mut out = Vec::with_capacity(polys.iter().map(|p| p.len() + 4).sum());
+    for p in &polys {
+        out.extend_from_slice(p);
+        out.extend_from_slice(&p[..2]);
+    }
+    for p in polys.iter().rev().skip(1) {
+        out.extend_from_slice(&p[..2]);
+    }
+    out
+}
+
 impl Default for Brush {
     fn default() -> Self {
         Brush { width: 2.0, thinning: 0.6, color: 0xFF111111, kind: 0 }
@@ -157,6 +254,13 @@ impl Default for Rect {
 /// ends get round caps. A single sample becomes a dot. The polygon is meant to be filled with
 /// the non-zero rule, which also handles self-overlapping strokes.
 pub fn outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
+    if let Some(runs) = dash_runs(points, brush) {
+        return joined(&runs, &Brush { kind: brush.base_kind(), ..*brush });
+    }
+    solid_outline(points, brush)
+}
+
+fn solid_outline(points: &[InkPoint], brush: &Brush) -> Vec<f32> {
     match shape(points, brush) {
         Shape::Empty => Vec::new(),
         Shape::Dot(x, y, r) => circle(x, y, r, 16),
@@ -204,6 +308,13 @@ pub fn pencil_layer_brushes(brush: &Brush) -> [Brush; 2] {
 /// overlap too, which is invisible for opaque ink (draw translucent ink, e.g. highlighters,
 /// into a separate layer).
 pub fn outline_mesh(points: &[InkPoint], brush: &Brush, xy: &mut Vec<f32>, indices: &mut Vec<u32>) {
+    if let Some(runs) = dash_runs(points, brush) {
+        let solid = Brush { kind: brush.base_kind(), ..*brush };
+        for r in &runs {
+            outline_mesh(r, &solid, xy, indices);
+        }
+        return;
+    }
     let base = (xy.len() / 2) as u32;
     match shape(points, brush) {
         Shape::Empty => {}
@@ -382,6 +493,48 @@ impl Reader<'_> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Winding number of (x, y) in a polygon (the non-zero rule fills where it isn't 0).
+    fn winding(x: f32, y: f32, poly: &[f32]) -> i32 {
+        let n = poly.len() / 2;
+        let mut w = 0;
+        for i in 0..n {
+            let (x0, y0, x1, y1) = (poly[2 * i], poly[2 * i + 1], poly[2 * ((i + 1) % n)], poly[2 * ((i + 1) % n) + 1]);
+            if y0 <= y {
+                if y1 > y && (x1 - x0) * (y - y0) - (x - x0) * (y1 - y0) > 0.0 {
+                    w += 1;
+                }
+            } else if y1 <= y && (x1 - x0) * (y - y0) - (x - x0) * (y1 - y0) < 0.0 {
+                w -= 1;
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn dashed_and_dotted_strokes_fill_their_dashes_and_leave_gaps() {
+        let line: Vec<InkPoint> = (0..=100).map(|i| InkPoint { x: i as f32 * 2.0, y: 50.0, pressure: 0.5, t_ms: i * 8 }).collect();
+        let pen = Brush { width: 2.0, thinning: 0.0, color: 0xFF000000, kind: KIND_PEN };
+        assert!(dash_runs(&line, &pen).is_none(), "solid");
+        let dashed = pen.with_dash(DASH_DASHED);
+        assert_eq!((dashed.base_kind(), dashed.dash()), (KIND_PEN, DASH_DASHED));
+        let runs = dash_runs(&line, &dashed).unwrap();
+        // 200 pt at 8 pt dash + 6 pt gap: about 14 dashes.
+        assert!((13..=16).contains(&runs.len()), "{}", runs.len());
+        let poly = outline(&line, &dashed);
+        assert_ne!(winding(4.0, 50.0, &poly), 0, "in the first dash");
+        assert_eq!(winding(11.0, 50.0, &poly), 0, "in the first gap");
+        assert_ne!(winding(18.0, 50.0, &poly), 0, "in the second dash");
+        // Dots: one piece of no length each (a round dot), two widths apart.
+        let dots = dash_runs(&line, &pen.with_dash(DASH_DOTTED)).unwrap();
+        assert!(dots.iter().all(|r| r.len() <= 2) && dots.len() > 40, "{}", dots.len());
+        // The mesh has the same pieces.
+        let (mut xy, mut idx) = (Vec::new(), Vec::new());
+        outline_mesh(&line, &dashed, &mut xy, &mut idx);
+        assert!(!idx.is_empty());
+        // Pencils and markers don't dash.
+        assert_eq!(Brush { kind: KIND_MARKER, ..pen }.with_dash(DASH_DASHED).dash(), DASH_SOLID);
+    }
     use super::*;
 
     fn line(n: usize) -> Vec<InkPoint> {

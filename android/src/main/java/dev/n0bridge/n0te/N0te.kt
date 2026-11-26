@@ -110,6 +110,7 @@ object Tools {
         palette = p.getInt("palette", 0).coerceIn(0, palettes.size - 1)
         recent.clear()
         p.getString("recent", "")!!.split(',').mapNotNullTo(recent) { it.toLongOrNull()?.toInt() }
+        dash = p.getInt("dash", 0).coerceIn(0, 3)
         loadFavourites()
     }
 
@@ -122,6 +123,10 @@ object Tools {
     }
     fun setWidth(i: Int, w: Float) { widths[i] = w.coerceIn(MIN_W, MAX_W); prefs?.edit()?.putFloat("width$i", widths[i])?.apply() }
     fun choosePen(t: PenType) { pen = t; prefs?.edit()?.putString("pen", t.name)?.apply() }
+    /** The pen's line: 0 solid, 1 dashed, 2 dotted, 3 dash-dot (core ink DASH_*; pencils stay solid). */
+    var dash = 0
+        private set
+    fun chooseDash(d: Int) { dash = d.coerceIn(0, 3); prefs?.edit()?.putInt("dash", dash)?.apply() }
 
     // The fountain pen's options (Fountain.kt; the pen menu).
     val fountainSensitivity get() = prefs?.getFloat("fp_sensitivity", 0.65f) ?: 0.65f
@@ -155,16 +160,16 @@ object Tools {
      * A favourite pen: the tool (pen or marker), pen type, colour and width, picked with one tap.
      * Kept per device ("fav": entries "P|FOUNTAIN|ARGB|width" separated by ';').
      */
-    data class Favourite(val marker: Boolean, val pen: PenType, val color: Int, val width: Float) {
-        fun encode() = "${if (marker) "M" else "P"}|${pen.name}|${color.toLong() and 0xFFFFFFFFL}|$width"
+    data class Favourite(val marker: Boolean, val pen: PenType, val color: Int, val width: Float, val dash: Int = 0) {
+        fun encode() = "${if (marker) "M" else "P"}|${pen.name}|${color.toLong() and 0xFFFFFFFFL}|$width|$dash"
         companion object {
             fun decode(s: String): Favourite? {
                 val f = s.split('|')
-                if (f.size != 4) return null
+                if (f.size != 4 && f.size != 5) return null
                 val pen = runCatching { PenType.valueOf(f[1]) }.getOrNull() ?: return null
                 val color = f[2].toLongOrNull()?.toInt() ?: return null
                 val width = f[3].toFloatOrNull()?.takeIf { it.isFinite() }?.coerceIn(MIN_W, MAX_W) ?: return null
-                return Favourite(f[0] == "M", pen, color or 0xFF000000.toInt(), width)
+                return Favourite(f[0] == "M", pen, color or 0xFF000000.toInt(), width, f.getOrNull(4)?.toIntOrNull()?.coerceIn(0, 3) ?: 0)
             }
         }
     }

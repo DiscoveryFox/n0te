@@ -1294,6 +1294,10 @@ impl SheetHandle {
     pub fn recolor(&self, ids: Vec<String>, color: u32) -> R<()> {
         Ok(lock(&self.sheet).recolor(&ids, color)?)
     }
+    /// Another line for pen strokes (0 solid, 1 dashed, 2 dotted, 3 dash-dot), one step.
+    pub fn set_dash(&self, ids: Vec<String>, dash: u8) -> R<()> {
+        Ok(lock(&self.sheet).set_dash(&ids, dash)?)
+    }
     pub fn transform(&self, ids: Vec<String>, dx: f32, dy: f32, scale: f32, ox: f32, oy: f32) -> R<()> {
         Ok(lock(&self.sheet).transform(&ids, dx, dy, scale, ox, oy)?)
     }

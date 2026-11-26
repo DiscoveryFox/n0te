@@ -481,7 +481,9 @@ class NotebookView(context: Context) : View(context) {
             } else {
                 val pen = Tools.pen
                 val thin = if (pen == PenType.FOUNTAIN) Fountain.thinning() else pen.thinning
-                FfiBrush(w * pen.widthMul, thin, ((base and 0x00FFFFFF) or (pen.inkAlpha() shl 24)).toUInt(), pen.kind)
+                // Pens may dash (bits 4–5 of the kind); pencils stay solid.
+                val kind = if (pen.kind == 0.toUByte()) (Tools.dash shl 4).toUByte() else pen.kind
+                FfiBrush(w * pen.widthMul, thin, ((base and 0x00FFFFFF) or (pen.inkAlpha() shl 24)).toUInt(), kind)
             }
         }
 
@@ -1455,6 +1457,15 @@ class NotebookView(context: Context) : View(context) {
     fun recolorSelection(color: Int) {
         val sel = selection ?: return
         for (part in sel.parts) model?.recolor(part.sheetId, part.ids, color)
+    }
+
+    /** The selected pen strokes get the next line (solid → dashed → dotted → dash-dot → solid); returns it. */
+    private var selectionDash = 0
+    fun nextDashForSelection(): Int {
+        val sel = selection ?: return selectionDash
+        selectionDash = (selectionDash + 1) % 4
+        for (part in sel.parts) model?.setDash(part.sheetId, part.ids, selectionDash)
+        return selectionDash
     }
 
     /**
