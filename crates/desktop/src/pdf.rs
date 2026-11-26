@@ -32,11 +32,18 @@ pub struct Tiles {
     order: VecDeque<Key>,
     bytes: usize,
     pending: HashSet<Key>,
+    /// Tiles the worker couldn't render, and when: not asked for again for a while (a
+    /// damaged page would otherwise be re-rendered on every frame).
+    failed: HashMap<Key, std::time::Instant>,
 }
+
+/// How long a tile that failed waits before it is tried again.
+const RETRY: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Tiles {
     fn insert(&mut self, k: Key, h: Handle, size: usize) {
         self.pending.remove(&k);
+        self.failed.remove(&k);
         if self.map.insert(k.clone(), (h, size)).is_none() {
             self.order.push_back(k);
             self.bytes += size;
@@ -50,6 +57,23 @@ impl Tiles {
     }
     pub fn get(&self, k: &Key) -> Option<Handle> {
         self.map.get(k).map(|(h, _)| h.clone())
+    }
+
+    fn fail(&mut self, k: Key) {
+        self.pending.remove(&k);
+        if self.failed.len() > 4096 {
+            self.failed.clear();
+        }
+        self.failed.insert(k, std::time::Instant::now());
+    }
+
+    /// Whether `k` should be requested now: not cached, not on its way, not failed lately.
+    fn wanted(&mut self, k: &Key) -> bool {
+        if self.failed.get(k).is_some_and(|at| at.elapsed() < RETRY) {
+            return false;
+        }
+        self.failed.remove(k);
+        !self.map.contains_key(k) && self.pending.insert(k.clone())
     }
 }
 
@@ -124,9 +148,7 @@ impl Pdf {
                         let size = img.data.len();
                         t.insert(k, Handle::from_rgba(img.width, img.height, img.data), size);
                     }
-                    Err(_) => {
-                        t.pending.remove(&k);
-                    }
+                    Err(_) => t.fail(k),
                 }
                 drop(t);
                 let _ = tx.unbounded_send(());
@@ -173,7 +195,7 @@ impl Pdf {
                 let k = (blob.to_string(), page, scale.to_bits(), tx, ty);
                 let rect = n0te_core::ink::Rect::new(x as f32 / scale, y as f32 / scale, (x + w) as f32 / scale, (y + h) as f32 / scale);
                 let img = t.get(&k);
-                if img.is_none() && t.pending.insert(k) {
+                if img.is_none() && t.wanted(&k) {
                     missing.push(TileRequest { doc: blob.to_string(), page, scale, tile: Tile { x, y, width: w, height: h }, priority: prio, view: VIEW, generation: 0 });
                 }
                 out.push((rect, img));
@@ -299,6 +321,21 @@ pub fn recent_pdfs() -> Vec<(PathBuf, std::time::SystemTime)> {
 mod tests {
     use super::*;
     use n0te_core::notebook::{Background, SheetSpec};
+
+    #[test]
+    fn a_tile_that_failed_is_not_asked_for_on_every_frame() {
+        let mut t = Tiles::default();
+        let k: Key = ("blob".into(), 0, 1.0f32.to_bits(), 0, 0);
+        assert!(t.wanted(&k), "first time: asked for");
+        assert!(!t.wanted(&k), "on its way: not again");
+        t.fail(k.clone());
+        assert!(!t.wanted(&k), "failed just now: left alone for a while");
+        t.failed.insert(k.clone(), std::time::Instant::now() - RETRY);
+        assert!(t.wanted(&k), "later: tried again");
+        t.insert(k.clone(), Handle::from_rgba(1, 1, vec![0; 4]), 4);
+        assert!(!t.wanted(&k), "cached: not asked for");
+        assert!(t.failed.is_empty());
+    }
 
     #[test]
     fn buckets_are_powers_of_two() {
