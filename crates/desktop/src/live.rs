@@ -200,10 +200,61 @@ impl Session {
 
 /// A one-shot command to the service; its text output or the error.
 pub fn request(args: &[&str]) -> Result<String, String> {
-    let mut s = connect().map_err(|_| tr("Sync-Dienst läuft nicht").to_string())?;
-    writeln!(s, "{}", serde_json::to_string(args).unwrap_or_default()).map_err(|e| e.to_string())?;
-    let mut line = String::new();
-    BufReader::new(s).read_line(&mut line).map_err(|e| e.to_string())?;
+    request_within(args, limit_for(args.first().copied().unwrap_or_default()))
+}
+
+/// How long a request may take. Most are answered in milliseconds and many run on the UI
+/// thread (the 10 s device poll among them), so a service that hangs must not freeze the
+/// window; the ones that wait for another device or copy a notebook get longer (they run in
+/// the background).
+pub fn limit_for(command: &str) -> std::time::Duration {
+    std::time::Duration::from_secs(match command {
+        "accept" | "join" | "restore" => 120,
+        "history" => 20,
+        _ => 3,
+    })
+}
+
+/// After a quick request timed out, the next quick ones fail at once for a while instead of
+/// each waiting out its limit again.
+static STALLED_UNTIL: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+const STALL_PAUSE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// [`request`] with its own limit: the exchange runs on a helper thread; when it takes longer,
+/// the connection is shut (which ends the helper's read) and the request fails.
+pub fn request_within(args: &[&str], limit: std::time::Duration) -> Result<String, String> {
+    let quick = limit <= std::time::Duration::from_secs(5);
+    let stalled = || STALLED_UNTIL.lock().unwrap_or_else(|e| e.into_inner());
+    if quick && stalled().is_some_and(|t| std::time::Instant::now() < t) {
+        return Err(tr("Der Sync-Dienst antwortet nicht").to_string());
+    }
+    let s = connect().map_err(|_| tr("Sync-Dienst läuft nicht").to_string())?;
+    let closer = s.try_clone().ok();
+    let line = serde_json::to_string(args).unwrap_or_default();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut s = s;
+        let r = (|| {
+            writeln!(s, "{line}")?;
+            let mut out = String::new();
+            BufReader::new(s).read_line(&mut out)?;
+            Ok::<_, std::io::Error>(out)
+        })();
+        let _ = tx.send(r);
+    });
+    let line = match rx.recv_timeout(limit) {
+        Ok(r) => r.map_err(|e| e.to_string())?,
+        Err(_) => {
+            if let Some(c) = closer {
+                let _ = c.shutdown();
+            }
+            if quick {
+                *stalled() = Some(std::time::Instant::now() + STALL_PAUSE);
+            }
+            return Err(tr("Der Sync-Dienst antwortet nicht").to_string());
+        }
+    };
+    *stalled() = None;
     let v: Value = serde_json::from_str(&line).map_err(|_| tr("keine Antwort vom Sync-Dienst").to_string())?;
     let out = v["out"].as_str().unwrap_or_default().to_string();
     if v["ok"].as_bool() == Some(true) { Ok(out) } else { Err(out) }

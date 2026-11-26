@@ -809,6 +809,7 @@ pub static EN_TABLE: &[(&str, &str)] = &[
     ("Der Sync-Dienst läuft nicht. Starten: systemctl --user enable --now n0te-sync", "The sync service isn't running. Start it: systemctl --user enable --now n0te-sync"),
     ("Sync-Dienst läuft nicht", "sync service isn't running"),
     ("keine Antwort vom Sync-Dienst", "no answer from the sync service"),
+    ("Der Sync-Dienst antwortet nicht", "The sync service isn't answering"),
     // Updates (Windows)
     ("Update ließ sich nicht starten", "The update couldn't start"),
     ("n0te {} ist bereit", "n0te {} is ready"),
