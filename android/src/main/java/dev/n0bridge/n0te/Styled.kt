@@ -229,7 +229,7 @@ fun Switch(value: Boolean) {
     val (trackColor, knob) = when {
         Voice.mono && value -> Ui.Chalk to Ui.Red
         Voice.mono -> Ui.Black to Ui.Muted
-        value -> Ui.Red to Color.White
+        value -> Ui.Red to Ui.OnAccent
         else -> Ui.Border to (if (Ui.theme.dark) Ui.Muted else Color.White)
     }
     Box(

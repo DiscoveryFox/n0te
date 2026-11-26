@@ -165,6 +165,19 @@ pub enum Message {
     ShowHelp(bool),
     ShowSettings(bool),
     SetTheme(&'static str),
+    /// Designs: copy the AI instructions, read the clipboard, a design's text was read (from
+    /// the clipboard or a dropped file), save the read one (and switch to it), drop it, copy an
+    /// imported design out, delete one (ask first), decorations on/off and moving or still.
+    DesignPrompt,
+    DesignPaste,
+    DesignText(Option<String>),
+    DesignSave(bool),
+    DesignDiscard,
+    DesignCopy(String),
+    DesignDelete(Option<String>),
+    DesignDeleteConfirmed(String),
+    DecorShow(bool),
+    DecorMotion(bool),
     SetRowGap(f32),
     FormulaCenter(bool),
     SetSideGap(f32),
@@ -371,6 +384,12 @@ pub struct App {
     pub palette: Option<(String, usize)>,
     pub show_help: bool,
     pub show_settings: bool,
+    /// A design file read for import, waiting for "apply" / "save" (or its errors).
+    pub design_read: Option<DesignRead>,
+    /// An imported design about to be deleted (asks first).
+    pub design_deleting: Option<String>,
+    /// Where imported designs are stored (the config folder; a temporary one in tests).
+    pub designs_dir: PathBuf,
     /// The sync service connection (None: not running).
     pub sync: Option<Arc<live::Session>>,
     pub devices: Vec<live::Device>,
@@ -516,6 +535,9 @@ impl App {
             palette: None,
             show_help: false,
             show_settings: false,
+            design_read: None,
+            design_deleting: None,
+            designs_dir: std::env::temp_dir().join(format!("n0te-designs-{}", std::process::id())),
             sync: None,
             devices: Vec::new(),
             devices_at: None,
@@ -575,7 +597,10 @@ impl App {
 
     /// Starts the app; `import` = a `.n0te` file given on the command line (opened after import).
     pub fn boot_with(root: PathBuf, import: Option<PathBuf>) -> (Self, Task<Message>) {
+        // Imported designs first: the saved design may be one of them.
+        theme::load_imported(&theme::designs_dir());
         let mut app = Self::with_settings(root, Settings::load());
+        app.designs_dir = theme::designs_dir();
         crate::i18n::set_from(&app.settings.language);
         app.persist_settings = true;
         app.offline = false;
@@ -1183,8 +1208,16 @@ impl App {
                 return match ext.as_str() {
                     "n0te" => self.handle(Message::Import(p)),
                     "pdf" => self.handle(Message::ImportPdf(p)),
+                    // A design file (from an AI, or copied from the tablet).
+                    "json" | "n0style" => match std::fs::metadata(&p) {
+                        Ok(m) if m.len() as usize <= n0te_core::design::MAX_BYTES => self.handle(Message::DesignText(std::fs::read_to_string(&p).ok())),
+                        _ => {
+                            self.say(tr("Das ist keine Design-Datei"));
+                            Task::none()
+                        }
+                    },
                     _ => {
-                        self.say(tr("Nur PDF- und .n0te-Dateien"));
+                        self.say(tr("Nur PDF-, .n0te- und Design-Dateien (.json)"));
                         Task::none()
                     }
                 };
@@ -1719,6 +1752,65 @@ impl App {
                 if self.persist_settings { self.settings.save(); }
                 theme::set_theme(id);
                 self.reopen();
+            }
+            Message::DesignPrompt => {
+                self.say(tr("KI-Anleitung kopiert: in einen KI-Chat einfügen und beschreiben, wie n0te aussehen soll"));
+                return iced::clipboard::write(n0te_core::design::ai_prompt(crate::i18n::lang() == crate::i18n::Lang::En));
+            }
+            Message::DesignPaste => return iced::clipboard::read().map(Message::DesignText),
+            Message::DesignText(text) => match text.filter(|t| !t.trim().is_empty()) {
+                None => self.say(tr("Die Zwischenablage ist leer")),
+                Some(t) => {
+                    self.design_read = Some(DesignRead::read(t));
+                    self.show_settings = true;
+                }
+            },
+            Message::DesignSave(apply) => {
+                if let Some(DesignRead::Ok { design, .. }) = self.design_read.take() {
+                    let mut d = design;
+                    d.id = n0te_core::design::free_id(&d, &n0te_core::design::load_dir(&self.designs_dir));
+                    match n0te_core::design::save(&self.designs_dir, &d) {
+                        Ok(_) => {
+                            theme::load_imported(&self.designs_dir);
+                            let saved = theme::imported().into_iter().find(|t| t.id == d.id);
+                            match saved {
+                                Some(t) if apply => return self.handle(Message::SetTheme(t.id.as_str())),
+                                _ => self.say(trf("„{}“ gespeichert", &[&d.name])),
+                            }
+                        }
+                        Err(e) => self.say(trf("Speichern ging nicht: {}", &[&e])),
+                    }
+                }
+            }
+            Message::DesignDiscard => self.design_read = None,
+            Message::DesignCopy(id) => {
+                if let Some(t) = theme::all().into_iter().find(|t| t.id == id) {
+                    self.say(tr("Design kopiert: auf dem Tablet unter Einstellungen › Design › Aus Zwischenablage einfügen"));
+                    return iced::clipboard::write(t.json.clone());
+                }
+            }
+            Message::DesignDelete(id) => self.design_deleting = id,
+            Message::DesignDeleteConfirmed(id) => {
+                self.design_deleting = None;
+                if let Err(e) = n0te_core::design::remove(&self.designs_dir, &id) {
+                    self.say(trf("Löschen ging nicht: {}", &[&e]));
+                }
+                theme::load_imported(&self.designs_dir);
+                if theme::p().id == id {
+                    return self.handle(Message::SetTheme("nothing"));
+                }
+            }
+            Message::DecorShow(on) => {
+                self.settings.decor = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
+            }
+            Message::DecorMotion(on) => {
+                self.settings.decor_motion = on;
+                if self.persist_settings {
+                    self.settings.save();
+                }
             }
             Message::FormulaCenter(on) => {
                 self.settings.formula_center = on;
@@ -3683,28 +3775,141 @@ impl App {
         col.into()
     }
 
-    fn settings_view(&self) -> Element<'_, Message> {
-        // Designs: a card per style with a tiny preview of its look.
-        let mut cards = Vec::new();
-        for t in theme::PALETTES.iter() {
-            let on = t.id == theme::p().id;
-            cards.push(
-                button(
-                    column![
-                        style_preview(t),
-                        text(tr(t.name)).font(theme::title_font()).size(14).color(theme::p().text),
-                        text(tr(t.style.desc)).size(11.5).color(theme::p().muted),
-                    ]
-                    .spacing(5),
-                )
+    /// SETTINGS › Design: the designs as cards (classic, special, imported), the decoration
+    /// switches, and making your own: copy the AI instructions, paste the AI's answer or drop
+    /// its file on the window; then the read design (preview, apply / save) or its errors.
+    fn designs_view(&self) -> Element<'_, Message> {
+        let card = |t: &'static theme::Palette| -> Element<'static, Message> {
+            button(column![style_preview(t), text(t.title()).font(theme::title_font()).size(14).color(theme::p().text), text(t.about()).size(11.5).color(theme::p().muted)].spacing(5))
                 .padding(8)
                 .width(Length::Fixed(176.0))
-                .on_press(Message::SetTheme(t.id))
-                .style(theme::option(on))
-                .into(),
-            );
+                .on_press(Message::SetTheme(t.id.as_str()))
+                .style(theme::option(t.id == theme::p().id))
+                .into()
+        };
+        let group = |title: &str, cards: Vec<Element<'static, Message>>| -> Element<'static, Message> {
+            column![theme::caption(title), iced::widget::Row::with_children(cards).spacing(10).wrap().vertical_spacing(10)].spacing(8).into()
+        };
+        let classics = theme::classics().min(theme::builtins().len());
+        let mut col = column![
+            group(tr("Klassisch"), theme::builtins()[..classics].iter().map(|t| card(t)).collect()),
+            group(tr("Besonders"), theme::builtins()[classics..].iter().map(|t| card(t)).collect()),
+        ]
+        .spacing(16);
+        let imported = theme::imported();
+        if !imported.is_empty() {
+            let cards = imported
+                .into_iter()
+                .map(|t| -> Element<'_, Message> {
+                    let actions: Element<'_, Message> = if self.design_deleting.as_deref() == Some(t.id.as_str()) {
+                        row![
+                            text(tr("Löschen?")).size(12).color(theme::p().muted),
+                            Space::new().width(Length::Fill),
+                            button(theme::btn_small(tr("Ja"))).padding(theme::pad()).on_press(Message::DesignDeleteConfirmed(t.id.clone())).style(theme::accent_button),
+                            button(theme::btn_small(tr("Nein"))).padding(theme::pad()).on_press(Message::DesignDelete(None)).style(theme::ghost),
+                        ]
+                        .spacing(4)
+                        .align_y(Alignment::Center)
+                        .into()
+                    } else {
+                        row![
+                            button(theme::btn_small(tr("Kopieren"))).padding(theme::pad()).on_press(Message::DesignCopy(t.id.clone())).style(theme::ghost),
+                            button(theme::btn_small(tr("Löschen"))).padding(theme::pad()).on_press(Message::DesignDelete(Some(t.id.clone()))).style(theme::ghost),
+                        ]
+                        .spacing(4)
+                        .into()
+                    };
+                    column![card(t), actions].spacing(4).width(Length::Fixed(176.0)).into()
+                })
+                .collect();
+            col = col.push(group(tr("Eigene"), cards));
         }
-        let designs = iced::widget::Row::with_children(cards).spacing(10).wrap().vertical_spacing(10);
+        col = col.push(
+            column![
+                iced::widget::toggler(self.settings.decor).label(tr("Dekorationen: Schnee, Lichter, Sterne … mancher Designs hinter der Bibliothek")).on_toggle(Message::DecorShow).size(20).text_size(14).spacing(12).style(theme::switch),
+                iced::widget::toggler(self.settings.decor_motion).label(tr("Dekorationen bewegen sich")).on_toggle_maybe(self.settings.decor.then_some(Message::DecorMotion)).size(20).text_size(14).spacing(12).style(theme::switch),
+            ]
+            .spacing(8),
+        );
+        col = col.push(
+            container(
+                column![
+                    text(tr("Eigenes Design")).font(theme::title_font()).size(15).color(theme::p().text),
+                    text(tr("Beschreib einer KI (ChatGPT, Claude, Gemini …), wie n0te aussehen soll: Die Anleitung erklärt ihr das Format. Ihre Antwort fügst du hier ein oder ziehst die Datei ins Fenster. Funktioniert auch auf dem Tablet.")).size(12.5).color(theme::p().muted),
+                    row![
+                        button(theme::btn_small(tr("KI-Anleitung kopieren"))).padding(theme::pad()).on_press(Message::DesignPrompt).style(theme::accent_button),
+                        button(theme::btn_small(tr("Antwort einfügen"))).padding(theme::pad()).on_press(Message::DesignPaste).style(theme::secondary),
+                    ]
+                    .spacing(8),
+                ]
+                .spacing(10),
+            )
+            .padding(14)
+            .width(Length::Fill)
+            .style(theme::group),
+        );
+        match &self.design_read {
+            None => {}
+            Some(DesignRead::Ok { design, warnings, preview }) => {
+                let mut info = column![
+                    text(preview.title().to_string()).font(theme::title_font()).size(17).color(theme::p().text),
+                    text(preview.about().to_string()).size(12.5).color(theme::p().muted),
+                ]
+                .spacing(4);
+                if !design.author.is_empty() {
+                    info = info.push(text(trf("von {}", &[&design.author])).size(12).color(theme::p().muted));
+                }
+                if !warnings.is_empty() {
+                    info = info.push(Space::new().height(4)).push(theme::caption(tr("Angepasst")));
+                    for w in warnings {
+                        info = info.push(text(format!("• {w}")).size(12).color(theme::p().muted));
+                    }
+                }
+                col = col.push(
+                    container(
+                        column![
+                            row![container(style_preview(preview)).width(Length::Fixed(200.0)), info.width(Length::Fill)].spacing(16),
+                            row![
+                                button(theme::btn_small(tr("Verwerfen"))).padding(theme::pad()).on_press(Message::DesignDiscard).style(theme::ghost),
+                                Space::new().width(Length::Fill),
+                                button(theme::btn_small(tr("Nur speichern"))).padding(theme::pad()).on_press(Message::DesignSave(false)).style(theme::secondary),
+                                button(theme::btn_small(tr("Übernehmen"))).padding(theme::pad()).on_press(Message::DesignSave(true)).style(theme::accent_button),
+                            ]
+                            .spacing(8)
+                            .align_y(Alignment::Center),
+                        ]
+                        .spacing(14),
+                    )
+                    .padding(16)
+                    .width(Length::Fill)
+                    .style(theme::panel),
+                );
+            }
+            Some(DesignRead::Bad { errors }) => {
+                let mut list = column![
+                    text(tr("Das Design passt noch nicht")).font(theme::title_font()).size(16).color(theme::p().text),
+                    text(tr("Gib der KI diese Liste, sie bessert das Design aus. Dann die neue Antwort wieder einfügen.")).size(12.5).color(theme::p().muted),
+                ]
+                .spacing(6);
+                for e in errors {
+                    list = list.push(text(format!("• {e}")).size(12.5).color(theme::p().text));
+                }
+                let report = format!("{}\n{}", tr("n0te kann das Design so nicht importieren. Bitte korrigiere es und antworte wieder nur mit dem JSON:"), errors.iter().map(|e| format!("- {e}")).collect::<Vec<_>>().join("\n"));
+                list = list.push(
+                    row![
+                        button(theme::btn_small(tr("Schließen"))).padding(theme::pad()).on_press(Message::DesignDiscard).style(theme::ghost),
+                        Space::new().width(Length::Fill),
+                        button(theme::btn_small(tr("Fehler kopieren"))).padding(theme::pad()).on_press(Message::CopyText(report)).style(theme::accent_button),
+                    ]
+                    .align_y(Alignment::Center),
+                );
+                col = col.push(container(list.spacing(8)).padding(16).width(Length::Fill).style(theme::panel));
+            }
+        }
+        col.into()
+    }
+
+    fn settings_view(&self) -> Element<'_, Message> {
         let slider = |label: &'static str, v: f32, f: fn(f32) -> Message| {
             row![
                 text(label).size(14).width(Length::Fixed(170.0)),
@@ -3717,7 +3922,7 @@ impl App {
         let section = settings_section;
         let rule = || container(Space::new()).height(1).width(Length::Fill).style(theme::hairline);
         let body = column![
-            section(tr("Design"), tr("Farben, Formen und Schrift. Exportierte PDFs bleiben weiß."), designs.into()),
+            section(tr("Design"), tr("Farben, Formen und Schrift. Exportierte PDFs bleiben weiß."), self.designs_view()),
             rule(),
             section(tr("Abstände"), tr("Zwischen den Seiten im Notizbuch."), column![slider(tr("Zwischen Seiten"), self.settings.row_gap, Message::SetRowGap), slider(tr("Zu Seitenblättern"), self.settings.side_gap, Message::SetSideGap)].spacing(8).into()),
             rule(),
@@ -4279,18 +4484,33 @@ fn style_preview(t: &'static theme::Palette) -> Element<'static, Message> {
         container::Style { background: Some(bg.into()), border: iced::Border { radius: r.into(), width: if line.a > 0.0 { 1.0 } else { 0.0 }, color: line }, ..Default::default() }
     });
     let sheet = container(Space::new().width(30).height(40)).style(move |_| container::Style { background: Some(t.paper.into()), border: iced::Border { radius: st.card.min(3.0).into(), ..Default::default() }, ..Default::default() });
-    container(
-        row![
-            column![text(if st.heading == Heading::Dot { "aa" } else { "Aa" }).font(face).size(if st.heading == Heading::Dot { 26 } else { 22 }).color(t.text), row![primary, Space::new().width(5), secondary]].spacing(6),
-            Space::new().width(Length::Fill),
-            sheet,
-        ]
-        .align_y(Alignment::Center),
-    )
-    .padding([10, 12])
+    let face_row = row![
+        column![text(if st.heading == Heading::Dot { "aa" } else { "Aa" }).font(face).size(if st.heading == Heading::Dot { 26 } else { 22 }).color(t.text), row![primary, Space::new().width(5), secondary]].spacing(6),
+        Space::new().width(Length::Fill),
+        sheet,
+    ]
+    .align_y(Alignment::Center);
+    container(iced::widget::Stack::new().push(container(face_row).padding([10, 12])).push_under(crate::decor::still(t)))
     .width(Length::Fill)
     .style(move |_| container::Style { background: Some(t.chrome.into()), border: iced::Border { radius: st.card.min(10.0).into(), width: 1.0, color: t.border }, ..Default::default() })
     .into()
+}
+
+/// A design file read for import (settings › Design): the design with what was adjusted and
+/// a palette to preview it, or everything that is wrong with it.
+pub enum DesignRead {
+    Ok { design: n0te_core::design::Design, warnings: Vec<String>, preview: &'static theme::Palette },
+    Bad { errors: Vec<String> },
+}
+
+impl DesignRead {
+    pub fn read(text: String) -> Self {
+        let en = crate::i18n::lang() == crate::i18n::Lang::En;
+        match n0te_core::design::parse(&text) {
+            Ok(p) => DesignRead::Ok { preview: theme::preview(&p.design), warnings: p.warnings.iter().map(|w| w.text(en)).collect(), design: p.design },
+            Err(e) => DesignRead::Bad { errors: e.iter().map(|p| p.text(en)).collect() },
+        }
+    }
 }
 
 /// Whether the n0bridge CLI is installed (then codes and notebooks can go straight to the

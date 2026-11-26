@@ -145,7 +145,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         content = content.push(notebooks(app, shown, show_folder));
     }
 
-    let main = column![shelf::toolbar(app), container(App::scroll(content)).height(Length::Fill).style(theme::surface)];
+    // The design's decorations (snow, stars, …) behind the shelf, under the scrolling content.
+    let shelf: Element<'_, Message> = match crate::decor::layer(app.settings.decor, app.settings.decor_motion) {
+        Some(decor) => iced::widget::Stack::new().push(App::scroll(content)).push_under(decor).into(),
+        None => App::scroll(content).into(),
+    };
+    let main = column![shelf::toolbar(app), container(shelf).height(Length::Fill).style(theme::surface)];
     column![
         top,
         container(Space::new()).height(1).width(Length::Fill).style(theme::hairline),

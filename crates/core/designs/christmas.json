@@ -1,0 +1,29 @@
+{
+  "n0te_style": 1,
+  "id": "christmas",
+  "name": "Weihnachten",
+  "name_en": "Christmas",
+  "description": "Tannengrün und Beerenrot, Schneefall und Lichterkette",
+  "description_en": "Pine green and berry red, snowfall and fairy lights",
+  "dark": true,
+  "colors": {
+    "background": "#0e2419",
+    "surface": "#15301f",
+    "surface_2": "#1d3b28",
+    "border": "#2c4c37",
+    "text": "#f6efe1",
+    "muted": "#9db3a2",
+    "accent": "#d7263d",
+    "on_accent": "#ffffff",
+    "paper": "#fffdf7"
+  },
+  "corners": { "buttons": 14, "cards": 18, "panels": 22 },
+  "labels": "sans",
+  "headings": "serif",
+  "fill": "tonal",
+  "shadows": true,
+  "decorations": [
+    { "kind": "snow", "colors": ["#ffffff"], "amount": 0.55 },
+    { "kind": "lights", "colors": ["#f5c542", "#d7263d", "#3fa34d", "#4a90e2"], "amount": 0.7 }
+  ]
+}

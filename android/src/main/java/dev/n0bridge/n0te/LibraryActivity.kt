@@ -357,6 +357,8 @@ class LibraryActivity : ComponentActivity() {
             Row(Modifier.fillMaxSize()) {
                 if (!list.isNullOrEmpty()) Sidebar(list)
                 Box(Modifier.weight(1f).fillMaxSize()) {
+                    // The design's decorations (snow, stars, …) behind the notebooks.
+                    if (Settings.decorShow) DecorLayer(Ui.theme, Modifier.matchParentSize())
                     Main(list) { creating = true }
                     picked?.let { p -> SelectBar(p, list.orEmpty(), Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)) }
                 }

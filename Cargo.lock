@@ -3841,6 +3841,7 @@ version = "0.34.1"
 dependencies = [
  "blake3",
  "loro",
+ "serde_json",
  "sha1_smol",
  "thiserror 2.0.21",
 ]

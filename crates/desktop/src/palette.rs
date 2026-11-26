@@ -109,11 +109,12 @@ pub fn items(app: &App) -> Vec<Item> {
             }
         }
     }
-    for t in theme::PALETTES {
-        v.push(item(trf("Design: {}", &[&tr(t.name)]), if t.id == theme::p().id { tr("aktiv") } else { "" }, Command::Theme(t.id)));
-    }
     v.push(item(tr("Einstellungen"), tr("Strg ,"), Command::Settings));
     v.push(item(tr("Tastenkürzel"), "F1", Command::Help));
+    // The designs last: there are many, and the palette lists only its first rows unfiltered.
+    for t in theme::all() {
+        v.push(item(trf("Design: {}", &[&t.title()]), if t.id == theme::p().id { tr("aktiv") } else { "" }, Command::Theme(t.id.as_str())));
+    }
     v
 }
 
