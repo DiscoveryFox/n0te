@@ -6,6 +6,31 @@ that GitHub release, so it lists only what changed in that version (what n0te ca
 [README](README.md)). The Android app shows its changes in German too (Einstellungen →
 Neuigkeiten).
 
+## [0.37.0] - 2026-11-27
+
+0.36.0 had no GitHub release of its own, so this release also brings its changes if you come
+from 0.35.0: a new laser pointer guests see and use, scribbling out that looks at what is
+underneath, links and chapters from PDFs, favourite pens and dashed lines (details under 0.36.0
+in [CHANGELOG.md](https://github.com/DiscoveryFox/n0te/blob/main/CHANGELOG.md)).
+
+### Added
+
+- Geodreieck, protractor and compass, next to the ruler: hold the ruler button (tablet) or "▾"
+  (n0te Tablet) to pick one. They are true to size: the Geodreieck's 16 cm side with
+  millimetres both ways from its 0 and a degree scale round it, a 10 cm protractor. The pen
+  follows every edge (the Geodreieck's legs too); one finger moves an instrument, two turn it
+  (the ruler snaps at 45°, the others at 15°).
+- The compass: put the pen down for the needle (it snaps to stroke ends and to where straight
+  lines cross), drag for the radius (half centimetres, whole squares on squared paper; shown in
+  cm), then draw round the needle anywhere; almost all the way round becomes the whole circle.
+  Starting on the needle moves it. The arc is an ordinary stroke in the pen's style.
+- Paint bucket (a bucket on the tablet, "Füllen" on n0te Tablet): tap inside an area closed by
+  ink and it fills with the colour in use, see-through so writing under it stays readable, or
+  hatched (hold the bucket on the tablet; the dashed line on n0te Tablet). Ink inside stays
+  clear, small gaps in a hand-drawn outline close, and an area open to the page's edge isn't
+  filled (n0te says so). A fill can be selected, moved, recoloured, erased, undone and exported
+  like any stroke; older versions show its edge as a line.
+
 ## [0.36.0] - 2026-11-26
 
 ### Added

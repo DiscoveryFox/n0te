@@ -11,6 +11,13 @@ object Changelog {
     data class Entry(val version: String, val date: String, val title: String, val items: List<String>)
 
     val all = listOf(
+        Entry("0.37.0", "27. Nov. 2026", "Geodreieck, Zirkel und Farbeimer", listOf(
+            "Geodreieck, Winkelmesser und Zirkel neben dem Lineal: Lineal-Knopf halten und auswählen. Alles in echter Größe – das Geodreieck mit 16 cm, Millimetern und Gradskala, der Winkelmesser mit 10 cm",
+            "Der Stift folgt jeder Kante, auch den Schenkeln des Geodreiecks; ein Finger verschiebt, zwei drehen (Lineal rastet bei 45°, die anderen bei 15°)",
+            "Zirkel: Stift aufsetzen für die Nadel (rastet an Strichenden und Schnittpunkten), ziehen für den Radius (in cm angezeigt), dann irgendwo um die Nadel zeichnen; fast ganz herum wird ein voller Kreis",
+            "Farbeimer: in eine umrandete Fläche tippen füllt sie durchscheinend mit der aktuellen Farbe; Eimer halten schaltet auf Schraffur. Kleine Lücken im Umriss schließen sich, Schrift darin bleibt frei",
+            "Füllungen lassen sich wie Striche auswählen, verschieben, umfärben, radieren und exportieren",
+        )),
         Entry("0.36.0", "26. Nov. 2026", "Wegkritzeln, das mitdenkt, ein neuer Laserpointer und klickbare PDFs", listOf(
             "Wegkritzeln schaut, was darunter liegt: Ausmalen und Schraffieren löschen den Umriss nicht mehr (sie bleiben Tinte), ein schnelles Gekritzel über einen einzelnen Buchstaben löscht ihn jetzt. Es geht nur, was wirklich bedeckt ist; einmal Rückgängig holt alles zurück",
             "Neuer Laserpointer: weicher, leuchtender Punkt und eine glatte Spur, die schmaler wird und verblasst – auf allen Geräten gleich",

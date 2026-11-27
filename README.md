@@ -44,7 +44,7 @@ Legend: ● available · ◐ partly / built but not yet tried on real hardware (
 
 | Area | Android | n0te Laptop · Linux | n0te Laptop · Windows | n0te Tablet · Windows (preview) |
 |---|:---:|:---:|:---:|:---:|
-| [Ink and pens](#ink-and-pens) | ● | ◐ shows ink | ◐ shows ink | ◐ pens, marker, eraser, pressure, tilt, eraser end, palm, finger mode, ruler, writing magnifier, scribble to delete |
+| [Ink and pens](#ink-and-pens) | ● | ◐ shows ink | ◐ shows ink | ◐ pens, marker, eraser, pressure, tilt, eraser end, palm, finger mode, ruler, Geodreieck, protractor, compass, paint bucket, writing magnifier, scribble to delete |
 | [Shapes, arrows, lasso](#shapes-arrows-lasso) | ● | ◐ shows them | ◐ shows them | ◐ shapes, arrowheads, lasso (move, scale, copy), insert space |
 | [Pages and notebooks](#pages-and-notebooks) | ● | ● | ● | ● |
 | [PDF](#pdf) | ● | ● | ● | ● |
@@ -63,7 +63,7 @@ n0te Laptop draws no ink by design: handwriting is the tablet's job. n0te Tablet
 n0te Laptop's interface plus the tablet's tools: the Windows pen (pressure, tilt, eraser end,
 barrel button, hover, palm rejection), the tablet's pen types and palettes, eraser, lasso, shapes
 and arrowheads (the same recognizers as the Android app, ported to the shared core), insert space,
-ruler, writing magnifier, scribble to delete, the "+" at the page edges, boards on their own,
+ruler, Geodreieck, protractor, compass, paint bucket, writing magnifier, scribble to delete, the "+" at the page edges, boards on their own,
 laser, text tool, finger mode and handwriting search. The Windows builds are new: they are built on GitHub
 Actions and have not been tried on real Windows pen devices yet, so expect rough edges and
 please report what you find.
@@ -81,8 +81,10 @@ appears under the pen with low latency, and the hand can rest on the screen whil
 pipette and palettes; the pen's side button erases; scribbling over a word deletes it (colouring
 in and hatching stay ink). Up to six favourite pens sit in the tool bar, and lines can be solid,
 dashed, dotted or dash-dot. The laser pointer leaves a short glowing trail for presenting
-(on n0te Laptop hold L and the mouse points). The ruler moves with one finger and turns with
-two, and the pen follows its edge; the writing magnifier (Schreiblupe) lets you write large in a
+(on n0te Laptop hold L and the mouse points). Next to the ruler there are a Geodreieck, a
+protractor and a compass, true to size: they move with one finger and turn with two, and the
+pen follows their edges; the compass draws arcs and circles round its needle. The paint bucket
+fills a closed area (see-through, or hatched). The writing magnifier (Schreiblupe) lets you write large in a
 strip at the bottom while its frame moves along the page. *(Picture: n0te Laptop showing what the tablet wrote.)*
 
 ### Shapes, arrows, lasso
@@ -318,7 +320,8 @@ its changes (from [CHANGELOG.md](CHANGELOG.md)) and has these files:
 
 | Version | Date | Highlights |
 |---|---|---|
-| [0.36.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.36.0) | 2026-11-26 | Scribbling out that looks at what is underneath (colouring in stays ink); a new laser pointer guests see and use too; links in PDFs work and their table of contents becomes groups; favourite pens; dashed and dotted lines |
+| [0.37.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.37.0) | 2026-11-27 | Geodreieck, protractor and compass, true to size; a paint bucket that fills or hatches a closed area |
+| [0.36.0](CHANGELOG.md#0360---2026-11-26) (released with 0.37.0) | 2026-11-26 | Scribbling out that looks at what is underneath (colouring in stays ink); a new laser pointer guests see and use too; links in PDFs work and their table of contents becomes groups; favourite pens; dashed and dotted lines |
 | [0.35.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.35.0) | 2026-11-26 | Your own designs written with an AI; eight new designs incl. Christmas with snowfall; crash reports; a big bug hunt (data safety, crashes, Windows) with a real test suite; much faster library and long notebooks |
 | [0.34.1](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.1) | 2026-11-26 | Guests of several notebooks stay connected; dialogs with long notes scroll |
 | [0.34.0](https://github.com/DiscoveryFox/n0te/releases/tag/v0.34.0) | 2026-11-25 | Export single pages and side pages; huge pages stay smooth; n0te Tablet gets the ruler, insert space, writing magnifier, scribble to delete, "+" and boards; pairing with the webcam |
